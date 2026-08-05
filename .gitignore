@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# CodeGraph index
+.codegraph/
+
+# Checkpoints / logs / cache
+*.pt
+*.pth
+*.safetensors
+*.bin
+runs/
+logs/
+checkpoints/
+
+# HuggingFace cache
+.cache/
