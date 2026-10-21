@@ -15,7 +15,7 @@ class MiniLLM(PreTrainedModel):
         super().__init__(config)
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)])
-        self.norm = RMSNorm(config.n_embd)
+        self.norm = RMSNorm(config.n_embd, config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
         self.post_init()
@@ -41,12 +41,12 @@ class MiniLLM(PreTrainedModel):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
-    def forward(self, tokens, targets=None, attention_mask=None):
+    def forward(self, tokens, targets=None, attention_mask=None, past_keys_values=None):
         B, T = tokens.shape
         x = self.token_embedding(tokens)
 
-        for layer in self.layers:
-            x = layer(x, attention_mask)
+        for idx, layer in enumerate(self.layers):
+            x = layer(x, attention_mask, idx, past_keys_values)
 
         x = self.norm(x)
         logits = self.lm_head(x)
@@ -56,13 +56,13 @@ class MiniLLM(PreTrainedModel):
             # 使用mask实现loss过滤，但是更加适合生成环境的方法是使用label pad的-100来mask loss
             # 这里处于学习目的
             if attention_mask is not None:
-                per_loss = F.cross_entropy(
-                    logits.view(-1, self.config.vocab_size),
-                    targets.view(-1),
-                    reduction="none"
-                )
                 loss_mask = attention_mask.view(-1).float()
                 if (val_loss := loss_mask.sum()) > 0:
+                    per_loss = F.cross_entropy(
+                        logits.view(-1, self.config.vocab_size),
+                        targets.view(-1),
+                        reduction="none"
+                    )
                     loss = (per_loss * loss_mask).sum()/val_loss 
                 else:
                     # 全掩行

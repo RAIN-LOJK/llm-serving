@@ -7,7 +7,7 @@ class MiniLLMConfig(PretrainedConfig):
     def __init__(
         self,
         vocab_size=256,
-        block_size=64,
+        max_position_embeddings=256,
         n_embd=128,
         n_head=4,
         n_kv_head=4,
@@ -21,7 +21,7 @@ class MiniLLMConfig(PretrainedConfig):
     ):
         super().__init__(**kwargs)
         self.vocab_size = vocab_size
-        self.block_size = block_size
+        self.max_position_embeddings = max_position_embeddings
         self.n_embd = n_embd
         self.n_head = n_head
         self.n_kv_head = n_kv_head

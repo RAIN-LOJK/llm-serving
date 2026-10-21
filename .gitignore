@@ -27,5 +27,8 @@ logs/
 checkpoints/
 weights/
 
+# Raw corpora (code lives in data/, downloaded data lives in dataset/)
+datasets/
+
 # HuggingFace cache
 .cache/

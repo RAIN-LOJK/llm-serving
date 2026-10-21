@@ -1,0 +1,35 @@
+[data]
+tokenizer_path = "datasets/luxun/tokenizer.json"
+train_dir = "datasets/luxun/train"
+val_dir = "datasets/luxun/val"
+block_size = 256
+
+[model]
+n_embd = 128
+n_head = 4
+n_kv_head = 4        # = n_head 时 MHA；调小即 GQA/MQA 实验
+n_layer = 4
+n_inner = 0          # 0 = 默认 n_embd*4（toml 无 None，用 0 约定）
+dropout = 0.0
+bias = false
+norm_eps = 1e-5
+tie_word_embeddings = true
+
+[train]
+batch_size = 32
+max_iters = 1200
+warmup_steps = 50
+lr = 3e-3
+min_lr = 1e-4
+accum_steps = 1
+max_norm = 1.0        # 梯度裁剪上限；0 = 关闭裁剪（LLM 常用 1.0，其他任务可按需关）
+log_interval = 50
+eval_interval = 200
+seed = 0
+
+[weight]
+directory = "weights"
+name = "minillm.pth"
+resume = false
+resume_name = "resume.pt"
+resume_interval = 500

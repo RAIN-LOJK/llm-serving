@@ -1,0 +1,77 @@
+{
+  "meta": {
+    "experiment": "exp005",
+    "name": "fw",
+    "config": "config/fw.toml"
+  },
+  "Config": {
+    "data": {
+      "tokenizer_path": "datasets/fineweb_cn/tokenizer.json",
+      "train_dir": "datasets/fineweb_cn/train",
+      "val_dir": "datasets/fineweb_cn/val",
+      "block_size": 512
+    },
+    "model": {
+      "n_embd": 128,
+      "n_head": 4,
+      "n_kv_head": 4,
+      "n_layer": 4,
+      "n_inner": null,
+      "dropout": 0.0,
+      "bias": false,
+      "norm_eps": 1e-05,
+      "tie_word_embeddings": true
+    },
+    "train": {
+      "batch_size": 32,
+      "max_iters": 3000,
+      "warmup_steps": 150,
+      "lr": 0.003,
+      "min_lr": 0.0001,
+      "accum_steps": 1,
+      "max_norm": 1.0,
+      "log_interval": 50,
+      "eval_interval": 200,
+      "seed": 0
+    },
+    "weight": {
+      "directory": "weights",
+      "name": "minillm.pth",
+      "resume": false,
+      "resume_name": "resume.pt",
+      "resume_interval": 200
+    }
+  },
+  "MiniLLMConfig": {
+    "transformers_version": "5.14.1",
+    "architectures": null,
+    "output_hidden_states": false,
+    "return_dict": true,
+    "dtype": null,
+    "chunk_size_feed_forward": 0,
+    "is_encoder_decoder": false,
+    "id2label": {
+      "0": "LABEL_0",
+      "1": "LABEL_1"
+    },
+    "label2id": {
+      "LABEL_0": 0,
+      "LABEL_1": 1
+    },
+    "problem_type": null,
+    "_name_or_path": "",
+    "vocab_size": 16384,
+    "max_position_embeddings": 512,
+    "n_embd": 128,
+    "n_head": 4,
+    "n_kv_head": 4,
+    "n_layer": 4,
+    "n_inner": null,
+    "dropout": 0.0,
+    "bias": false,
+    "norm_eps": 1e-05,
+    "tie_word_embeddings": true,
+    "model_type": "minillm",
+    "output_attentions": false
+  }
+}

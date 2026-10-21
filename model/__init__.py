@@ -1,4 +1,5 @@
 from model.config import MiniLLMConfig
-from model.model import MiniLLM
+from model.minillm import MiniLLM
+from model.layers import KVcache
 
-__all__ = ["MiniLLM", "MiniLLMConfig"]
+__all__ = ["MiniLLM", "MiniLLMConfig", "KVcache"]

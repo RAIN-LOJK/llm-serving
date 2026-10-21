@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from typing import Optional
 from model.config import MiniLLMConfig
 
 
@@ -29,7 +30,12 @@ def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
 
 def apply_rotary_emb(x: torch.Tensor, cos, sin):
     """
-    对 Q 或 K 施加旋转位置编码
+    对 Q 或 K 施加旋转位置编码（GPT-NeoX / HF 约定）
+
+    约定说明: head_dim 维拆成"前一半 x1 + 后一半 x2"配对旋转 (k, k+head_dim//2)。
+    这是 HF LLaMA / TinyLlama 使用的排列 (rotate_half)。
+    另一种 interleaved 约定按 (2k, 2k+1) 配对，两者差一个固定维度置换，
+    与同一组权重不兼容——本项目统一用 GPT-NeoX。
 
     x:   shape (B, T, n_head, head_dim)
     cos: shape (T, head_dim // 2)
@@ -38,15 +44,41 @@ def apply_rotary_emb(x: torch.Tensor, cos, sin):
     返回:
         shape (B, T, n_head, head_dim)
     """
-    B, T, n_head, head_dim = x.shape
-    x = x.view(B, T, n_head, head_dim//2, 2)
-    x0, x1 = x[..., 0], x[..., 1]
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
     sin = sin.unsqueeze(0).unsqueeze(2)
     cos = cos.unsqueeze(0).unsqueeze(2)
-    out0, out1 = x0 * cos - x1 * sin, x0 * sin + x1 * cos
-    out = torch.stack([out0, out1], -1).view(B, T, n_head, -1)
+    out0 = x1 * cos - x2 * sin
+    out1 = x1 * sin + x2 * cos
+    return torch.cat([out0, out1], dim=-1)
 
-    return out
+
+# ============================================================
+# KVcache
+# ============================================================
+class KVcache:
+    """
+    按层缓存注意力历史。kvs[l] = (k, v)，是该层"过去所有 token"的 K/V。
+    - k/v 形状: (B, n_kv_head, past_len, head_dim)   # GQA 展开之前
+    - 各层 past_len 相同，从第 0 层推导即可
+    """
+    def __init__(self, n_layer: int):
+        self.kvs = [None] * n_layer
+
+    def get_kv(self, idx: int):
+        kv = self.kvs[idx]
+        return (None, None) if kv is None else kv
+
+    def set_kv(self, idx: int, kv: tuple[torch.Tensor, torch.Tensor]):
+        self.kvs[idx] = kv
+
+    def past_len(self, idx) -> int:
+        kv = self.kvs[idx]
+        return 0 if kv is None else kv[0].shape[2]
+
+    def cull(self, keep_idx):
+        """批量推理：只保留 batch 中 keep_idx 这些行（EOS 后用）"""
+        self.kvs = [None if kv is None else (kv[0][keep_idx], kv[1][keep_idx]) for kv in self.kvs]
 
 
 # ============================================================
@@ -69,27 +101,32 @@ class Attention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
 
         # 预计算 RoPE
-        sin, cos = precompute_rope_freqs(self.head_dim, config.block_size)
+        sin, cos = precompute_rope_freqs(self.head_dim, config.max_position_embeddings)
         self.register_buffer("sin", sin, persistent=False)
         self.register_buffer("cos", cos, persistent=False)
 
-    def forward(self, x, attention_mask=None):
+    def forward(self, x, attention_mask=None, idx = 0, past_keys_values:Optional[KVcache]=None):
         B, T, C = x.shape  # (batch, seq_len, n_embd)
+        past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
 
         # 1. Q/K/V 投影并 reshape 为多头形状
         q = self.q_proj(x).view(B, T, self.n_head, self.head_dim)
         k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim)
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim)
-
         # 2. 对 Q/K 施加 RoPE
-        cos, sin = self.cos[:T, :], self.sin[:T, :]
+        cos, sin = self.cos[past_len:past_len+T], self.sin[past_len:past_len+T]
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
-
         # 3. 转置为 (B, n_head, T, head_dim) 方便矩阵乘法
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
+        if past_keys_values is not None:
+            past_k, past_v = past_keys_values.get_kv(idx)
+            if past_k is not None:
+                k = torch.cat((past_k, k), 2)
+                v = torch.cat((past_v, v), 2)
+            past_keys_values.set_kv(idx, (k, v))
 
         # 4. GQA: 如果 n_kv_head < n_head，重复 K/V 的头
         if self.n_kv_head != self.n_head:
@@ -101,7 +138,7 @@ class Attention(nn.Module):
         attn = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
 
         # 6. 因果掩码: 上三角设为 -inf
-        mask = torch.triu(torch.full((T, T), float('-inf'), device=x.device), diagonal=1)
+        mask = torch.triu(torch.full((T, past_len+T), float('-inf'), device=x.device), diagonal=past_len+1)
         # 输入掩码
         if attention_mask is not None:
             pad = torch.where(attention_mask.unsqueeze(1).unsqueeze(2) == 0, -torch.inf, 0.0)
@@ -145,7 +182,7 @@ class MLP(nn.Module):
 # ============================================================
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim, eps = 1e-6):
+    def __init__(self, dim, eps = 1e-5):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
@@ -162,12 +199,12 @@ class RMSNorm(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, config: MiniLLMConfig):
         super().__init__()
-        self.input_layernorm = RMSNorm(config.n_embd)
+        self.input_layernorm = RMSNorm(config.n_embd, config.norm_eps)
         self.self_attn = Attention(config)
-        self.post_attention_layernorm = RMSNorm(config.n_embd)
+        self.post_attention_layernorm = RMSNorm(config.n_embd, config.norm_eps)
         self.mlp = MLP(config)
 
-    def forward(self, x, attention_mask=None):
-        x = x + self.self_attn(self.input_layernorm(x), attention_mask)
+    def forward(self, x, attention_mask=None, idx=0, past_keys_values=None):
+        x = x + self.self_attn(self.input_layernorm(x), attention_mask, idx, past_keys_values)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x
