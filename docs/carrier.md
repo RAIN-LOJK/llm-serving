@@ -56,6 +56,8 @@
 | 8k | 待填 | 待填 | | | |
 | 32k | 待填 / OOM | 待填 / OOM | | | |
 
+> 实测（本机 CPU，text-only）：权重 0.6B = 1136.9 MiB，0.8B = 1435.1 MiB；0.8B 不加载视觉塔/MTP。
+>
 > 字段来自 `bench/engines/hf.py` 对 `past_key_values` 的直接计数（`kv_mb / state_mb / conv_mb`），
 > 与设备无关；所以即使 `W0-0001` 只在 `dev-mps` 上跑，P1/P2 的字节比仍然可引用，
 > 延迟结论只作趋势。

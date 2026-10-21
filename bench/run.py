@@ -412,6 +412,9 @@ def _execute(
             manifest["device_class"] = _device_class_for(engine.device, snapshot)
             manifest["engine"]["resolved_device"] = engine.device
             manifest["engine"]["vocab_size"] = int(getattr(engine, "vocab_size", 0))
+            manifest["engine"]["attn_implementation"] = getattr(
+                engine, "attn_implementation", None
+            )
 
             cases = list(_cases_for_model(cfg, engine, prompt_set))
             if limit is not None:

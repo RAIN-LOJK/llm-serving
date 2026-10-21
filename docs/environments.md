@@ -67,6 +67,40 @@ torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/hugging
 
 > 远程机器只跑，不手改结果；结论在本地/评审时写。
 
+### 4.1 4090 启动清单（W0）
+
+```bash
+# 0) 代码必须是已提交的 commit（run 契约要求干净树）
+git clone <repo> && cd minillm && git checkout <commit>
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python scripts/env_snapshot.py | grep -E "cuda_available|cuda_devices|memory_gb"
+
+# 1) 权重（直连 huggingface.co 不通时加镜像；revision 必须与 config 一致）
+export HF_ENDPOINT=https://hf-mirror.com          # 可选
+.venv/bin/hf download Qwen/Qwen3-0.6B --revision c1899de289a04d12100db370d81485cdf75e47ca
+.venv/bin/hf download Qwen/Qwen3.5-0.8B --revision 2fc06364715b967f1860aea9cf38778875588b17
+
+# 2) 冒烟（只跑 512/2k；不写 results/）
+.venv/bin/python -m bench.run \
+  --config configs/experiments/W0/0001-carrier-probe.toml \
+  --out /tmp/minillm-w0-smoke --limit 2 --allow-dirty
+
+# 3) 正式 W0-0001（warmup=3 / repeats=5 / 32k）
+.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+```
+
+口径与预期（2026-10-21 的代码状态）：
+
+- prefill 只保留 **1 个位置的 logits**（`logits_to_keep=1`）；32k 时省下 9.3 GiB（0.6B）
+  / 15.2 GiB（0.8B）。冒烟若看到 `logits_to_keep` 相关报错，说明模型 forward 不认这个参数，
+  不要退回全量 logits。
+- 0.8B 只加载 **text decoder**（`text_config`），视觉塔与 MTP 头不进显存；text-only 权重
+  实测 1435 MiB（0.6B 为 1137 MiB）。
+- 32k 时 cache 上限：0.6B ≈ 3.5 GiB（KV），0.8B ≈ 0.4 GiB（KV + 18 MiB 状态），均能进 24 GB。
+- 未安装 `flash-linear-attention` / `causal-conv1d` 时，Qwen3.5 的 delta rule 走 torch 回退，
+  prefill 会慢一些；这是**已知限制**，写进 `notes.md`，不要当成架构结论。
+
 ---
 
 ## 5. 环境快照
