@@ -1,90 +1,47 @@
-# AGENTS.md · 协作约定
+## 项目定位
 
-本文件是 agent 在本仓库工作的唯一入口约定。`CLAUDE.md` 只是指向本文件的指针。
+- 单卡 serving 引擎实验，**不训练模型、不提交权重**。真实载体：`Qwen/Qwen3-0.6B`（纯注意力骨架）与 `Qwen/Qwen3.5-0.8B`（3:1 混合注意力目标）。
+- `ROADMAP.md` 是 W0–W8 阶段、判据与测量协议的唯一权威；与 `docs/` 冲突时以 ROADMAP 为准并修文档。先读 `ROADMAP.md` 再动阶段目标。
+- 当前是可执行骨架：runner、run 契约、玩具模型和三组回归已就位；`serve/` 只有模块边界，W0 探测是下一步。
+- 训练主线已删除。git tag `legacy-learning-2026-08` 只用于考古，旧代码不是可运行入口。
 
-## 项目是什么
-
-minillm 是一个**不训练模型**的单卡 serving 引擎项目：手写 PyTorch 解码器 + 请求级调度 +
-分页 KV + 混合注意力（Gated DeltaNet）状态管理。技术主计划见 [ROADMAP.md](ROADMAP.md)。
-
-目标不是「跑得比 vLLM 快」，而是给出**收益边界**：什么规模、什么上下文、什么 batch 下，
-连续批处理 / 分页 KV / 双状态管理才值得做。
-
-## 三条铁律
-
-1. **测试先行，再动结构。** `tests/` 是规格。每步重构前先让护栏变绿，改完立刻重跑；
-   回归红了不许进下一步。`PITFALLS.md` 每条坑必须有对应测试（未覆盖标 `OPEN`）。
-2. **判据优先于数字。** 每个机制必须回答「**什么时候不划算**」；只报「快了多少」视为未完成。
-3. **所有阈值是目标值与判失败线，不是实测结果。** W1 基线跑完后校准一次，写进
-   `configs/thresholds.toml` 与 `ROADMAP.md` §13。
-
-## 用户偏好
-
-- **交互式、逐步推进**：不要一次批量改多个文件而不同步；每步先讲原理再实现。
-- **核心算子由用户手写**：attention / 线性注意力 / 引擎关键路径由用户实现；agent 负责
-  骨架、测试、测量、文档、review。用户写出问题后 agent 做 review 和 debug。
-- **正式实验由用户执行**：agent 给命令、给配置、给数据结论，不代跑长 benchmark。
-  agent 可以跑快速 pytest、dry-run、几分钟内的 smoke，并在结果里标注 `operator: agent`。
-- **有获得感优先**：不要为了「快」把用户的学习环节全部代劳。
-
-## 实验工作流
-
-1. 写/改 `configs/experiments/<stage>/<id>-<slug>.toml`。
-2. 用户执行：
-   ```bash
-   .venv/bin/python -m bench.run --config <config>
-   ```
-3. runner 生成 `results/<stage>/<seq>-<slug>/`（manifest / env / metrics / summary /
-   notes / verdict / reproduce.sh）。
-4. 人看 `summary.json`，在 `notes.md` 写观察与结论，在 `verdict.json` 填
-   `pass | fail | inconclusive`；agent 可以起草，但不能替用户定稿。
-5. `scripts/exp_index.py` 重新生成 `results/INDEX.md`。
-6. 若触发阶段决策，写 `docs/decisions.md` 并回填 `ROADMAP.md` §12。
-
-**禁止**：
-- 不覆盖、不复用 run id；失败/作废也保留。
-- 不手改 `results/INDEX.md`（它是生成物）。
-- 不在 run 完成后改 `manifest.json`。
-- 不把 `verdict` 自动填成 `pass`；没有人的判断就保持 `unreviewed`。
-- 不把 HF 与自实现的绝对值混在一张表里；比值可以，绝对值分表。
-- 不把 M1 数字写成 4090 数字；设备是结果的一等字段。
-- 不提交权重、数据集、HF cache；不重新引入训练线。
-
-## 目录与命令
+## 命令（一律用仓库内 `.venv/bin/python`）
 
 ```bash
-# 快速门禁
-.venv/bin/python -m pytest -m "not slow and not hf"
-
-# 全量（需要 HF 权重时）
-.venv/bin/python -m pytest
-
-# 环境快照
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest -m "not slow and not hf"        # 快速门禁，无 HF 权重/网络
+.venv/bin/python -m pytest tests/unit/test_kvcache.py -q    # 单文件
+MINILLM_RUN_HF=1 .venv/bin/python -m pytest tests/integration/test_hf_engine.py -q
 .venv/bin/python scripts/env_snapshot.py
-
-# 一个 run
-.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
-
-# 索引
-.venv/bin/python scripts/exp_index.py --check
-
-# 单个 pytest 文件 / 用例
-.venv/bin/python -m pytest tests/unit/test_kvcache.py -q
+.venv/bin/python scripts/exp_index.py --check               # 校验 run 契约
+.venv/bin/python bench/make_prompts.py --check              # 校验固定 prompt 集
+.venv/bin/python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
+  --out /tmp/minillm-smoke --allow-dirty                     # smoke 不写 results/
 ```
 
-目录职责见 [README.md](README.md)；实验契约见 [docs/experiments.md](docs/experiments.md)；
-环境口径见 [docs/environments.md](docs/environments.md)。
+- 没有配置 lint / formatter / typecheck / CI；pytest 是唯一门禁，不要声称其他检查已配置。
+- HF 集成测试即使显式指定文件也会被 skip，必须同时设 `MINILLM_RUN_HF=1`。
 
-## 当前阶段
+## 结构
 
-- W0 尚未开跑；下一步是 `scripts/probe_checkpoint.py` + `scripts/probe_memory.py`。
-- 现有 runner 是骨架：`impl = "dummy"` 可跑通契约；`impl = "hf"` 的最小 HF 引擎已存在，
-  W0 在其上补 Qwen3.5 的加载分支与显存/延迟分项。
-- 测试快速门禁必须始终绿；`slow` / `hf` / `gpu` 标记的测试不在快速门禁里。
+- `bench/run.py`：`python -m bench.run` 的入口，负责配置校验、provenance、指标聚合、run 目录与索引。`bench/engines/build_engine` 目前只实现 `dummy` 和 `hf`；`minillm/continuous/paged/hybrid` 会按阶段抛 `NotImplementedError`，不要静默回退。
+- `serve/`：只固定 `engine/scheduler/block_manager/state_pool` 边界。调度/缓存逻辑写这里，不要塞回 `llm_utils/`。
+- `model/`：手写玩具 MiniLLM（GPT-NeoX RoPE、GQA、KVcache）；`llm_utils/inference.py` 是过渡版批量 generate，S2 后由 `serve/engine.py` 接管。
+- `bench/engines/hf.py` 只处理 text-only causal LM；Qwen3.5 的多模态 wrapper 需要显式抽取 text model。
 
-## 代码风格
+## 实验与结果约定
 
-- Python 3.12+，类型标注适度；不要为了类型而类型。
-- 新增模块先写 docstring：它回答什么问题、输入输出边界、失败时怎么表现。
-- 注释只写「为什么」，不写「这行在做什么」。
-- 任何数值结论必须带：设备、dtype、commit、模型 revision、重复次数、聚合方式。
+- run 目录不可变：`results/<stage>/<4位序号>-<slug>/`，`run_id` 形如 `W0-0001`。目录或 id 已存在时 runner 直接拒绝；失败/中断的 run 也保留，用 `supersedes` 指回旧 run。
+- 非 `smoke` 的正式 run 要求 git 干净；dirty 只能用 `--allow-dirty` 做 exploratory，报告不得引用。正式探测前 pin HF `revision` 为 commit hash，`main` 会被配置校验拒绝。
+- `arrival = "poisson"`（W3）和 `timer = "cuda_event"`（W2）尚未接线，配置校验会直接报错，不要伪造。
+- `results/INDEX.md` 和 `index.csv` 由 `scripts/exp_index.py` 生成，**不要手改**。
+- `notes.md` / `verdict.json` 是人的判断。agent 可以起草，但 `reviewer` 保持 `null`、`verdict` 保持 `unreviewed`，直到用户确认。
+- `configs/thresholds.toml` 的值是目标值/判失败线，不是实测结果。M1（`dev-mps`）只做正确性/冒烟/趋势；正式数字只来自 `measure-cuda`（4090），两套数字永不同表。
+- `bench/prompts.json` 是冻结的 32 条 prompt 集（文本而非 token id）。改动必须 bump version 并用 `bench/make_prompts.py` 重生成；prompt hash 变化会使跨 run 比较失效。
+- 关键命令交给用户来跑
+
+## 测试与实现纪律
+
+- `tests/` 是规格：修 bug 或重构前先补/跑回归，快速门禁必须保持绿。`PITFALLS.md` 把已知坑映射到测试，动相关代码前先读。
+- 加载 HF 权重时保持既有约定：RoPE 用 GPT-NeoX（P-02），RMSNorm 必须显式接 `norm_eps`（P-03）。
+- golden 只由脚本生成并经 review 提交，测试只读；不要静默重生成 `tests/golden/`。
