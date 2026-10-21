@@ -1,6 +1,6 @@
 # minillm · 推理引擎路线图（W0–W8）
 
-> **本文件是 W0–W8 的唯一权威来源**。`todo.md` 的 A–E 是学习主线，本文件是其中的 **D5 提前 + 扩写**。
+> **本文件是 W0–W8 的唯一权威来源**。历史学习主线（A–E）已归档，见 `docs/history.md` 与 git tag `legacy-learning-2026-08`；本文件是其中 D5 的独立扩写。
 >
 > **一句话**：把 minillm 从「玩具解码器」变成「**能同时装下 KV cache 和线性注意力状态的单卡 serving 引擎**」，
 > 用同一套调度器测两代架构（Qwen3 全注意力 / Qwen3.5 混合注意力），给出「什么规模、什么上下文下
@@ -15,7 +15,7 @@
 1. **测试先行，再动结构。** `tests/` 是规格。每步重构前先让护栏变绿，改完立刻重跑；回归红了不许进下一步
    （`PITFALLS.md` 里那十几条坑，**重写前必须逐条变成测试**，否则等于交学费重读一遍）。
 2. **判据优先于数字。** 每个机制必须回答"**什么时候不划算**"；只报"快了多少"视为未完成。
-3. **所有阈值是目标值与判失败线，不是实测结果。** W1 基线跑完后校准一次，写进 §13。
+3. **所有阈值是目标值与判失败线，不是实测结果。** W1 基线跑完后校准一次，写进 `configs/thresholds.toml`（并在 §13 记一笔）。
 
 ---
 
@@ -91,8 +91,9 @@
 |---|---|
 | 手写 RoPE / GQA / KV cache / SwiGLU / RMSNorm | `model/layers.py` |
 | 采样、批量左 pad + EOS 提前退出 | `llm_utils/inference.py` |
-| KV cache 一致性 / 左 pad / EOS 三个回归 + 加速比基准 | `tests/` |
-| 训练管线、exp 台账、评估协议 | `train.py`、`eval.py`、`result.md` |
+| KV cache 一致性 / 左 pad / EOS / RoPE / 采样回归 | `tests/unit/`（pytest，快速门禁） |
+| 实验工程纪律（自包含目录、config 快照、git 状态、人工结论） | `docs/experiments.md`；训练实现已归档，不复用 |
+| run 契约 + runner + 生成索引 | `bench/run.py`、`scripts/exp_index.py` |
 | 12+ 条已踩过的坑 | `PITFALLS.md` |
 
 | 缺（本项目要补） | 阶段 |
@@ -104,6 +105,8 @@
 | 混合架构（5 类算子） | W5–W6 |
 | **双状态管理**（KV 块 + 循环状态池） | W7 |
 | 跨代对照测量 | W7–W8 |
+
+> 实验契约（run 目录 / 配置 / 评审 / 索引）见 `docs/experiments.md`；它是操作手册，§6 仍是测量口径的权威来源。
 
 ---
 
@@ -136,7 +139,7 @@
 | P2 | 短上下文（≤512）混合架构**反而更贵**（固定状态开销） | 报告里最漂亮的一张交叉图 |
 | P3 | decode 延迟随上下文几乎**不增长**（线性层无 KV 读取） | 长上下文服务范式变化 |
 
-### 3.3 决策点 D1
+### 3.3 决策点 D1（记录：`docs/decisions.md`）
 
 - P1 成立（≥3×）→ **W5–W7 投入移植**，主线按 §5 走
 - P1 不成立（<2×）→ 砍掉移植，Qwen3.5 只作 HF 侧对照，主线改纯注意力引擎
@@ -153,7 +156,7 @@
 
 | 步 | 动作 | 护栏（必须保持绿） | 动哪些文件 |
 |---|---|---|---|
-| S0 | 冻结规格：现有 4 个 test + golden 对拍 | 全绿 | `tests/` 只增不改 |
+| S0 | 冻结规格：现有 pytest 快速门禁 + golden 对拍 | 全绿 | `tests/` 只增不改 |
 | S1 | 真实权重加载（Qwen3-0.6B）+ 对齐 | 贪心 64 token 全等 | `scripts/`、`model/` |
 | S2 | 抽出 `Engine` 接口（仍单请求） | 与 S1 逐 token 一致 | `serve/engine.py` |
 | S3 | `Scheduler` 连续批 | 批内每个请求 == 单独跑 | `serve/scheduler.py` |
@@ -234,9 +237,10 @@
 | 重复 | 5 次，报中位数 + p95 |
 | prompt 集 | 32 条，长度桶固定，落盘 `bench/prompts.json` |
 | 生成 | greedy，`max_new_tokens=128` |
-| 计时 | `torch.cuda.Event` + `synchronize()`；TTFT 含排队 |
-| 显存 | `max_memory_allocated()` + `nvidia-smi` 采样，区分权重 / KV / 线性状态 / 激活 |
+| 计时 | CUDA：`torch.cuda.Event` + `synchronize()`；MPS：`perf_counter` + `torch.mps.synchronize()`；TTFT 含排队 |
+| 显存 | CUDA：`max_memory_allocated()` + `nvidia-smi` 采样；MPS：`driver_allocated_memory()`；区分权重 / KV / 线性状态 / 激活 |
 | 环境 | GPU、驱动、torch/CUDA、transformers 版本、git commit 写进结果行 |
+| 设备 | `dev-mps`（M1：正确性/冒烟）与 `measure-cuda`（4090：正式数字）分表；**不跨设备比较** |
 | 方差 | 同进程同顺序；跨配置重开进程 |
 | 口径 | **HF 与自实现数字不混用**：比值可以，绝对值分开报 |
 
@@ -303,51 +307,59 @@
 
 ## 11. 目录与命令
 
-```
+```text
 minillm/
 ├── model/            # layers.py（+输出门控/partial-RoPE）、linear_attn.py（新增）
-├── llm_utils/        # inference.py（S2 后由 serve/engine.py 接管）
-├── tests/            # golden/ + 等价性 + 自洽性测试
+├── llm_utils/        # inference.py（过渡；S2 后由 serve/engine.py 接管）
 ├── serve/            # engine / scheduler / block_manager / state_pool
-├── bench/            # loadgen / metrics / prompts.json
-├── scripts/          # probe_checkpoint / probe_memory / make_golden / align_hf
-├── results/          # csv + 图
-├── docs/             # carrier.md / hybrid_attention.md
-├── reports/          # 报告与判据矩阵
+├── bench/            # run / metrics / loadgen / prompts.json
+├── configs/          # experiments/ + thresholds.toml
+├── scripts/          # env_snapshot / exp_index / probe_* / make_golden / align_hf
+├── tests/            # unit/ + integration/ + golden/
+├── results/          # W0..W8/NNNN-slug/（run 目录）+ INDEX.md
+├── docs/             # experiments / decisions / environments / carrier / hybrid_attention
+├── reports/
+├── archive/          # 仅 README 指向 legacy tag
+├── README.md
+├── AGENTS.md
 ├── PITFALLS.md
-└── ROADMAP.md
+├── ROADMAP.md
+└── requirements*.txt / pytest.ini
 ```
 
 ```bash
-# W0 探测（不写代码，先看数据）
-.venv/bin/python scripts/probe_memory.py --models Qwen/Qwen3-0.6B Qwen/Qwen3.5-0.8B
+# 快速门禁（不需要 HF 权重）
+.venv/bin/python -m pytest -m "not slow and not hf"
 
-# 对齐
-.venv/bin/python scripts/align_hf.py --model Qwen/Qwen3-0.6B
+# 环境快照
+.venv/bin/python scripts/env_snapshot.py
 
-# 回归（改 layers 后必跑）
-for t in tests/check_*.py; do .venv/bin/python "$t"; done
+# 一个 run（W0 示例；正式跑前 pin revision）
+.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 
-# 基准
-.venv/bin/python -m bench.loadgen --model Qwen/Qwen3.5-0.8B --batch continuous --paged
+# 索引
+.venv/bin/python scripts/exp_index.py
+.venv/bin/python scripts/exp_index.py --check
 ```
 
 ---
 
 ## 12. 进度
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| W0 | 双载体探测 + D1 决策 | ⬜ |
-| W1 | Qwen3-0.6B 对齐 + golden | ⬜ |
-| W2 | 基准框架 | ⬜ |
-| W3 | 连续批处理 | ⬜ |
-| W4 | 分页 KV | ⬜ |
-| W5 | 混合层（一）：全注意力层改造 | ⬜ |
-| W6 | 混合层（二）：Gated DeltaNet | ⬜ |
-| W7 | 双状态管理 + 跨代对照 | ⬜ |
-| W8 | 报告与判据矩阵 | ⬜ |
-| W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ |
+| 阶段 | 内容 | 状态 | 证据 run |
+|---|---|---|---|
+| W0 | 双载体探测 + D1 决策 | ⬜ | — |
+| W1 | Qwen3-0.6B 对齐 + golden | ⬜ | — |
+| W2 | 基准框架 | ⬜ | — |
+| W3 | 连续批处理 | ⬜ | — |
+| W4 | 分页 KV | ⬜ | — |
+| W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
+| W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
+| W7 | 双状态管理 + 跨代对照 | ⬜ | — |
+| W8 | 报告与判据矩阵 | ⬜ | — |
+| W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
+
+> `results/INDEX.md` 是全部 run 的索引；阶段结束时把证据 run id 回填到本表。
 
 ---
 
@@ -357,3 +369,4 @@ for t in tests/check_*.py; do .venv/bin/python "$t"; done
 |---|---|---|
 | 2026-10-21 | v1 | 初稿：误以为 Qwen3.5 最小 27B，把混合注意力放到 W7 做对照 |
 | 2026-10-21 | v2 | **更正**：Qwen3.5 有 0.8B/2B/4B/9B，但全系 3:1 混合 → 改为「骨架载体 + 目标载体」双轨；W0 先测后实现（D1 决策点）；删除投机解码，量化降为可选 |
+| 2026-10-21 | v3 | **项目重组**：旧训练线删除（文本快照 tag `legacy-learning-2026-08`）；实验契约改为不可变 run 目录 + 生成索引（`docs/experiments.md`）；测试改 pytest 自包含护栏；设备分层 `dev-mps` / `measure-cuda`；W0 双载体 revision 已 pin |

@@ -2,13 +2,15 @@
 __pycache__/
 *.py[cod]
 *$py.class
+.pytest_cache/
+.ruff_cache/
 
 # Virtual env
 .venv/
 venv/
 env/
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
 *.swp
@@ -17,18 +19,22 @@ env/
 # CodeGraph index
 .codegraph/
 
-# Checkpoints / logs / cache
+# Model weights / checkpoints (never commit)
 *.pt
 *.pth
 *.safetensors
 *.bin
+weights/
+checkpoints/
 runs/
 logs/
-checkpoints/
-weights/
 
-# Raw corpora (code lives in data/, downloaded data lives in dataset/)
+# Datasets and HF cache
 datasets/
-
-# HuggingFace cache
 .cache/
+
+# Legacy archive payloads (only the README/pointer belongs in the tree)
+archive/legacy-*/
+
+# Golden fixtures are small .npz files and MUST be tracked.
+!tests/golden/**/*.npz

@@ -1,6 +1,8 @@
-torch
-transformers
-datasets
-wandb
-tqdm
-matplotlib
+# Runtime dependencies for the serving-engine project.
+# Exact versions used by a run are recorded in each run's env.json.
+torch>=2.5
+transformers>=5.0
+tokenizers>=0.22
+safetensors>=0.4
+numpy>=2.0
+matplotlib>=3.8

@@ -1,0 +1,40 @@
+# Central thresholds. Target values live here, not in code or markdown.
+# status = "target": from ROADMAP, not yet measured. status = "calibrated": set after W1.
+# An experiment references these by name in [accept].criteria; the runner records the
+# resolved values in its manifest/summary.
+
+schema = 1
+updated = "2026-10-21"
+note = "Targets and failure lines from ROADMAP §6/§8. Calibrate once after W1 and record basis_run."
+
+[W1.align]
+status = "target"
+basis_run = ""
+greedy_tokens_exact = 64
+layer_max_abs_diff = 1e-3
+logits_max_abs_diff = 0.05
+batch_sizes = [1, 2, 4]
+
+[W2.bench]
+status = "target"
+basis_run = ""
+ttft_cv_max = 0.10
+memory_match_ratio = 0.90
+decode_speed_vs_hf_min = 0.80
+
+[W3.continuous]
+status = "target"
+basis_run = ""
+throughput_speedup_min = 1.30
+ttft_p99_decomposed = true
+
+[W4.paged]
+status = "target"
+basis_run = ""
+max_concurrency_speedup_min = 1.50
+fragmentation_max = 0.05
+
+[W7.state]
+status = "target"
+basis_run = ""
+state_estimate_error_max = 0.20

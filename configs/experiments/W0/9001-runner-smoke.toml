@@ -1,0 +1,41 @@
+# Runner smoke: no model, no HF download. Validates the run contract end to end.
+# Use a temp out root so this never looks like evidence:
+#   .venv/bin/python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
+#     --out /tmp/minillm-smoke --allow-dirty
+
+schema = 1
+
+[exp]
+id = "W0-9001"
+stage = "W0"
+type = "smoke"
+slug = "runner-smoke"
+title = "runner 契约冒烟（dummy，不是证据）"
+hypothesis = []
+seed = 0
+
+[[models]]
+name = "dummy"
+
+[workload]
+kind = "synthetic"
+context_lengths = [8, 16]
+max_new_tokens = 2
+batch_sizes = [1]
+arrival = "closed"
+
+[engine]
+impl = "dummy"
+device = "cpu"
+vocab_size = 1024
+seed = 0
+
+[measure]
+warmup = 1
+repeats = 2
+timer = "perf_counter"
+memory = ["torch_peak"]
+
+[accept]
+mode = "record_only"
+criteria = []

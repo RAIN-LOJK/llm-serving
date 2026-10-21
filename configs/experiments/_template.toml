@@ -1,0 +1,46 @@
+# Template for one experiment run. Copy to configs/experiments/<stage>/<id>-<slug>.toml.
+# Contract: docs/experiments.md. Runner: .venv/bin/python -m bench.run --config <this file>.
+
+schema = 1
+
+[exp]
+id = "W0-0001"                 # <stage>-<4-digit sequence>; immutable
+stage = "W0"
+type = "probe"                 # probe | microbench | scenario | smoke
+slug = "carrier-probe"         # directory name: results/W0/0001-carrier-probe
+title = "双载体：显存/延迟 vs 上下文"
+hypothesis = ["P1", "P2", "P3"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "PIN_A_COMMIT_HASH" # never "main"; record the HF commit
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"             # synthetic | prompts
+context_lengths = [512, 2048, 8192, 32768]
+max_new_tokens = 128
+batch_sizes = [1]
+# prompts = "bench/prompts.json"   # required when kind = "prompts"
+arrival = "closed"             # poisson is W3; closed-loop for now
+
+[engine]
+impl = "hf"                    # dummy | hf | minillm | continuous | paged | hybrid
+device = "auto"                # auto | cuda | mps | cpu
+max_batch = 1
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"                 # auto | perf_counter | cuda_event
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"           # record_only | threshold
+criteria = []
+
+# Optional paired baseline for microbench/scenario; required before claiming a speedup.
+# [baseline]
+# run_id = "W0-0002"
