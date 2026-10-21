@@ -451,6 +451,13 @@ def _execute(
                                 if result.peak_mem_mb is not None
                                 else metricsmod.peak_memory_mb(),
                                 "driver_mem_mb": metricsmod.driver_memory_mb(),
+                                "weights_mb": result.weights_mb,
+                                "kv_mb": result.kv_mb,
+                                "state_mb": result.state_mb,
+                                "conv_mb": result.conv_mb,
+                                "cache_mb": result.cache_mb,
+                                "cache_prefill_mb": result.cache_prefill_mb,
+                                "mem_delta_mb": result.mem_delta_mb,
                                 "ok": True,
                                 "error": None,
                             }
@@ -477,6 +484,13 @@ def _execute(
                                 "e2e_ms": metricsmod.elapsed_ms(start),
                                 "peak_mem_mb": metricsmod.peak_memory_mb(),
                                 "driver_mem_mb": metricsmod.driver_memory_mb(),
+                                "weights_mb": None,
+                                "kv_mb": None,
+                                "state_mb": None,
+                                "conv_mb": None,
+                                "cache_mb": None,
+                                "cache_prefill_mb": None,
+                                "mem_delta_mb": None,
                                 "ok": False,
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
@@ -499,7 +513,22 @@ def _summary(
     manifest: dict[str, Any],
     rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    metric_names = ("ttft_ms", "tpot_ms", "prefill_ms", "decode_ms", "e2e_ms", "peak_mem_mb", "driver_mem_mb")
+    metric_names = (
+        "ttft_ms",
+        "tpot_ms",
+        "prefill_ms",
+        "decode_ms",
+        "e2e_ms",
+        "peak_mem_mb",
+        "driver_mem_mb",
+        "weights_mb",
+        "kv_mb",
+        "state_mb",
+        "conv_mb",
+        "cache_mb",
+        "cache_prefill_mb",
+        "mem_delta_mb",
+    )
     overall = {name: metricsmod.summarize([r.get(name) for r in rows]) for name in metric_names}
 
     group_keys = sorted(

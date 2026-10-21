@@ -15,8 +15,9 @@ from typing import Any, Sequence
 
 import torch
 
+from bench.cache_usage import cache_usage_mb, model_bytes_mb
 from bench.engines.base import GenerationResult
-from bench.metrics import elapsed_ms, now, peak_memory_mb
+from bench.metrics import driver_memory_mb, elapsed_ms, now, peak_memory_mb
 
 _DTYPES = {
     "float32": torch.float32,
@@ -66,6 +67,8 @@ class HFEngine:
         self.model: Any = None
         self.tokenizer: Any = None
         self.eos_token_id: int | None = None
+        self.weights_mb: float | None = None
+        self._baseline_mem_mb: float | None = None
 
     def load(self) -> None:
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -97,6 +100,9 @@ class HFEngine:
             getattr(text_config or config, "vocab_size", self.tokenizer.vocab_size)
         )
         self.eos_token_id = getattr(config, "eos_token_id", None) or self.tokenizer.eos_token_id
+        self.weights_mb = model_bytes_mb(self.model)
+        # Baseline for "how much does one sequence add on top of the weights".
+        self._baseline_mem_mb = driver_memory_mb()
 
     def encode(self, text: str) -> list[int]:
         if self.tokenizer is None:
@@ -118,6 +124,7 @@ class HFEngine:
         past = out.past_key_values
         next_id = int(torch.argmax(out.logits[:, -1, :], dim=-1).item())
         prefill_end = now()
+        prefill_cache = cache_usage_mb(past)
         tokens = [next_id]
         decode_times: list[float] = []
         decode_start = now()
@@ -136,6 +143,13 @@ class HFEngine:
             decode_times.append(elapsed_ms(t0))
 
         decode_end = now()
+        final_cache = cache_usage_mb(past)
+        driver_now = driver_memory_mb()
+        mem_delta = (
+            driver_now - self._baseline_mem_mb
+            if driver_now is not None and self._baseline_mem_mb is not None
+            else None
+        )
         return GenerationResult(
             token_ids=tokens,
             ttft_ms=elapsed_ms(start, prefill_end),
@@ -143,6 +157,13 @@ class HFEngine:
             prefill_ms=elapsed_ms(start, prefill_end),
             decode_ms=elapsed_ms(decode_start, decode_end),
             peak_mem_mb=peak_memory_mb(),
+            weights_mb=self.weights_mb,
+            kv_mb=final_cache["kv_mb"],
+            state_mb=final_cache["state_mb"],
+            conv_mb=final_cache["conv_mb"],
+            cache_mb=final_cache["cache_mb"],
+            cache_prefill_mb=prefill_cache["cache_mb"],
+            mem_delta_mb=mem_delta,
             meta={
                 "impl": self.impl,
                 "model": self.name,
@@ -150,6 +171,8 @@ class HFEngine:
                 "dtype": self.dtype_name,
                 "device": self.device,
                 "transformers": __import__("transformers").__version__,
+                "cache_kv_mb": prefill_cache["kv_mb"],
+                "cache_state_mb": prefill_cache["state_mb"],
             },
         )
 

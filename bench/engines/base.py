@@ -14,6 +14,14 @@ class GenerationResult:
     prefill_ms: float | None = None
     decode_ms: float | None = None
     peak_mem_mb: float | None = None
+    # Per-sequence state, counted from the cache tensors themselves (W0 carriers).
+    weights_mb: float | None = None
+    kv_mb: float | None = None
+    state_mb: float | None = None
+    conv_mb: float | None = None
+    cache_mb: float | None = None
+    cache_prefill_mb: float | None = None
+    mem_delta_mb: float | None = None
     meta: dict[str, Any] = field(default_factory=dict)
 
 

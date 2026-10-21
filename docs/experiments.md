@@ -172,7 +172,7 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | TPOT | `(末 token − 首 token)/(N−1)` | 不含 prefill |
 | E2E | 入队 → 末 token | |
 | throughput | 输出 token/s、请求/s | 报 offered 与 achieved |
-| peak mem | 权重 / KV / 线性状态 / 激活 | `torch_peak` + driver 双源；分项能测就测，不能测就标 `unavailable` |
+| peak mem | 权重 / KV / 线性状态 / 激活 | `weights_mb`（参数字节）、`kv_mb / state_mb / conv_mb`（直接数 `past_key_values`，与设备无关）、`peak_mem_mb`（设备计数器）、`mem_delta_mb`（相对加载后的 driver 增量）；分项能测就测，不能测就标 `unavailable` |
 | CV | `std/mean` | summary 自动算 |
 
 ### 5.3 设备分层
