@@ -226,6 +226,7 @@ def _base_manifest(
         "slug": str(exp["slug"]),
         "title": str(exp["title"]),
         "hypothesis": list(exp.get("hypothesis", [])),
+        "supersedes": exp.get("supersedes"),
         "status": "running",
         "started_at": _utc_now(),
         "finished_at": None,
@@ -682,6 +683,13 @@ def run_config(
             except Exception as exc:  # index is derived; don't mask a completed run
                 print(f"warning: index update failed: {exc}", file=sys.stderr)
         return run_dir
+    except KeyboardInterrupt:
+        manifest["status"] = "aborted"
+        manifest["finished_at"] = _utc_now()
+        manifest["duration_s"] = round(metricsmod.elapsed_ms(started) / 1000.0, 3)
+        write_json(run_dir / "manifest.json", manifest)
+        (run_dir / "error.txt").write_text("aborted by KeyboardInterrupt\n", encoding="utf-8")
+        raise
     except Exception:
         manifest["status"] = "failed"
         manifest["finished_at"] = _utc_now()

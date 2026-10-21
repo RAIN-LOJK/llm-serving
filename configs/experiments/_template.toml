@@ -11,6 +11,7 @@ slug = "carrier-probe"         # directory name: results/W0/0001-carrier-probe
 title = "双载体：显存/延迟 vs 上下文"
 hypothesis = ["P1", "P2", "P3"]
 seed = 0
+# supersedes = "W0-0001"       # optional: previous run id this one replaces
 
 [[models]]
 name = "Qwen/Qwen3-0.6B"
