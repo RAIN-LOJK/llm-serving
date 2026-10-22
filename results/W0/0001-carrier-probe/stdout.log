@@ -1,0 +1,5 @@
+run_id: W0-0001
+status: completed
+device_class: measure-cuda
+rows: 40 (errors: 0)
+summary: results/W0/0001-carrier-probe/summary.json

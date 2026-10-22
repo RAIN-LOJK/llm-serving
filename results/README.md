@@ -31,4 +31,5 @@ python scripts/exp_index.py --check
 
 ## 当前
 
-暂无正式 run。W0-0001 是下一步；`9001-runner-smoke` 只用于验证管线，不作为证据。
+已有一个正式 run：`W0-0001`（双载体探测，D1 接受，见 `results/W0/0001-carrier-probe/`）。
+`9001-runner-smoke` 只用于验证管线，不作为证据。

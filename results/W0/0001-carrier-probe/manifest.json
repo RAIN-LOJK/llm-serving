@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "run_id": "W0-0001",
+  "stage": "W0",
+  "type": "probe",
+  "slug": "carrier-probe",
+  "title": "双载体：显存/延迟 vs 上下文",
+  "hypothesis": [
+    "P1",
+    "P2",
+    "P3"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-10-22T03:31:41+00:00",
+  "finished_at": "2026-10-22T03:34:47+00:00",
+  "duration_s": 185.851,
+  "operator": "root",
+  "git": {
+    "commit": "ecdf5069790cd1fe43c7094cbb86220229e2b6bd",
+    "branch": "main",
+    "dirty": false,
+    "describe": "ecdf506"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1"
+  },
+  "config_path": "configs/experiments/W0/0001-carrier-probe.toml",
+  "config_sha256": "8144ad9798707bc6199cd06c6689766c9c79096305faab045b054b252dfa9c50",
+  "prompt": null,
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16"
+    },
+    {
+      "name": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "dtype": "bfloat16"
+    }
+  ],
+  "engine": {
+    "impl": "hf",
+    "device": "auto",
+    "max_batch": 1,
+    "resolved_device": "cuda",
+    "vocab_size": 248320,
+    "attn_implementation": "sdpa"
+  },
+  "workload": {
+    "kind": "synthetic",
+    "context_lengths": [
+      512,
+      2048,
+      8192,
+      32768
+    ],
+    "max_new_tokens": 128,
+    "batch_sizes": [
+      1
+    ],
+    "arrival": "closed"
+  },
+  "measure": {
+    "warmup": 3,
+    "repeats": 5,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "record_only",
+    "criteria": [
+      "P1.peak_mem_ratio",
+      "P2.crossover_tokens",
+      "P3.decode_slope"
+    ]
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "n_rows": 40,
+  "n_errors": 0,
+  "summary": "summary.json"
+}

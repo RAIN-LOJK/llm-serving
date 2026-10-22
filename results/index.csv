@@ -1,1 +1,2 @@
 run,stage,type,title,model,engine,key_metric,verdict,status,date,commit,path
+W0-0001,W0,probe,双载体：显存/延迟 vs 上下文,Qwen/Qwen3-0.6B +1,hf,ttft_ms 93.7,unreviewed,completed,2026-10-22,ecdf506,results/W0/0001-carrier-probe

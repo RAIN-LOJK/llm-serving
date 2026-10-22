@@ -1,0 +1,47 @@
+# W0-0001 · 双载体：显存/延迟 vs 上下文（P1–P3）
+# 下一步 W0 的正式探测配置。模型 revision 已 pin 到 2026-10-21 的 HF commit。
+# 运行：python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+# 预期：M1 上可能 OOM（32k）；OOM 会记为失败行，不静默跳过。
+
+schema = 1
+
+[exp]
+id = "W0-0001"
+stage = "W0"
+type = "probe"
+slug = "carrier-probe"
+title = "双载体：显存/延迟 vs 上下文"
+hypothesis = ["P1", "P2", "P3"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048, 8192, 32768]
+max_new_tokens = 128
+batch_sizes = [1]
+arrival = "closed"
+
+[engine]
+impl = "hf"
+device = "auto"
+max_batch = 1
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens", "P3.decode_slope"]
