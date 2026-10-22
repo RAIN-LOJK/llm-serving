@@ -26,6 +26,36 @@ def _deterministic_seed():
     yield
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _torch_kernel_fallbacks():
+    """Pin transformers' Qwen3.5 kernels to their torch fallbacks.
+
+    ``causal-conv1d`` and ``fla`` are installed on the 4090 for speed. transformers resolves
+    them at import time and calls them unconditionally, but the CUDA wrappers assert
+    ``x.is_cuda()`` even when the tiny fixture model runs on CPU -- so the fast gate would
+    fail on an otherwise healthy environment. The unit tests are the reference, not the
+    kernel speed path; keep them deterministic with and without those packages.
+    """
+    try:
+        from transformers.models.qwen3_5 import modeling_qwen3_5 as module
+    except Exception:  # transformers missing or model renamed: tests skip themselves
+        yield
+        return
+
+    restored = []
+    for name in ("causal_conv1d_fn", "causal_conv1d_update", "torch_chunk_gated_delta_rule"):
+        resolved = getattr(module, name, None)
+        fallback = getattr(resolved, "__wrapped__", None)
+        if fallback is not None and fallback is not resolved:
+            restored.append((name, resolved))
+            setattr(module, name, fallback)
+    try:
+        yield
+    finally:
+        for name, resolved in restored:
+            setattr(module, name, resolved)
+
+
 @pytest.fixture
 def tiny_config() -> MiniLLMConfig:
     return MiniLLMConfig(
