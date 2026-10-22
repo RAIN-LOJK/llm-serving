@@ -1,0 +1,14 @@
+# GPU-only fast paths for the Qwen3.5 hybrid carrier (W5–W7 prefill/decode).
+#
+# Install on the 4090 into the conda base env:
+#   python -m pip install -r requirements-cuda.txt
+# Do NOT install on M1/CPU: causal-conv1d compiles a CUDA extension and
+# flash-linear-attention needs Triton. The fast gate must stay green without them
+# (tests/conftest.py pins the torch fallbacks; see PITFALLS P-15).
+#
+# Pinned to the versions used by W0-0001 (recorded in results/W0/0001-carrier-probe/env.json).
+# Bump deliberately and re-run a probe, because 0.8B prefill latency depends on these kernels.
+-r requirements.txt
+
+flash-linear-attention==0.5.2
+causal-conv1d==1.7.0

@@ -28,6 +28,11 @@ PyPI 走清华镜像（`pip config` 已全局配置）。
 `nvidia-smi` 与 `torch.cuda` 都依赖 `/dev/nvidia*`，在受限 shell/容器里会报
 `NVML: Unknown Error` 或 `cuInit -> 304`，那是执行环境问题，不是机器问题。
 
+GPU 加速包走单独文件：[requirements-cuda.txt](../requirements-cuda.txt)
+（`flash-linear-attention==0.5.2` + `causal-conv1d==1.7.0`，W0-0001 实测版本）。
+它们**只装 4090**：causal-conv1d 要编译 CUDA 扩展、fla 要 Triton，CPU/MPS 装不上；
+不装也能跑，只是 Qwen3.5 的短卷积/delta rule 退回 torch 实现。版本由 `env.json` 记录。
+
 ---
 
 ## 2. 铁律
@@ -82,6 +87,7 @@ PyPI 走清华镜像（`pip config` 已全局配置）。
 # 0) 代码必须是已提交的 commit（run 契约要求干净树）；依赖装在 conda base
 git clone <repo> && cd minillm && git checkout <commit>
 python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-cuda.txt   # 仅 4090：fla + causal-conv1d（CPU/MPS 不要装）
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 必须是 True
 python scripts/env_snapshot.py | grep -E "cuda_available|cuda_devices|memory_gb"
 

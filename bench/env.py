@@ -128,6 +128,9 @@ def package_versions() -> dict[str, str | None]:
         "numpy",
         "matplotlib",
         "pytest",
+        # Optional GPU fast paths for the Qwen3.5 hybrid layers; None on CPU/MPS machines.
+        "flash-linear-attention",
+        "causal-conv1d",
     )
     versions: dict[str, str | None] = {}
     for name in names:
