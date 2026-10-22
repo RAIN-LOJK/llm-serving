@@ -1,6 +1,6 @@
 # W0-0001 · 双载体：显存/延迟 vs 上下文（P1–P3）
 # 下一步 W0 的正式探测配置。模型 revision 已 pin 到 2026-10-21 的 HF commit。
-# 运行：.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+# 运行：python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 # 预期：M1 上可能 OOM（32k）；OOM 会记为失败行，不静默跳过。
 
 schema = 1

@@ -19,6 +19,15 @@
 本机实测（2026-10）：macOS / Apple M1 / 16GB / 无 CUDA / Python 3.12.15 /
 torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/huggingface`。
 
+4090 实测（2026-10-22）：Ubuntu 22.04 / RTX 4090 24GB / 驱动 580.105.08 /
+Python 3.12.3（**miniconda base**，`/root/miniconda3/bin/python`）/ torch 2.8.0+cu128 /
+CUDA 12.8。**不建 `.venv`**，命令里的 `python` 就是 base 解释器。
+直连 `huggingface.co` 超时，**必须** `export HF_ENDPOINT=https://hf-mirror.com`；
+PyPI 走清华镜像（`pip config` 已全局配置）。
+本机 CUDA 是否可用以 `python scripts/env_snapshot.py` 的 `cuda_available` 为准——
+`nvidia-smi` 与 `torch.cuda` 都依赖 `/dev/nvidia*`，在受限 shell/容器里会报
+`NVML: Unknown Error` 或 `cuInit -> 304`，那是执行环境问题，不是机器问题。
+
 ---
 
 ## 2. 铁律
@@ -40,7 +49,7 @@ torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/hugging
   - 回退：`TinyLlama/TinyLlama-1.1B-Chat-v1.0`（本机已缓存，可用于测试基建）
 - 下载时 pin revision：
   ```bash
-  .venv/bin/python - <<'PY'
+  python - <<'PY'
   from huggingface_hub import model_info
   for name in ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"]:
       info = model_info(name)
@@ -48,8 +57,8 @@ torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/hugging
   PY
   ```
   把 sha 写进 `configs/experiments/...toml` 的 `revision`，不要写 `main`。
-- 磁盘：本机剩约 14GB；0.6B + 0.8B bf16 下载约 3GB，HF cache 已有 2GB（TinyLlama）。
-  下载前先 `df -h`，不要把磁盘跑满。
+- 磁盘：M1 剩约 14GB，4090 剩约 22GB；0.6B + 0.8B bf16 下载约 3GB（4090 的 HF cache
+  目前没有 Qwen 权重）。下载前先 `df -h`，不要把磁盘跑满。
 - 32k 上下文在 16GB M1 上可能 OOM；W0 若 OOM，记录为失败样本（`ok=false`），
   不要静默跳过。必要时把 `context_lengths` 上限降到 8k/16k，并在 `notes.md` 说明。
 
@@ -58,7 +67,7 @@ torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/hugging
 ## 4. 远程 4090 工作流（建议）
 
 1. 本地 commit + push；远程 `git pull`（不要 rsync 未提交改动）。
-2. 远程建 venv，`pip install -r requirements-dev.txt`。
+2. 远程用 conda base（不建 venv），`python -m pip install -r requirements-dev.txt` 补齐依赖。
 3. 跑 `scripts/env_snapshot.py`，确认设备是 `cuda` 且 `device_class=measure-cuda`。
 4. 按 `configs/experiments/...` 跑 `bench.run`；产物在 `results/`。
 5. 把 `results/<stage>/<run>/` 的文本产物（config/manifest/env/summary/notes/verdict）提交回仓库；
@@ -70,24 +79,27 @@ torch 2.13.0 / transformers 5.14.1 / MPS 可用。HF cache 在 `~/.cache/hugging
 ### 4.1 4090 启动清单（W0）
 
 ```bash
-# 0) 代码必须是已提交的 commit（run 契约要求干净树）
+# 0) 代码必须是已提交的 commit（run 契约要求干净树）；依赖装在 conda base
 git clone <repo> && cd minillm && git checkout <commit>
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python scripts/env_snapshot.py | grep -E "cuda_available|cuda_devices|memory_gb"
+python -m pip install -r requirements-dev.txt
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"   # 必须是 True
+python scripts/env_snapshot.py | grep -E "cuda_available|cuda_devices|memory_gb"
 
-# 1) 权重（直连 huggingface.co 不通时加镜像；revision 必须与 config 一致）
-export HF_ENDPOINT=https://hf-mirror.com          # 可选
-.venv/bin/hf download Qwen/Qwen3-0.6B --revision c1899de289a04d12100db370d81485cdf75e47ca
-.venv/bin/hf download Qwen/Qwen3.5-0.8B --revision 2fc06364715b967f1860aea9cf38778875588b17
+# 0.5) 快速门禁先绿（不需要权重）
+python -m pytest -m "not slow and not hf"
+
+# 1) 权重（4090 直连 huggingface.co 不通，必须走镜像；revision 必须与 config 一致）
+export HF_ENDPOINT=https://hf-mirror.com
+hf download Qwen/Qwen3-0.6B --revision c1899de289a04d12100db370d81485cdf75e47ca
+hf download Qwen/Qwen3.5-0.8B --revision 2fc06364715b967f1860aea9cf38778875588b17
 
 # 2) 冒烟（只跑 512/2k；不写 results/）
-.venv/bin/python -m bench.run \
+python -m bench.run \
   --config configs/experiments/W0/0001-carrier-probe.toml \
   --out /tmp/minillm-w0-smoke --limit 2 --allow-dirty
 
 # 3) 正式 W0-0001（warmup=3 / repeats=5 / 32k）
-.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 ```
 
 口径与预期（2026-10-21 的代码状态）：
@@ -108,8 +120,8 @@ export HF_ENDPOINT=https://hf-mirror.com          # 可选
 每次 run 自动写 `env.json`；也可以手动：
 
 ```bash
-.venv/bin/python scripts/env_snapshot.py
-.venv/bin/python scripts/env_snapshot.py --out /tmp/env.json
+python scripts/env_snapshot.py
+python scripts/env_snapshot.py --out /tmp/env.json
 ```
 
 字段包括：git commit/branch/dirty、python、torch、CUDA/MPS、GPU 名称与显存、

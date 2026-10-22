@@ -1,6 +1,6 @@
 # Runner smoke: no model, no HF download. Validates the run contract end to end.
 # Use a temp out root so this never looks like evidence:
-#   .venv/bin/python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
+#   python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
 #     --out /tmp/minillm-smoke --allow-dirty
 
 schema = 1

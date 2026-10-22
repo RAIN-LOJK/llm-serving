@@ -120,7 +120,7 @@
 - pytest、tokenizers、safetensors、numpy、matplotlib
 - 本机：macOS / Apple M1 / 16GB / MPS
 - 正式数字：租用 4090（`measure-cuda`）
-- 仓库内统一使用 `.venv/bin/python`
+- 仓库内统一使用 conda base 的 `python`（不建 `.venv`）
 - 当前没有 lint / formatter / typecheck / CI；pytest 是唯一门禁
 
 ---

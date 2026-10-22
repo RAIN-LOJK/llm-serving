@@ -1,5 +1,5 @@
 # Template for one experiment run. Copy to configs/experiments/<stage>/<id>-<slug>.toml.
-# Contract: docs/experiments.md. Runner: .venv/bin/python -m bench.run --config <this file>.
+# Contract: docs/experiments.md. Runner: python -m bench.run --config <this file>.
 
 schema = 1
 

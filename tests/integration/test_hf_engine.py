@@ -3,7 +3,7 @@
 Excluded from the fast gate (``-m "not slow and not hf"``). Run explicitly after the
 W0/W1 download step::
 
-    MINILLM_RUN_HF=1 .venv/bin/python -m pytest tests/integration/test_hf_engine.py -q
+    MINILLM_RUN_HF=1 python -m pytest tests/integration/test_hf_engine.py -q
 """
 
 from __future__ import annotations

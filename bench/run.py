@@ -2,7 +2,7 @@
 
 Typical use::
 
-    .venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+    python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 
 The runner is intentionally conservative: it refuses to overwrite an existing run,
 records environment/provenance, drops warmup rows, aggregates median/p95/CV, and leaves
@@ -317,7 +317,7 @@ ACTUAL="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
 if [ "$EXPECTED" != "unknown" ] && [ "$ACTUAL" != "$EXPECTED" ]; then
   echo "warning: commit mismatch ($ACTUAL != $EXPECTED)" >&2
 fi
-exec .venv/bin/python -m bench.run \\
+exec python -m bench.run \\
   --config "$RUN_DIR/config.toml" \\
   --out "${{OUT_ROOT:-results-repro}}" \\
   --allow-dirty

@@ -329,17 +329,17 @@ minillm/
 
 ```bash
 # 快速门禁（不需要 HF 权重）
-.venv/bin/python -m pytest -m "not slow and not hf"
+python -m pytest -m "not slow and not hf"
 
 # 环境快照
-.venv/bin/python scripts/env_snapshot.py
+python scripts/env_snapshot.py
 
 # 一个 run（W0 示例；正式跑前 pin revision）
-.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 
 # 索引
-.venv/bin/python scripts/exp_index.py
-.venv/bin/python scripts/exp_index.py --check
+python scripts/exp_index.py
+python scripts/exp_index.py --check
 ```
 
 ---

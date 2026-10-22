@@ -7,9 +7,9 @@ the real allocator.
 
 Usage::
 
-    .venv/bin/python scripts/probe_checkpoint.py                  # print
-    .venv/bin/python scripts/probe_checkpoint.py --write          # docs/carrier_estimates.json
-    .venv/bin/python scripts/probe_checkpoint.py --offline        # cache only, no network
+    python scripts/probe_checkpoint.py                  # print
+    python scripts/probe_checkpoint.py --write          # docs/carrier_estimates.json
+    python scripts/probe_checkpoint.py --offline        # cache only, no network
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ def fetch_config(name: str, revision: str | None, offline: bool) -> dict[str, An
             raise SystemExit(
                 f"{name}@{revision} not in the local HF cache ({type(exc).__name__}: {exc}).\n"
                 f"Download it once with:\n"
-                f"  .venv/bin/hf download {name} --revision {revision} config.json"
+                f"  hf download {name} --revision {revision} config.json"
             ) from exc
         raise
     with Path(path).open(encoding="utf-8") as handle:

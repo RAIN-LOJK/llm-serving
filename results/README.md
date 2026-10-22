@@ -20,13 +20,13 @@
 
 ```bash
 # 一个 run
-.venv/bin/python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
+python -m bench.run --config configs/experiments/W0/0001-carrier-probe.toml
 
 # 重建索引
-.venv/bin/python scripts/exp_index.py
+python scripts/exp_index.py
 
 # 校验（CI/测试用）
-.venv/bin/python scripts/exp_index.py --check
+python scripts/exp_index.py --check
 ```
 
 ## 当前

@@ -3,9 +3,9 @@
 
 Examples::
 
-    .venv/bin/python scripts/exp_index.py
-    .venv/bin/python scripts/exp_index.py --check
-    .venv/bin/python scripts/exp_index.py --root /tmp/minillm-smoke
+    python scripts/exp_index.py
+    python scripts/exp_index.py --check
+    python scripts/exp_index.py --root /tmp/minillm-smoke
 """
 
 from __future__ import annotations

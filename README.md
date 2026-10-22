@@ -30,23 +30,23 @@
 ## 快速开始
 
 ```bash
-# 1. 依赖（venv 已存在时只需装 dev 依赖）
-.venv/bin/pip install -r requirements-dev.txt
+# 1. 依赖（miniconda base 已带 torch；这里补 transformers / tokenizers / pytest）
+python -m pip install -r requirements-dev.txt
 
 # 2. 快速门禁：不需要任何 HF 权重
-.venv/bin/python -m pytest -m "not slow and not hf"
+python -m pytest -m "not slow and not hf"
 
 # 3. 环境快照（设备 / git / 版本）
-.venv/bin/python scripts/env_snapshot.py
+python scripts/env_snapshot.py
 
 # 4. 跑一个不依赖模型的 runner 冒烟（写到临时目录，不污染 results/）
-.venv/bin/python -m bench.run \
+python -m bench.run \
   --config configs/experiments/W0/9001-runner-smoke.toml \
   --out /tmp/minillm-smoke --allow-dirty
 
 # 5. 生成 / 校验实验索引
-.venv/bin/python scripts/exp_index.py
-.venv/bin/python scripts/exp_index.py --check
+python scripts/exp_index.py
+python scripts/exp_index.py --check
 ```
 
 正式测量请在干净 git 树上跑；官方数字以 `measure-cuda`（4090）为准，本机 M1 只做正确性与冒烟。口径见 [docs/environments.md](docs/environments.md)。
