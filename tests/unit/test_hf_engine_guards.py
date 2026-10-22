@@ -90,10 +90,9 @@ def test_guard_rejects_wrapper_class_and_vision_params():
 
 
 def _save_tiny_multimodal(directory) -> None:
-    from tokenizers import Tokenizer, models, pre_tokenizers
-    from transformers import PreTrainedTokenizerFast
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config, Qwen3_5TextConfig
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForConditionalGeneration
+    from transformers.models.qwen3_5.tokenization_qwen3_5 import Qwen3_5Tokenizer
 
     text = Qwen3_5TextConfig(
         vocab_size=32,
@@ -126,11 +125,15 @@ def _save_tiny_multimodal(directory) -> None:
     )
     Qwen3_5ForConditionalGeneration(config).save_pretrained(directory)
 
-    vocab = {"[UNK]": 0, "hello": 1, "world": 2}
-    tokenizer = Tokenizer(models.WordLevel(vocab=vocab, unk_token="[UNK]"))
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-    PreTrainedTokenizerFast(
-        tokenizer_object=tokenizer, unk_token="[UNK]", eos_token="[UNK]"
+    vocab = {"<|endoftext|>": 0}
+    for ch in "Ġhelowrd":
+        if ch not in vocab:
+            vocab[ch] = len(vocab)
+    Qwen3_5Tokenizer(
+        vocab=vocab,
+        merges=[],
+        unk_token="<|endoftext|>",
+        eos_token="<|endoftext|>",
     ).save_pretrained(directory)
 
 

@@ -5,7 +5,7 @@
 - 当前是可执行骨架：runner、run 契约、玩具模型和三组回归已就位；`serve/` 只有模块边界，W0 探测是下一步。
 - 训练主线已删除。git tag `legacy-learning-2026-08` 只用于考古，旧代码不是可运行入口。
 
-## 命令（conda base 的 `python`，不建 `.venv`）
+## 命令（conda base 的 `python`）
 
 ```bash
 python -m pip install -r requirements-dev.txt               # base 已有 torch；补 transformers/tokenizers/pytest
@@ -19,9 +19,6 @@ python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
   --out /tmp/minillm-smoke --allow-dirty                    # smoke 不写 results/
 ```
 
-- 解释器是 **miniconda base**（当前 4090：`/root/miniconda3/bin/python`，Python 3.12.3 / torch 2.8.0+cu128）。**不要建 `.venv`**，也不要往别的环境装依赖；换机器先 `which python` 确认。
-- 4090 直连 `huggingface.co` 超时，下载权重前先 `export HF_ENDPOINT=https://hf-mirror.com`；PyPI 已全局走清华镜像。
-- GPU 命令由用户在普通 shell 跑：agent 沙箱没有 `/dev/nvidia*` 权限，`nvidia-smi` 会报 `NVML: Unknown Error`、`torch.cuda` 会报 `cuInit -> 304`。
 - 没有配置 lint / formatter / typecheck / CI；pytest 是唯一门禁，不要声称其他检查已配置。
 - HF 集成测试即使显式指定文件也会被 skip，必须同时设 `MINILLM_RUN_HF=1`。
 
