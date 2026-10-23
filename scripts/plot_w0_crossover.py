@@ -27,6 +27,9 @@ MODELS = ["Qwen/Qwen3-0.6B", "Qwen/Qwen3.5-0.8B"]
 COLORS = {"Qwen/Qwen3-0.6B": "#1f77b4", "Qwen/Qwen3.5-0.8B": "#d62728"}
 LABELS = {"Qwen/Qwen3-0.6B": "Qwen3-0.6B (full attention)", "Qwen/Qwen3.5-0.8B": "Qwen3.5-0.8B (3:1 hybrid)"}
 
+# State at exactly N tokens. ``cache_mb`` is post-decode and adds (out_tokens-1) tokens.
+KEY = "cache_prefill_mb"
+
 
 def _series(groups: dict[tuple[str, int], dict], model: str, key: str) -> tuple[list[int], list[float]]:
     ctxs = sorted(c for (m, c) in groups if m == model)
@@ -36,15 +39,17 @@ def _series(groups: dict[tuple[str, int], dict], model: str, key: str) -> tuple[
 def _crossover(groups: dict[tuple[str, int], dict]) -> float | None:
     """Where the hybrid's fixed state stops costing more than the attention KV."""
     a_model, b_model = MODELS[0], MODELS[1]
-    a_ctx, a_cache = _series(groups, a_model, "cache_mb")
-    b_ctx, b_cache = _series(groups, b_model, "cache_mb")
+    a_ctx, a_cache = _series(groups, a_model, KEY)
+    b_ctx, b_cache = _series(groups, b_model, KEY)
     if len(a_ctx) < 2 or len(b_ctx) < 2:
         return None
     a_slope = (a_cache[-1] - a_cache[0]) / (a_ctx[-1] - a_ctx[0])
     b_slope = (b_cache[-1] - b_cache[0]) / (b_ctx[-1] - b_ctx[0])
     if a_slope <= b_slope:
         return None
-    return b_cache[0] / (a_slope - b_slope)
+    a_intercept = a_cache[0] - a_slope * a_ctx[0]
+    b_intercept = b_cache[0] - b_slope * b_ctx[0]
+    return (b_intercept - a_intercept) / (a_slope - b_slope)
 
 
 def main() -> int:
@@ -60,37 +65,39 @@ def main() -> int:
 
     fig, axes = plt.subplots(1, 3, figsize=(13.5, 4.2))
     for model in MODELS:
-        ctx, cache = _series(groups, model, "cache_mb")
+        ctx, cache = _series(groups, model, KEY)
         axes[0].plot(ctx, cache, "o-", color=COLORS[model], label=LABELS[model])
         ctx, prefill = _series(groups, model, "prefill_ms")
         axes[1].plot(ctx, prefill, "o-", color=COLORS[model], label=LABELS[model])
         ctx, tpot = _series(groups, model, "tpot_ms")
         axes[2].plot(ctx, tpot, "o-", color=COLORS[model], label=LABELS[model])
 
-    axes[0].set_title("Per-sequence state (KV + linear state)")
+    axes[0].set_title("Per-sequence state at N tokens (prefill)")
     axes[0].set_ylabel("MiB")
     axes[0].set_yscale("log")
     axes[0].set_ylim(8, 6000)
 
     # Both carriers are linear in context, so the crossing sits below the smallest
     # measured bucket; draw the fitted segment instead of pretending it was measured.
-    a_ctx, a_cache = _series(groups, MODELS[0], "cache_mb")
-    b_ctx, b_cache = _series(groups, MODELS[1], "cache_mb")
+    a_ctx, a_cache = _series(groups, MODELS[0], KEY)
+    b_ctx, b_cache = _series(groups, MODELS[1], KEY)
     a_slope = (a_cache[-1] - a_cache[0]) / (a_ctx[-1] - a_ctx[0])
     b_slope = (b_cache[-1] - b_cache[0]) / (b_ctx[-1] - b_ctx[0])
+    a_intercept = a_cache[0] - a_slope * a_ctx[0]
+    b_intercept = b_cache[0] - b_slope * b_ctx[0]
     x_fit = [128, a_ctx[0]]
-    axes[0].plot(x_fit, [a_slope * x for x in x_fit], ":", lw=1, color=COLORS[MODELS[0]])
-    axes[0].plot(x_fit, [b_cache[0] - b_slope * (b_ctx[0] - x) for x in x_fit], ":", lw=1, color=COLORS[MODELS[1]])
+    axes[0].plot(x_fit, [a_intercept + a_slope * x for x in x_fit], ":", lw=1, color=COLORS[MODELS[0]])
+    axes[0].plot(x_fit, [b_intercept + b_slope * x for x in x_fit], ":", lw=1, color=COLORS[MODELS[1]])
 
     cross = _crossover(groups)
     if cross is not None:
         axes[0].axvline(cross, ls="--", lw=1, color="0.4")
-        axes[0].annotate(f"extrapolated crossover ≈ {cross:.0f} tok\n(analytic 193; below 512 bucket)",
+        axes[0].annotate(f"crossover ≈ {cross:.0f} tok\n(analytic; below 512 bucket)",
                          xy=(cross, 8), xytext=(150, 9), fontsize=8, color="0.3", va="bottom")
 
     for ctx in (8192, 32768):
-        a = groups[(MODELS[0], ctx)]["cache_mb"]["median"]
-        b = groups[(MODELS[1], ctx)]["cache_mb"]["median"]
+        a = groups[(MODELS[0], ctx)][KEY]["median"]
+        b = groups[(MODELS[1], ctx)][KEY]["median"]
         axes[0].annotate(f"{a / b:.1f}×", xy=(ctx, (a * b) ** 0.5), xytext=(-6, 0),
                          textcoords="offset points", fontsize=9, color="0.25", ha="right", va="center")
 

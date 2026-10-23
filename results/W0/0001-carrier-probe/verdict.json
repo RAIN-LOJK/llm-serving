@@ -4,5 +4,5 @@
   "reviewer": "rainhome",
   "reviewed_at": "2026-10-23",
   "decision_id": "D1",
-  "notes": "P1 成立（8k 7.70× / 32k 8.90×），P2 不成立（交叉点≈268 token，低于最小桶），P3 数值成立但 batch=1 下不可归因；D1 接受，W5–W7 按 ROADMAP §5 推进。"
+  "notes": "P1 成立（8k 7.80× / 32k 8.90×），P2 不成立（交叉点≈193 token，prefill 口径，低于最小桶），P3 数值成立但 batch=1 下不可归因；D1 接受，W5–W7 按 ROADMAP §5 推进。"
 }
