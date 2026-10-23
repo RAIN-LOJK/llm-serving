@@ -207,7 +207,7 @@ def build_index(root: str | Path = "results") -> Path:
     lines.extend(
         [
             "",
-            "_下一步：`W0-0001` 双载体探测。_",
+            "_下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_",
             "",
         ]
     )
