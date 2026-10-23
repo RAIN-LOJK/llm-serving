@@ -17,6 +17,9 @@ class MiniLLMConfig(PretrainedConfig):
         bias=False,
         norm_eps=1e-5,
         tie_word_embeddings=True,
+        head_dim:int|None=None,
+        rope_theta: float = 1e4,
+        qk_norm: bool = False,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -31,3 +34,7 @@ class MiniLLMConfig(PretrainedConfig):
         self.bias = bias
         self.norm_eps = norm_eps
         self.tie_word_embeddings = tie_word_embeddings
+
+        self.head_dim = head_dim
+        self.rope_theta = rope_theta
+        self.qk_norm = qk_norm

@@ -1,0 +1,61 @@
+{
+  "spec": "w1-golden-v1",
+  "model": {
+    "repo": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "dtype": "float32",
+    "device": "cpu",
+    "attn_implementation": "eager",
+    "n_params": 596049920
+  },
+  "tokenizer": {
+    "repo": "Qwen/Qwen3-0.6B",
+    "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+    "class": "Qwen2Tokenizer"
+  },
+  "prompts": [
+    {
+      "id": "s01",
+      "sha256": "fb18d43efa51228f0bc93a4e4600b72f1e0dead09b06ca80a105487738643054",
+      "n_tokens": 39
+    },
+    {
+      "id": "s02",
+      "sha256": "81d858450107ac835485ac5f250f540693caaaf3a21c964f848a9032a2301025",
+      "n_tokens": 40
+    },
+    {
+      "id": "s03",
+      "sha256": "51844ed3686fc22c0a857b0bcb34420ad413d649b16d3481c48fc90d63593fc8",
+      "n_tokens": 25
+    },
+    {
+      "id": "s04",
+      "sha256": "bfd04a0be6e7a03334d2ea62fe339921b51d0b20be71cc641d52bd3d96133d72",
+      "n_tokens": 31
+    }
+  ],
+  "generation": {
+    "strategy": "greedy",
+    "max_new_tokens": 64
+  },
+  "tensors": {
+    "input_ids": "int32 (n_prompts, width) left-padded; pad id in the fixture, not used by tests",
+    "hidden": "float32 (n_prompts, 28 block outputs, 3 positions, hidden_size)",
+    "positions": "int32 (n_prompts, positions) absolute prefill positions sampled from hidden",
+    "logits_last": "float32 (n_prompts, vocab_size) last prefill position",
+    "greedy_ids": "int32 (n_prompts, max_new_tokens), -1 past EOS"
+  },
+  "versions": {
+    "python": "3.12.3",
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "numpy": "2.4.4"
+  },
+  "source": {
+    "commit": "7915d18713144289625c1735f60682f35a4dd8a8",
+    "dirty": true,
+    "command": "scripts/make_golden.py --model Qwen/Qwen3-0.6B --golden-id 0001"
+  },
+  "created_at": "2026-10-23T06:48:14+00:00"
+}

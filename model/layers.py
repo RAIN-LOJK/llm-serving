@@ -91,17 +91,21 @@ class Attention(nn.Module):
         self.n_head = config.n_head
         self.n_kv_head = config.n_kv_head
         self.n_embd = config.n_embd
-        self.head_dim = config.n_embd // config.n_head
+        self.head_dim = config.head_dim or config.n_embd // config.n_head
 
         self.q_proj = nn.Linear(config.n_embd, self.n_head * self.head_dim, bias=config.bias)
         self.k_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=config.bias)
+        if config.qk_norm:
+            self.q_norm, self.k_norm = RMSNorm(self.head_dim, config.norm_eps), RMSNorm(self.head_dim, config.norm_eps)
+        else:
+            self.q_norm, self.k_norm = nn.Identity(), nn.Identity()
         self.v_proj = nn.Linear(config.n_embd, self.n_kv_head * self.head_dim, bias=config.bias)
         self.o_proj = nn.Linear(self.n_head * self.head_dim, config.n_embd, bias=config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
         # 预计算 RoPE
-        sin, cos = precompute_rope_freqs(self.head_dim, config.max_position_embeddings)
+        sin, cos = precompute_rope_freqs(self.head_dim, config.max_position_embeddings, config.rope_theta)
         self.register_buffer("sin", sin, persistent=False)
         self.register_buffer("cos", cos, persistent=False)
 
@@ -110,8 +114,8 @@ class Attention(nn.Module):
         past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
 
         # 1. Q/K/V 投影并 reshape 为多头形状
-        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim)
-        k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim)
+        q = self.q_norm(self.q_proj(x).view(B, T, self.n_head, self.head_dim))
+        k = self.k_norm(self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim))
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim)
         # 2. 对 Q/K 施加 RoPE
         cos, sin = self.cos[past_len:past_len+T], self.sin[past_len:past_len+T]
@@ -153,7 +157,7 @@ class Attention(nn.Module):
 
         # 8. 注意力输出: y = att @ V，然后 transpose + reshape 回 (B, T, C)
         y = attn @ v
-        y = y.transpose(1, 2).reshape(B, T, C)
+        y = y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)
 
         # 9. 输出投影 + dropout
         y = self.resid_dropout(self.o_proj(y))
