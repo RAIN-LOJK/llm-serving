@@ -1,6 +1,6 @@
 # W0-0001 · 双载体：显存/延迟 vs 上下文
 
-- 状态：`unreviewed`（判定见 `verdict.json`，由用户签）
+- 状态：`pass`（2026-10-23 由 rainhome 评审；判定见 `verdict.json`，决策 D1）
 - 设备：RTX 4090 24GB / 驱动 580.105.08 / torch 2.8.0+cu128 / transformers 5.20.2 / bf16 / sdpa
 - 协议：batch=1，greedy，`max_new_tokens=128`，warmup=3，repeats=5；synthetic 随机 token id
   （`bench/loadgen.synthetic_ids`，内容无意义，只测状态与延迟形状）；上下文 512 / 2k / 8k / 32k
