@@ -4,7 +4,7 @@
 # resolved values in its manifest/summary.
 
 schema = 1
-updated = "2026-10-23"
+updated = "2026-10-24"
 note = "Targets and failure lines from ROADMAP §6/§8. Calibrate once after W1 and record basis_run."
 
 [W1.align]
@@ -22,8 +22,12 @@ logits_max_abs_diff = 0.05
 batch_sizes = [1, 2, 4]
 
 [W2.bench]
-status = "target"
-basis_run = ""
+# Calibrated 2026-10-24 against W2-0002 (W2-0001 is the paired reference arm).
+# Measured: ttft_cv 6.8%, tpot_cv 3.6%, memory 0.988 median (0.889 at 1517 tokens),
+# decode 0.976x HF. Targets stay put: they exist to catch drift, and the observed values
+# sit comfortably inside them.
+status = "calibrated"
+basis_run = "W2-0002"
 # CV is judged inside a length bucket (overall mixes 16..2048 token prompts).
 ttft_cv_max = 0.10
 tpot_cv_max = 0.10

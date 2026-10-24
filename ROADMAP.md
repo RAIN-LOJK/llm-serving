@@ -353,7 +353,7 @@ python scripts/exp_index.py --check
 |---|---|---|---|
 | W0 | 双载体探测 + D1 决策 | ✅ | `W0-0001` |
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
-| W2 | 基准框架 | ⬜ | — |
+| W2 | 基准框架 | ✅ | `W2-0001` / `W2-0002` |
 | W3 | 连续批处理 | ⬜ | — |
 | W4 | 分页 KV | ⬜ | — |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
@@ -376,3 +376,4 @@ python scripts/exp_index.py --check
 | 2026-10-22 | v4 | **W0 完成**：`W0-0001` 实测 P1 成立（8k 7.80× / 32k 8.90×）、P2 不成立（交叉点 ≈193 token）、P3 数值成立但不可归因；修正 §3.1 交叉点（1.5k → 193）、产出清单与 `probe_memory.py` 的描述；D1 接受 |
 | 2026-10-23 | v5 | **W1 完成**：Qwen3-0.6B 逐层对齐（4 prompt × 贪心 64/64 id，logits `max|Δ|` 2.0e-5，每层 9.8e-4–1.95e-3）；阈值 `1e-3 → 1e-2`——首 token 有 attention-sink 离群值（\|x\|≈7e3），fp32 一个 ulp 就有 9.8e-4，原阈值等于要求"≤1 ulp"；golden 改用 hook 采块输出（transformers 5.x 的 `hidden_states[-1]` 是 post-norm，见 P-16）、`rope_theta` 改从 `rope_parameters` 读（P-17） |
 | 2026-10-24 | v6 | **W2 工具链**：`impl="minillm"` 适配器、`cuda_event` 计时接线、`[accept]` 真求值；判据口径三处修正——CV 改按长度桶（`overall` 混了 16–2048 的长度跨度）、显存对齐改为 `weights+KV` / **torch 分配器峰值**（`nvidia-smi` 含 ~0.5 GB CUDA context，不能当分母，只作对照）、配对 baseline 先校验 prompt hash/dtype/device/`max_new_tokens`/`out_tokens`，不符记 `invalid`；另修 RoPE 每层一张 40960 行表（-280 MB，P-18）与 `logits_to_keep`（P-13） |
+| 2026-10-24 | v7 | **W2 完成**：`W2-0001`（HF 参考臂，TPOT 16.78 ms）与 `W2-0002`（自实现，17.10 ms）四条判据全 pass——decode **0.976×** HF、TTFT 持平（short/medium 1.00–1.01×）、桶级 CV 6.8%/3.6%、memory 0.988；**长上下文 prefill 1.49× 慢**（物化 `T²`、无 SDPA），记为负结果并作为 W3/W4 结论的前提；`[W2.bench]` 标 calibrated（basis `W2-0002`），memory 0.9 只对 context 中位数成立（最长 1517 token 为 0.889） |
