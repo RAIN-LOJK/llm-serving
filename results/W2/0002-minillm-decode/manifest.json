@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "run_id": "W2-0002",
+  "stage": "W2",
+  "type": "microbench",
+  "slug": "minillm-decode",
+  "title": "自实现解码器：TTFT / TPOT @ 同一 prompt 集",
+  "hypothesis": [
+    "decode_speed_vs_hf"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-10-24T02:51:54+00:00",
+  "finished_at": "2026-10-24T03:02:05+00:00",
+  "duration_s": 610.626,
+  "operator": "root",
+  "git": {
+    "commit": "78923220f9c2599810c730a174bad79e89ebf393",
+    "branch": "main",
+    "dirty": false,
+    "describe": "7892322"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W2/0002-minillm-decode.toml",
+  "config_sha256": "059262ad0c0d9855590ac359128c459cc9201067e2883e9bf95b053d4915722d",
+  "prompt": {
+    "path": "bench/prompts.json",
+    "version": "v0-2026-10",
+    "sha256": "7548f3a6c7e6f601b8100e0798e9c8bc60b33a0db9c251537692395f1ce3a663",
+    "n_prompts": 32
+  },
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "minillm",
+    "device": "cuda",
+    "max_batch": 1,
+    "resolved_device": "cuda",
+    "vocab_size": 151936,
+    "dtype": "bfloat16",
+    "attn_implementation": "manual"
+  },
+  "workload": {
+    "kind": "prompts",
+    "prompts": "bench/prompts.json",
+    "max_new_tokens": 128,
+    "batch_sizes": [
+      1
+    ],
+    "arrival": "closed"
+  },
+  "measure": {
+    "warmup": 3,
+    "repeats": 5,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "threshold",
+    "criteria": [
+      "ttft_cv_max",
+      "tpot_cv_max",
+      "memory_match_ratio",
+      "decode_speed_vs_hf_min"
+    ]
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W2/0002-minillm-decode.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "n_rows": 160,
+  "n_errors": 0,
+  "summary": "summary.json"
+}

@@ -1,0 +1,5 @@
+run_id: W2-0002
+status: completed
+device_class: measure-cuda
+rows: 160 (errors: 0)
+summary: results/W2/0002-minillm-decode/summary.json

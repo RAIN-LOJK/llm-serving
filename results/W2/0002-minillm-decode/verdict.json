@@ -1,0 +1,8 @@
+{
+  "run_id": "W2-0002",
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-10-24",
+  "decision_id": null,
+  "notes": "四条判据全 pass：decode 0.976× HF，TTFT 持平（short/medium 1.00–1.01×），长上下文 prefill 1.49× 慢（手写 attention 物化 T²，无 SDPA）；memory 中位数 0.988、最长 context 0.889。负结果：≥1k 上下文本实现无优势，W3/W4 必须先补 prefill 才可能净收益。"
+}
