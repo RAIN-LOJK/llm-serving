@@ -44,8 +44,6 @@ class ServeEngine:
         self.device = "cpu" if device in {"", "auto"} else device
         self.model_path = model_path
         self.vocab_size = 0
-        # The engine has one attention path now; keep the field for run provenance.
-        self.attn_implementation = "sdpa"
         self.weights_mb: float | None = None
         self.eos_token_id: int | None = None
         self.model: Any = None

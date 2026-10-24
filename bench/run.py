@@ -420,9 +420,11 @@ def _execute(
             manifest["engine"]["resolved_device"] = engine.device
             manifest["engine"]["vocab_size"] = int(getattr(engine, "vocab_size", 0))
             manifest["engine"]["dtype"] = model_cfg.get("dtype")
-            manifest["engine"]["attn_implementation"] = getattr(
-                engine, "attn_implementation", None
-            )
+            # Only the HF arm exposes an attention-backend field; the in-house decoder is
+            # SDPA-only and deliberately has no backend field to record.
+            attn_impl = getattr(engine, "attn_implementation", None)
+            if attn_impl is not None:
+                manifest["engine"]["attn_implementation"] = attn_impl
 
             timer = metricsmod.make_timer(engine.device, str((cfg.get("measure") or {}).get("timer", "auto")))
             cases = list(_cases_for_model(cfg, engine, prompt_set))
@@ -596,7 +598,6 @@ def _summary(
         "max_new_tokens": int((cfg.get("workload") or {}).get("max_new_tokens", 0)),
         "prompt_sha256": (manifest.get("prompt") or {}).get("sha256"),
         "dtype": (manifest.get("engine") or {}).get("dtype"),
-        "attn_implementation": (manifest.get("engine") or {}).get("attn_implementation"),
         "device_class": manifest.get("device_class"),
     }
 
