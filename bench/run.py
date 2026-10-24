@@ -596,6 +596,7 @@ def _summary(
         "max_new_tokens": int((cfg.get("workload") or {}).get("max_new_tokens", 0)),
         "prompt_sha256": (manifest.get("prompt") or {}).get("sha256"),
         "dtype": (manifest.get("engine") or {}).get("dtype"),
+        "attn_implementation": (manifest.get("engine") or {}).get("attn_implementation"),
         "device_class": manifest.get("device_class"),
     }
 

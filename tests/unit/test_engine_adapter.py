@@ -13,6 +13,7 @@ def test_factory_wires_minillm():
     assert isinstance(engine, ServeEngine)
     assert engine.impl == "minillm"
     assert engine.device == "cpu"
+    assert engine.attn_implementation == "sdpa"
 
 
 def test_factory_keeps_unknown_impls_loud():

@@ -1,8 +1,10 @@
 """The in-house decoder (``serve/engine.py``) behind the runner's Engine protocol.
 
 Loads straight from the local HF cache through ``model.loading`` — no ``from_pretrained``,
-so what the benchmark measures is the hand-written decoder end to end. Timing comes from
-the engine itself (CUDA events when it runs on a GPU), not from the runner's wall clock.
+so what the benchmark measures is the hand-written decoder end to end. Attention runs
+through PyTorch SDPA (``F.scaled_dot_product_attention``); the surrounding cache, RoPE and
+decode loop stay in this repo. Timing comes from the engine itself (CUDA events when it
+runs on a GPU), not from the runner's wall clock.
 
 ``encode`` uses ``add_special_tokens=False`` to match ``bench/engines/hf.py``: if the two
 arms tokenized differently, the comparison would silently measure different prompts.
@@ -42,7 +44,8 @@ class ServeEngine:
         self.device = "cpu" if device in {"", "auto"} else device
         self.model_path = model_path
         self.vocab_size = 0
-        self.attn_implementation = "manual"
+        # The engine has one attention path now; keep the field for run provenance.
+        self.attn_implementation = "sdpa"
         self.weights_mb: float | None = None
         self.eos_token_id: int | None = None
         self.model: Any = None
@@ -63,7 +66,11 @@ class ServeEngine:
                 "fetch it first (HF_ENDPOINT=https://hf-mirror.com) or pass model_path"
             )
 
-        self.model = load_checkpoint(path, dtype=_DTYPES[self.dtype_name], device=self.device)
+        self.model = load_checkpoint(
+            path,
+            dtype=_DTYPES[self.dtype_name],
+            device=self.device,
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
         self.eos_token_id = self.tokenizer.eos_token_id
         self.engine = MiniLLMEngine(self.model, eos_token_id=self.eos_token_id)

@@ -1,4 +1,3 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -144,38 +143,45 @@ class Attention(nn.Module):
                 v = torch.cat((past_v, v), 2)
             past_keys_values.set_kv(idx, (k, v))
 
-        # 4. GQA: 如果 n_kv_head < n_head，重复 K/V 的头
-        if self.n_kv_head != self.n_head:
-            n_reps = self.n_head // self.n_kv_head
-            k = k.repeat_interleave(n_reps, dim=1)
-            v = v.repeat_interleave(n_reps, dim=1)
+        # 4. SDPA: the causal mask lives inside the kernel when the query/key blocks are
+        # aligned. A full prefill (past_len == 0) uses is_causal=True and never materializes
+        # a T x T mask; decode (T == 1) needs no mask. Chunked prefill (past_len > 0 and
+        # T > 1) and padded batches need an explicit mask, built only on those paths.
+        need_offset_causal = past_len > 0 and T > 1
+        attn_mask = None
+        is_causal = False
+        if attention_mask is not None or need_offset_causal:
+            if attention_mask is not None and attention_mask.shape[-1] != past_len + T:
+                raise ValueError(
+                    "attention_mask must cover past and current keys: "
+                    f"expected {past_len + T}, got {attention_mask.shape[-1]}"
+                )
+            query_pos = torch.arange(past_len, past_len + T, device=x.device).view(T, 1)
+            key_pos = torch.arange(past_len + T, device=x.device).view(1, -1)
+            allowed = key_pos <= query_pos
+            if attention_mask is not None:
+                key_valid = attention_mask[:, None, None, :].to(torch.bool)
+                allowed = allowed & key_valid
+            else:
+                allowed = allowed.view(1, 1, T, past_len + T)
+            # Left-padded queries can see no valid key at all; an all-masked softmax row
+            # would be NaN. Keep the row finite (its output is discarded) exactly like the
+            # old manual path's all-masked-row guard.
+            attn_mask = allowed.masked_fill(~allowed.any(dim=-1, keepdim=True), True)
+        else:
+            is_causal = past_len == 0 and T > 1
 
-        # 5. 计算注意力分数: att = Q @ K^T / sqrt(head_dim)
-        attn = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
-
-        # 6. 因果掩码: 上三角设为 -inf
-        # 掩码必须跟 q/k 同 dtype：fp32 掩码会把 bf16 的 attn 提升成 fp32，
-        # 随后 attn @ v 就是 fp32 × bf16 直接报错（W2 的 bf16 跑法会撞上）。
-        mask = torch.triu(torch.full((T, past_len+T), float('-inf'), device=x.device, dtype=x.dtype), diagonal=past_len+1)
-        # 输入掩码
-        if attention_mask is not None:
-            pad = torch.where(attention_mask.unsqueeze(1).unsqueeze(2) == 0, -torch.inf, 0.0).to(x.dtype)
-            mask = mask + pad
-            # 防止attention_mask+上三角mask将整行都mask掉之后softmax出现Nan (推理左pad才会出现)
-            # 还有方法是第一key置0即直接将mask[0]设置为0，但是会将原本正常的行改错即第一key应该mask掉，不过误差较小
-            mask = torch.where(mask.isinf().all(-1, True), 0.0, mask)
-        attn = attn + mask
-
-        # 7. softmax + dropout
-        attn = self.attn_dropout(F.softmax(attn, dim = -1))
-
-        # 8. 注意力输出: y = att @ V，然后 transpose + reshape 回 (B, T, C)
-        y = attn @ v
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=is_causal,
+            enable_gqa=(self.n_kv_head != self.n_head),
+        )
         y = y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)
-
-        # 9. 输出投影 + dropout
-        y = self.resid_dropout(self.o_proj(y))
-        return y
+        return self.resid_dropout(self.o_proj(y))
 
 
 # ============================================================

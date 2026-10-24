@@ -193,6 +193,7 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 
 - 不混用绝对值：HF 一张表，自实现一张表；比值可以放同一张表。
 - HF baseline 必须记录：`attn_implementation`、dtype、device_map、batch、`max_new_tokens`、transformers 版本。
+- 自实现 attention 从 `W2-0003` 起固定为 PyTorch SDPA；`W2-0002` 是手写 attention 的历史 run，两者的绝对数字不可直接混读。
 - 自实现必须记录：block_size、max_batch、scheduler 策略、preemption、dtype、prefix cache 开关。
 
 ### 5.5 正确性先于性能
