@@ -64,6 +64,53 @@ class Timer:
         self._last = self.stop()
 
 
+class CudaEventTimer:
+    """Timing on the GPU timeline; ``stop`` synchronizes before reading the delta.
+
+    Same ``start()/stop()`` interface as :class:`Timer`. Refuses to construct without CUDA
+    instead of silently falling back to a wall clock — the whole point of ``cuda_event`` is
+    that a wall clock would include host-side launch gaps.
+    """
+
+    kind = "cuda_event"
+
+    def __init__(self) -> None:
+        if not torch.cuda.is_available():
+            raise RuntimeError("timer='cuda_event' needs CUDA, but torch.cuda is unavailable")
+        self._start: torch.cuda.Event | None = None
+        self._end: torch.cuda.Event | None = None
+
+    def start(self) -> "CudaEventTimer":
+        torch.cuda.synchronize()
+        self._start = torch.cuda.Event(enable_timing=True)
+        self._end = torch.cuda.Event(enable_timing=True)
+        self._start.record()
+        return self
+
+    def stop(self) -> float:
+        if self._start is None or self._end is None:
+            raise RuntimeError("stop() called before start()")
+        self._end.record()
+        torch.cuda.synchronize()
+        return self._start.elapsed_time(self._end)
+
+
+def make_timer(device: str | None = None, kind: str = "auto") -> Timer | CudaEventTimer:
+    """Pick the timer the measure protocol asks for.
+
+    ``auto`` resolves from the device actually in use: CUDA gets events, everything else
+    gets ``perf_counter`` + an explicit backend sync (MPS/CPU).
+    """
+    resolved = kind
+    if resolved == "auto":
+        resolved = "cuda_event" if str(device or "").lower().startswith("cuda") else "perf_counter"
+    if resolved == "perf_counter":
+        return Timer(device, kind="perf_counter")
+    if resolved == "cuda_event":
+        return CudaEventTimer()
+    raise ValueError(f"unknown timer kind {kind!r}; choose auto/perf_counter/cuda_event")
+
+
 def current_memory_mb() -> float | None:
     try:
         if torch.cuda.is_available():
@@ -168,6 +215,69 @@ def summarize(values: Iterable[float | None]) -> dict[str, float | int]:
         "mean": mean,
         "cv": cv,
     }
+
+
+def repeat_stability(
+    rows: Sequence[dict[str, Any]],
+    metric_names: Sequence[str] = ("ttft_ms", "tpot_ms"),
+) -> dict[str, dict[str, Any]]:
+    """Repeat-to-repeat CV, computed *inside* a length bucket.
+
+    ``overall`` CV is meaningless for W2: the prompt set spans 16..2048 tokens, so TTFT
+    varies by an order of magnitude across buckets no matter how steady the machine is.
+    A 4% jitter plus a 40x length spread still gives a scary-looking overall CV.
+
+    Values are grouped per bucket, then per prompt (or context, for synthetic workloads),
+    and each prompt contributes one CV over its repeats. Buckets report the median and the
+    worst prompt so one pathological prompt stays visible without deciding the verdict.
+    """
+    buckets: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for row in rows:
+        bucket = str(row.get("bucket") or f"ctx{row.get('context')}")
+        group = str(row.get("prompt_id") or bucket)
+        buckets.setdefault(bucket, {}).setdefault(group, []).append(row)
+
+    out: dict[str, dict[str, Any]] = {}
+    for bucket, groups in buckets.items():
+        entry: dict[str, Any] = {"n_prompts": len(groups)}
+        for metric in metric_names:
+            cvs = []
+            for group in groups.values():
+                values = [row.get(metric) for row in group]
+                if sum(value is not None and math.isfinite(float(value)) for value in values) < 2:
+                    continue
+                cv = summarize(values)["cv"]
+                if cv is not None:
+                    cvs.append(float(cv))
+            entry[f"{metric}_cv_median"] = statistics.median(cvs) if cvs else None
+            entry[f"{metric}_cv_max"] = max(cvs) if cvs else None
+            entry[f"{metric}_n"] = len(cvs)
+        out[bucket] = entry
+    return out
+
+
+def per_prompt_summary(
+    rows: Sequence[dict[str, Any]],
+    metric_names: Sequence[str] = ("ttft_ms", "tpot_ms"),
+) -> list[dict[str, Any]]:
+    """One entry per (model, prompt): the unit a paired baseline can be matched on."""
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        key = (str(row.get("model")), str(row.get("prompt_id") or f"ctx{row.get('context')}"))
+        groups.setdefault(key, []).append(row)
+
+    out = []
+    for (model, prompt), subset in sorted(groups.items()):
+        out.append(
+            {
+                "model": model,
+                "prompt": prompt,
+                "bucket": subset[0].get("bucket"),
+                "n": len(subset),
+                **{name: summarize([row.get(name) for row in subset]) for name in metric_names},
+            }
+        )
+    return out
 
 
 def ratio(numerator: float | None, denominator: float | None) -> float | None:

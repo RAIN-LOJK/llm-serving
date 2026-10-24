@@ -11,11 +11,18 @@ from typing import Any
 from bench.engines.base import Engine, GenerationResult
 from bench.engines.dummy import DummyEngine
 from bench.engines.hf import HFEngine
+from bench.engines.minillm import ServeEngine
 
-__all__ = ["Engine", "GenerationResult", "DummyEngine", "HFEngine", "build_engine"]
+__all__ = [
+    "Engine",
+    "GenerationResult",
+    "DummyEngine",
+    "HFEngine",
+    "ServeEngine",
+    "build_engine",
+]
 
 _NOT_YET = {
-    "minillm": "the toy MiniLLM engine adapter is not wired yet (S2/W2)",
     "continuous": "continuous batching lives in serve/scheduler.py (W3)",
     "paged": "paged KV lives in serve/block_manager.py (W4)",
     "hybrid": "hybrid attention lives in serve/state_pool.py (W7)",
@@ -43,6 +50,14 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "bfloat16"))),
             device=device,
             trust_remote_code=bool(model_cfg.get("trust_remote_code", False)),
+        )
+    if impl == "minillm":
+        return ServeEngine(
+            name=name,
+            revision=model_cfg.get("revision"),
+            dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "float32"))),
+            device=device,
+            model_path=model_cfg.get("path"),
         )
     if impl in _NOT_YET:
         raise NotImplementedError(f"engine impl={impl!r}: {_NOT_YET[impl]}")

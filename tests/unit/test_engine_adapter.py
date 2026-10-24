@@ -1,0 +1,38 @@
+"""The ``minillm`` engine impl: factory wiring and fail-loudly behaviour."""
+
+from __future__ import annotations
+
+import pytest
+
+from bench.engines import build_engine
+from bench.engines.minillm import ServeEngine
+
+
+def test_factory_wires_minillm():
+    engine = build_engine({"name": "Qwen/Qwen3-0.6B"}, {"impl": "minillm", "device": "cpu"})
+    assert isinstance(engine, ServeEngine)
+    assert engine.impl == "minillm"
+    assert engine.device == "cpu"
+
+
+def test_factory_keeps_unknown_impls_loud():
+    with pytest.raises(NotImplementedError, match="W3"):
+        build_engine({"name": "x"}, {"impl": "continuous"})
+
+
+def test_missing_checkpoint_fails_loudly():
+    engine = ServeEngine("definitely/not-a-cached-model", device="cpu")
+    with pytest.raises(FileNotFoundError, match="not in the HF cache"):
+        engine.load()
+
+
+def test_encode_requires_load():
+    engine = ServeEngine("Qwen/Qwen3-0.6B", device="cpu")
+    with pytest.raises(RuntimeError, match="load"):
+        engine.encode("hello")
+
+
+def test_unknown_dtype_is_rejected():
+    engine = ServeEngine("Qwen/Qwen3-0.6B", dtype="float8", device="cpu")
+    with pytest.raises(ValueError, match="unsupported dtype"):
+        engine.load()

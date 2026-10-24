@@ -32,154 +32,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from model import KVcache, MiniLLM, MiniLLMConfig  # noqa: E402
+from model import KVcache, MiniLLM  # noqa: E402
+from model.loading import (  # noqa: E402  (re-exported: tests import them from here)
+    cached_snapshot,
+    config_from_hf,
+    load_checkpoint,
+    map_hf_key,
+    read_checkpoint,
+    rope_parameters,
+)
+
+load_qwen3 = load_checkpoint
 
 LAYER_TOL = 1e-3
 LOGITS_TOL = 0.05
 
 
 # --------------------------------------------------------------------------- HF -> local
-
-def cached_snapshot(repo: str, revision: str | None) -> Path | None:
-    """Local HF cache lookup; returns None instead of raising (tests skip on it)."""
-    cache = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
-    snapshots = cache / ("models--" + repo.replace("/", "--")) / "snapshots"
-    if revision:
-        path = snapshots / revision
-        return path if path.exists() else None
-    dirs = sorted(p for p in snapshots.glob("*") if p.is_dir()) if snapshots.exists() else []
-    return max(dirs, key=lambda p: p.stat().st_mtime) if dirs else None
-
-
-def rope_parameters(hf) -> dict:
-    """RoPE settings, normalised across transformers versions.
-
-    transformers 5.x moved ``rope_theta`` (and ``partial_rotary_factor``, ``mrope_*``) into
-    ``rope_parameters``; 4.x exposed them as flat attributes. Reading only the flat one
-    silently falls back to 1e4 — the Qwen3 default is 1e6, so every layer would diff for
-    the wrong reason (same failure mode as PITFALLS P-03: a default that looks wired).
-    """
-    params = dict(getattr(hf, "rope_parameters", None) or getattr(hf, "rope_scaling", None) or {})
-    for name in ("rope_theta", "partial_rotary_factor", "rope_type"):
-        if name not in params and getattr(hf, name, None) is not None:
-            params[name] = getattr(hf, name)
-    return params
-
-
-def config_from_hf(hf) -> MiniLLMConfig:
-    """Map a (possibly multimodal) HF config onto the hand-written config."""
-    text = hf.get_text_config() if hasattr(hf, "get_text_config") else hf
-    head_dim = getattr(text, "head_dim", None) or text.hidden_size // text.num_attention_heads
-
-    rope = rope_parameters(text)
-    theta = rope.get("rope_theta")
-    if theta is None:
-        raise ValueError(
-            f"{type(text).__name__} exposes no rope_theta (rope_parameters={rope!r}); "
-            "refusing to guess 1e4 for a checkpoint that may use something else"
-        )
-    rope_type = str(rope.get("rope_type", "default"))
-    if rope_type != "default":
-        raise ValueError(
-            f"rope_type={rope_type!r}: model/ implements unscaled RoPE only; "
-            "scaled variants (linear/dynamic/yarn) need their own alignment"
-        )
-
-    return MiniLLMConfig(
-        vocab_size=text.vocab_size,
-        max_position_embeddings=text.max_position_embeddings,
-        n_embd=text.hidden_size,
-        n_head=text.num_attention_heads,
-        n_kv_head=text.num_key_value_heads,
-        n_layer=text.num_hidden_layers,
-        n_inner=text.intermediate_size,
-        dropout=0.0,
-        bias=bool(getattr(text, "attention_bias", False)),
-        norm_eps=float(text.rms_norm_eps),
-        tie_word_embeddings=bool(text.tie_word_embeddings),
-        head_dim=head_dim,
-        rope_theta=float(theta),
-        partial_rotary_factor=float(rope.get("partial_rotary_factor", 1.0)),
-        qk_norm=True,
-    )
-
-
-def map_hf_key(key: str) -> str | None:
-    """Qwen3 checkpoint key -> this repo's module path. None means "not ours"."""
-    if key.endswith("rotary_emb.inv_freq") or key.endswith("rotary_emb.cos_cached"):
-        return None
-    if key.startswith("model."):
-        key = key[len("model."):]
-    if key.startswith("embed_tokens."):
-        key = "token_embedding." + key[len("embed_tokens."):]
-    return key
-
-
-def read_checkpoint(model_path: Path, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-    from safetensors.torch import load_file
-
-    shards = sorted(model_path.glob("*.safetensors"))
-    if not shards:
-        raise SystemExit(f"no *.safetensors in {model_path}")
-    state: dict[str, torch.Tensor] = {}
-    for shard in shards:
-        state.update(load_file(str(shard), device="cpu"))
-    return {k: v.to(dtype) for k, v in state.items()}
-
-
-def _describe_mismatch(own: dict, incoming: dict) -> str | None:
-    """Compact, grouped report of what model/ still has to grow (None when it fits)."""
-    import re
-
-    def like(key: str) -> str:
-        return re.sub(r"layers\.\d+", "layers.*", key)
-
-    missing = sorted({like(k) for k in set(own) - set(incoming)})
-    extra = sorted({like(k) for k in set(incoming) - set(own)})
-    shapes = {
-        (like(k), tuple(own[k].shape), tuple(incoming[k].shape))
-        for k in set(own) & set(incoming)
-        if own[k].shape != incoming[k].shape
-    }
-    if not (missing or extra or shapes):
-        return None
-
-    lines = ["the checkpoint does not fit model/ yet — that gap is the W1 to-do:"]
-    if extra:
-        lines.append(f"  checkpoint has {len(extra)} parameter kind(s) the model lacks:")
-        lines += [f"    {k}" for k in extra[:8]]
-    if missing:
-        lines.append("  model has parameters the checkpoint cannot fill:")
-        lines += [f"    {k}" for k in missing[:8]]
-    if shapes:
-        lines.append("  shape mismatch (model vs checkpoint):")
-        lines += [
-            f"    {k}: {own_shape} vs {ckpt_shape}" for k, own_shape, ckpt_shape in sorted(shapes)[:8]
-        ]
-    lines.append("  W1 expects: head_dim=128 (not hidden/n_head=64) and q_norm/k_norm over head_dim.")
-    return "\n".join(lines)
-
-
-def load_qwen3(model_path: Path, dtype: torch.dtype = torch.float32, device: str = "cpu") -> MiniLLM:
-    from transformers import AutoConfig
-
-    hf = AutoConfig.from_pretrained(model_path, local_files_only=True)
-    model = MiniLLM(config_from_hf(hf))
-
-    state, mapped = read_checkpoint(model_path, dtype), {}
-    for key, value in state.items():
-        local = map_hf_key(key)
-        if local is not None:
-            mapped[local] = value
-
-    problem = _describe_mismatch(model.state_dict(), mapped)
-    if problem:
-        raise RuntimeError(problem)
-    model.load_state_dict(mapped, strict=True)
-
-    model.to(device=device, dtype=dtype).eval()
-    return model
-
 
 # ------------------------------------------------------------------------------- forward
 

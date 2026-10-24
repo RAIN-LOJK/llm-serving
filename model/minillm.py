@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from transformers import PreTrainedModel
 
 from model.config import MiniLLMConfig
-from model.layers import RMSNorm, TransformerBlock
+from model.layers import RMSNorm, TransformerBlock, rope_cos_sin
 
 
 class MiniLLM(PreTrainedModel):
@@ -15,6 +15,8 @@ class MiniLLM(PreTrainedModel):
         super().__init__(config)
         self.token_embedding = nn.Embedding(config.vocab_size, config.n_embd)
         self.layers = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layer)])
+        self.head_dim = getattr(config, "head_dim", None) or config.n_embd // config.n_head
+        self.rope_theta = float(getattr(config, "rope_theta", 10000.0))
         self.norm = RMSNorm(config.n_embd, config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
@@ -41,14 +43,22 @@ class MiniLLM(PreTrainedModel):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=std)
 
-    def forward(self, tokens, targets=None, attention_mask=None, past_keys_values=None):
+    def forward(self, tokens, targets=None, attention_mask=None, past_keys_values=None, logits_to_keep=None):
         B, T = tokens.shape
         x = self.token_embedding(tokens)
 
+        past_len = 0 if past_keys_values is None else past_keys_values.past_len(0)
+        cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
         for idx, layer in enumerate(self.layers):
-            x = layer(x, attention_mask, idx, past_keys_values)
+            x = layer(x, attention_mask, idx, past_keys_values, cos, sin)
 
         x = self.norm(x)
+        if logits_to_keep is not None:
+            # 训练形状的 API 默认给全序列 logits（算 loss 需要每个位置）；推理只要末位，
+            # 必须在 lm_head 之前切，否则 593 MiB 的 [T, vocab] 张量和那次大 matmul 已经付掉了（P-13）。
+            if targets is not None:
+                raise ValueError("logits_to_keep is an inference-only slice; it cannot feed a loss")
+            x = x[:, -int(logits_to_keep):]
         logits = self.lm_head(x)
 
         loss = None

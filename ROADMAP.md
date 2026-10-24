@@ -183,14 +183,14 @@
 
 ### W2 · 基准框架
 
-- `bench/loadgen.py`：32 条固定 prompt（长度桶 16–64 / 256–512 / 1024–2048），支持到达率 λ
+- `bench/loadgen.py`：32 条固定 prompt（长度桶 16–64 / 256–512 / 1024–2048），closed-loop；到达率 λ 推到 W3（没有调度器时 λ 没有意义）
 - `bench/metrics.py`：TTFT / TPOT / tokens-s / 峰值显存 / KV 占用（公式账 + `nvidia-smi` 对照）
 - 对照臂：HF `generate`（同模型、同 batch、同 `max_new_tokens`）
-- **验收**：5 次重复 TTFT/TPOT 中位数波动 ≤ 10%；显存三分项（权重/KV/激活）对上 `nvidia-smi` 的 90%；decode ≥ 0.8× HF（<0.5× 必须给瓶颈解释）
+- **验收**：5 次重复的 TTFT/TPOT 抖动 ≤ 10%（**按长度桶**取每 prompt 的 CV 中位数，`overall` 会被 16–2048 的长度跨度污染）；`weights+KV` 占 torch 分配器峰值的 ≥90%（按 context 分组取中位数，`nvidia-smi` 只作对照——它含 ~0.5 GB CUDA context，不能当分母）；decode ≥ 0.8× HF（按 prompt 配对取中位数，配对前校验 prompt hash / dtype / device / `max_new_tokens` / `out_tokens`）
 
 ### W3 · 连续批处理
 
-- 请求队列 + 每步准入/退出 + per-request 状态机；对照静态批
+- 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson λ，`loadgen.poisson_arrivals` 已留接口）；对照静态批
 - **验收**：高 λ 吞吐 ≥ 1.3×；p99 TTFT 分解为排队+计算；不同到达顺序输出一致
 - **预期风险**：0.6B 上 Python 开销占比大，收益可能不显著——**把交叉点测出来就是结论**
 
@@ -375,3 +375,4 @@ python scripts/exp_index.py --check
 | 2026-10-21 | v3 | **项目重组**：旧训练线删除（文本快照 tag `legacy-learning-2026-08`）；实验契约改为不可变 run 目录 + 生成索引（`docs/experiments.md`）；测试改 pytest 自包含护栏；设备分层 `dev-mps` / `measure-cuda`；W0 双载体 revision 已 pin |
 | 2026-10-22 | v4 | **W0 完成**：`W0-0001` 实测 P1 成立（8k 7.80× / 32k 8.90×）、P2 不成立（交叉点 ≈193 token）、P3 数值成立但不可归因；修正 §3.1 交叉点（1.5k → 193）、产出清单与 `probe_memory.py` 的描述；D1 接受 |
 | 2026-10-23 | v5 | **W1 完成**：Qwen3-0.6B 逐层对齐（4 prompt × 贪心 64/64 id，logits `max|Δ|` 2.0e-5，每层 9.8e-4–1.95e-3）；阈值 `1e-3 → 1e-2`——首 token 有 attention-sink 离群值（\|x\|≈7e3），fp32 一个 ulp 就有 9.8e-4，原阈值等于要求"≤1 ulp"；golden 改用 hook 采块输出（transformers 5.x 的 `hidden_states[-1]` 是 post-norm，见 P-16）、`rope_theta` 改从 `rope_parameters` 读（P-17） |
+| 2026-10-24 | v6 | **W2 工具链**：`impl="minillm"` 适配器、`cuda_event` 计时接线、`[accept]` 真求值；判据口径三处修正——CV 改按长度桶（`overall` 混了 16–2048 的长度跨度）、显存对齐改为 `weights+KV` / **torch 分配器峰值**（`nvidia-smi` 含 ~0.5 GB CUDA context，不能当分母，只作对照）、配对 baseline 先校验 prompt hash/dtype/device/`max_new_tokens`/`out_tokens`，不符记 `invalid`；另修 RoPE 每层一张 40960 行表（-280 MB，P-18）与 `logits_to_keep`（P-13） |

@@ -1,4 +1,4 @@
-"""RoPE contract: GPT-NeoX pairing, position zero identity, table shapes."""
+"""RoPE contract: GPT-NeoX pairing, position zero identity, no per-layer tables."""
 
 from __future__ import annotations
 
@@ -43,3 +43,14 @@ def test_rotate_half_formula():
         [x1 * cos[2, :4] - x2 * sin[2, :4], x1 * sin[2, :4] + x2 * cos[2, :4]], dim=-1
     )
     assert torch.allclose(y, expected, atol=1e-6)
+
+
+def test_model_keeps_no_rope_table(tiny_model):
+    """RoPE is computed per forward.
+
+    A per-layer 40960-row table is 10 MB in bf16; Qwen3-0.6B has 28 layers, so the duplicate
+    tables were 280 MB -- 25% of the model footprint -- for values that are identical.
+    """
+    buffers = list(tiny_model.named_buffers())
+    assert [name for name, _ in buffers if name.endswith(("sin", "cos"))] == []
+    assert sum(tensor.numel() * tensor.element_size() for _, tensor in buffers) == 0

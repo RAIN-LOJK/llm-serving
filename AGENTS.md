@@ -33,7 +33,7 @@ python -m bench.run --config configs/experiments/W0/9001-runner-smoke.toml \
 
 - run 目录不可变：`results/<stage>/<4位序号>-<slug>/`，`run_id` 形如 `W0-0001`。目录或 id 已存在时 runner 直接拒绝；失败/中断的 run 也保留，用 `supersedes` 指回旧 run。
 - 非 `smoke` 的正式 run 要求 git 干净；dirty 只能用 `--allow-dirty` 做 exploratory，报告不得引用。正式探测前 pin HF `revision` 为 commit hash，`main` 会被配置校验拒绝。
-- `arrival = "poisson"`（W3）和 `timer = "cuda_event"`（W2）尚未接线，配置校验会直接报错，不要伪造。
+- `arrival = "poisson"`（W3）尚未接线，配置校验会直接报错，不要伪造；`timer = "cuda_event"` 已在 W2 接线，但要求 `[engine].device = "cuda"`。
 - `results/INDEX.md` 和 `index.csv` 由 `scripts/exp_index.py` 生成，**不要手改**。
 - `notes.md` / `verdict.json` 是人的判断。agent 可以起草，但 `reviewer` 保持 `null`、`verdict` 保持 `unreviewed`，直到用户确认。
 - `configs/thresholds.toml` 的值是目标值/判失败线，不是实测结果。M1（`dev-mps`）只做正确性/冒烟/趋势；正式数字只来自 `measure-cuda`（4090），两套数字永不同表。

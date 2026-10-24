@@ -24,8 +24,16 @@ batch_sizes = [1, 2, 4]
 [W2.bench]
 status = "target"
 basis_run = ""
+# CV is judged inside a length bucket (overall mixes 16..2048 token prompts).
 ttft_cv_max = 0.10
+tpot_cv_max = 0.10
+# (weights + KV) / torch allocator peak, per context, judged on the median context.
+# Not judged against nvidia-smi: the driver number includes the CUDA context (~0.5 GB at
+# this size), which no formula predicts, so the target would be unreachable by construction.
+# The residual is activation workspace (T^2 attention) -- a property of the implementation,
+# so long-context rows are reported next to the median instead of being averaged away.
 memory_match_ratio = 0.90
+# median over prompts of (baseline TPOT / our TPOT), matched by prompt id.
 decode_speed_vs_hf_min = 0.80
 
 [W3.continuous]

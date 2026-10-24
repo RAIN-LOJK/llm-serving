@@ -22,10 +22,22 @@ def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
         cos: shape (max_seq_len, dim // 2)
         sin: shape (max_seq_len, dim // 2)
     """
-    freqs = 1. / theta ** (torch.arange(0, dim, 2, dtype=torch.float)/dim)
-    angles = freqs.unsqueeze(0) * torch.arange(max_seq_len, dtype=torch.float).unsqueeze(1)
+    cos, sin = rope_cos_sin(dim, theta, 0, max_seq_len, dtype=torch.float32)
+    return sin, cos
 
-    return angles.sin(), angles.cos()
+
+def rope_cos_sin(head_dim, theta, start, length, device=None, dtype=torch.float32):
+    """cos/sin for positions [start, start+length), computed on demand.
+
+    The table belongs to the *model*, not to each layer: 28 layers x 2 x 40960 x 64 bf16 is
+    280 MB on Qwen3-0.6B, all of it duplicates. ``MiniLLM`` computes this once per forward
+    and hands ``(cos, sin)`` to every block; a block called directly still gets the same
+    values by computing them itself.
+    """
+    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+    positions = torch.arange(start, start + length, dtype=torch.float32, device=device)
+    angles = torch.outer(positions, inv_freq)
+    return angles.cos().to(dtype), angles.sin().to(dtype)
 
 
 def apply_rotary_emb(x: torch.Tensor, cos, sin):
@@ -104,12 +116,11 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Dropout(config.dropout)
         self.resid_dropout = nn.Dropout(config.dropout)
 
-        # 预计算 RoPE
-        sin, cos = precompute_rope_freqs(self.head_dim, config.max_position_embeddings, config.rope_theta)
-        self.register_buffer("sin", sin, persistent=False)
-        self.register_buffer("cos", cos, persistent=False)
+        # RoPE 表由 MiniLLM 每步算一次传进来；这里只记参数，不存表（见 rope_cos_sin）
+        self.rope_theta = float(getattr(config, "rope_theta", 10000.0))
 
-    def forward(self, x, attention_mask=None, idx = 0, past_keys_values:Optional[KVcache]=None):
+    def forward(self, x, attention_mask=None, idx = 0, past_keys_values:Optional[KVcache]=None,
+                cos=None, sin=None):
         B, T, C = x.shape  # (batch, seq_len, n_embd)
         past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
 
@@ -117,8 +128,9 @@ class Attention(nn.Module):
         q = self.q_norm(self.q_proj(x).view(B, T, self.n_head, self.head_dim))
         k = self.k_norm(self.k_proj(x).view(B, T, self.n_kv_head, self.head_dim))
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim)
-        # 2. 对 Q/K 施加 RoPE
-        cos, sin = self.cos[past_len:past_len+T], self.sin[past_len:past_len+T]
+        # 2. 对 Q/K 施加 RoPE（cos/sin 由模型层算好传入；直接调用本层时现算）
+        if cos is None or sin is None:
+            cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
         # 3. 转置为 (B, n_head, T, head_dim) 方便矩阵乘法
@@ -142,10 +154,12 @@ class Attention(nn.Module):
         attn = q @ k.transpose(-2, -1) / math.sqrt(self.head_dim)
 
         # 6. 因果掩码: 上三角设为 -inf
-        mask = torch.triu(torch.full((T, past_len+T), float('-inf'), device=x.device), diagonal=past_len+1)
+        # 掩码必须跟 q/k 同 dtype：fp32 掩码会把 bf16 的 attn 提升成 fp32，
+        # 随后 attn @ v 就是 fp32 × bf16 直接报错（W2 的 bf16 跑法会撞上）。
+        mask = torch.triu(torch.full((T, past_len+T), float('-inf'), device=x.device, dtype=x.dtype), diagonal=past_len+1)
         # 输入掩码
         if attention_mask is not None:
-            pad = torch.where(attention_mask.unsqueeze(1).unsqueeze(2) == 0, -torch.inf, 0.0)
+            pad = torch.where(attention_mask.unsqueeze(1).unsqueeze(2) == 0, -torch.inf, 0.0).to(x.dtype)
             mask = mask + pad
             # 防止attention_mask+上三角mask将整行都mask掉之后softmax出现Nan (推理左pad才会出现)
             # 还有方法是第一key置0即直接将mask[0]设置为0，但是会将原本正常的行改错即第一key应该mask掉，不过误差较小
@@ -208,7 +222,7 @@ class TransformerBlock(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.n_embd, config.norm_eps)
         self.mlp = MLP(config)
 
-    def forward(self, x, attention_mask=None, idx=0, past_keys_values=None):
-        x = x + self.self_attn(self.input_layernorm(x), attention_mask, idx, past_keys_values)
+    def forward(self, x, attention_mask=None, idx=0, past_keys_values=None, cos=None, sin=None):
+        x = x + self.self_attn(self.input_layernorm(x), attention_mask, idx, past_keys_values, cos, sin)
         x = x + self.mlp(self.post_attention_layernorm(x))
         return x

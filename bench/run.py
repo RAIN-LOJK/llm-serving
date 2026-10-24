@@ -33,6 +33,8 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
 from bench import env as envmod
 from bench import index as indexmod
 from bench import metrics as metricsmod
+from bench import thresholds as thresholdmod
+from bench.index import find_summary
 from bench.engines import build_engine
 from bench.loadgen import PromptSet, synthetic_ids
 
@@ -151,8 +153,11 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append("[measure].repeats must be >= 1")
     if measure.get("timer", "auto") not in TIMERS:
         errors.append(f"[measure].timer must be one of {sorted(TIMERS)}")
-    if measure.get("timer") == "cuda_event":
-        errors.append("timer='cuda_event' is not wired yet; use 'auto' or 'perf_counter' until W2")
+    if measure.get("timer") == "cuda_event" and not device.startswith("cuda"):
+        errors.append(
+            f"timer='cuda_event' requires [engine].device = 'cuda' (got {device!r}); "
+            "use 'auto' to resolve it from the device at run time"
+        )
 
     accept = cfg.get("accept") or {}
     if accept.get("mode", "record_only") not in {"record_only", "threshold"}:
@@ -358,6 +363,7 @@ def _cases_for_model(
                 for row in range(batch):
                     yield {
                         "context": ctx,
+                        "bucket": None,
                         "batch": batch,
                         "request_in_batch": row,
                         "prompt_id": None,
@@ -372,6 +378,7 @@ def _cases_for_model(
                 for row in range(batch):
                     yield {
                         "context": len(ids),
+                        "bucket": prompt.bucket,
                         "batch": batch,
                         "request_in_batch": row,
                         "prompt_id": prompt.id,
@@ -412,10 +419,12 @@ def _execute(
             manifest["device_class"] = _device_class_for(engine.device, snapshot)
             manifest["engine"]["resolved_device"] = engine.device
             manifest["engine"]["vocab_size"] = int(getattr(engine, "vocab_size", 0))
+            manifest["engine"]["dtype"] = model_cfg.get("dtype")
             manifest["engine"]["attn_implementation"] = getattr(
                 engine, "attn_implementation", None
             )
 
+            timer = metricsmod.make_timer(engine.device, str((cfg.get("measure") or {}).get("timer", "auto")))
             cases = list(_cases_for_model(cfg, engine, prompt_set))
             if limit is not None:
                 cases = cases[:limit]
@@ -426,19 +435,21 @@ def _execute(
                         engine.generate(case["prompt_ids"], max_new_tokens)
                     for repeat in range(repeats):
                         metricsmod.reset_peak()
-                        start = metricsmod.now()
+                        timer.start()
                         try:
                             result = engine.generate(case["prompt_ids"], max_new_tokens)
-                            e2e_ms = metricsmod.elapsed_ms(start)
+                            e2e_ms = timer.stop()
                             row = {
                                 "run_id": manifest["run_id"],
                                 "model": str(model_cfg.get("name", "—")),
                                 "impl": engine.impl,
                                 "device": engine.device,
                                 "device_class": manifest["device_class"],
+                                "dtype": model_cfg.get("dtype"),
                                 "phase": "measured",
                                 "repeat": repeat,
                                 "context": case["context"],
+                                "bucket": case.get("bucket"),
                                 "batch": case["batch"],
                                 "request_in_batch": case["request_in_batch"],
                                 "prompt_id": case["prompt_id"],
@@ -471,9 +482,11 @@ def _execute(
                                 "impl": getattr(engine, "impl", "—"),
                                 "device": getattr(engine, "device", "—"),
                                 "device_class": manifest["device_class"],
+                                "dtype": model_cfg.get("dtype"),
                                 "phase": "measured",
                                 "repeat": repeat,
                                 "context": case["context"],
+                                "bucket": case.get("bucket"),
                                 "batch": case["batch"],
                                 "request_in_batch": case["request_in_batch"],
                                 "prompt_id": case["prompt_id"],
@@ -484,7 +497,7 @@ def _execute(
                                 "tpot_ms": None,
                                 "prefill_ms": None,
                                 "decode_ms": None,
-                                "e2e_ms": metricsmod.elapsed_ms(start),
+                                "e2e_ms": timer.stop(),
                                 "peak_mem_mb": metricsmod.peak_memory_mb(),
                                 "driver_mem_mb": metricsmod.driver_memory_mb(),
                                 "weights_mb": None,
@@ -515,6 +528,7 @@ def _summary(
     cfg: dict[str, Any],
     manifest: dict[str, Any],
     rows: list[dict[str, Any]],
+    out_root: str | Path = "results",
 ) -> dict[str, Any]:
     metric_names = (
         "ttft_ms",
@@ -533,6 +547,8 @@ def _summary(
         "mem_delta_mb",
     )
     overall = {name: metricsmod.summarize([r.get(name) for r in rows]) for name in metric_names}
+    stability = metricsmod.repeat_stability(rows, ("ttft_ms", "tpot_ms", "e2e_ms"))
+    by_prompt = metricsmod.per_prompt_summary(rows, ("ttft_ms", "tpot_ms", "out_tokens"))
 
     group_keys = sorted(
         {(r["model"], int(r["context"]), int(r["batch"])) for r in rows},
@@ -556,10 +572,13 @@ def _summary(
     errors = [r for r in rows if not r["ok"]]
     if errors:
         warnings.append(f"{len(errors)}/{len(rows)} rows failed (see metrics.jsonl)")
-    for name in ("ttft_ms", "tpot_ms", "e2e_ms"):
-        agg = overall[name]
-        if agg["n"] >= 3 and agg["cv"] is not None and agg["cv"] > 0.10:
-            warnings.append(f"{name} CV={agg['cv']:.3f} > 0.10; rerun the whole config before citing")
+    for bucket, entry in stability.items():
+        for name in ("ttft_ms", "tpot_ms", "e2e_ms"):
+            cv = entry.get(f"{name}_cv_median")
+            if cv is not None and cv > 0.10:
+                warnings.append(
+                    f"{name} CV={cv:.3f} > 0.10 in bucket {bucket}; rerun the whole config before citing"
+                )
     if manifest.get("git", {}).get("dirty"):
         warnings.append("git tree was dirty; this run is exploratory and must not be cited")
     if manifest.get("device_class") == "dev-mps" and manifest.get("type") != "smoke":
@@ -570,14 +589,38 @@ def _summary(
     if manifest.get("type") in {"microbench", "scenario"} and not cfg.get("baseline", {}).get("run_id"):
         warnings.append("no paired baseline run_id; mechanism conclusions are incomplete")
 
+    protocol = {
+        "warmup": _warmup_count(cfg),
+        "repeats": _repeat_count(cfg),
+        "timer": (cfg.get("measure") or {}).get("timer", "auto"),
+        "max_new_tokens": int((cfg.get("workload") or {}).get("max_new_tokens", 0)),
+        "prompt_sha256": (manifest.get("prompt") or {}).get("sha256"),
+        "dtype": (manifest.get("engine") or {}).get("dtype"),
+        "device_class": manifest.get("device_class"),
+    }
+
     accept = cfg.get("accept") or {}
+    baseline_id = str((cfg.get("baseline") or {}).get("run_id") or "")
+    baseline_summary = find_summary(baseline_id, out_root) if baseline_id else None
+    if baseline_id and baseline_summary is None:
+        warnings.append(f"baseline {baseline_id} has no summary.json under {out_root}; ratio criteria stay pending")
+    baseline_info = {"run_id": baseline_id or None, "found": baseline_summary is not None}
+
     if accept.get("mode", "record_only") == "record_only":
         acceptance = [{"name": "record_only", "status": "recorded"}]
     else:
-        acceptance = [
-            {"name": str(name), "status": "pending", "reason": "threshold evaluation lands in W2"}
-            for name in accept.get("criteria", [])
-        ]
+        acceptance = thresholdmod.evaluate(
+            accept.get("criteria", []),
+            {
+                "overall": overall,
+                "groups": groups,
+                "stability": stability,
+                "by_prompt": by_prompt,
+                "protocol": protocol,
+            },
+            thresholdmod.load(cfg.get("thresholds")),
+            baseline=baseline_summary,
+        )
 
     key_name, key_value = metricsmod.key_metric({"overall": overall})
     return {
@@ -590,15 +633,13 @@ def _summary(
         "n_errors": len(errors),
         "overall": overall,
         "groups": groups,
+        "stability": stability,
+        "by_prompt": by_prompt,
+        "baseline": baseline_info,
         "warnings": warnings,
         "acceptance": acceptance,
         "key_metric": {"name": key_name, "value": key_value},
-        "protocol": {
-            "warmup": _warmup_count(cfg),
-            "repeats": _repeat_count(cfg),
-            "timer": (cfg.get("measure") or {}).get("timer", "auto"),
-            "max_new_tokens": int((cfg.get("workload") or {}).get("max_new_tokens", 0)),
-        },
+        "protocol": protocol,
     }
 
 
@@ -689,7 +730,7 @@ def run_config(
     started = metricsmod.now()
     try:
         rows = _execute(cfg, run_dir, manifest, snapshot, engine_override, device_override, limit)
-        summary = _summary(cfg, manifest, rows)
+        summary = _summary(cfg, manifest, rows, out_root)
         write_json(run_dir / "summary.json", summary)
 
         duration = metricsmod.elapsed_ms(started) / 1000.0

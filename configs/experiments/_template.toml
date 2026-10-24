@@ -35,7 +35,7 @@ max_batch = 1
 [measure]
 warmup = 3
 repeats = 5
-timer = "auto"                 # auto | perf_counter（cuda_event 待 W2 接线）
+timer = "auto"                 # auto | perf_counter | cuda_event（cuda_event 需 device=cuda）
 memory = ["torch_peak", "driver"]
 
 [accept]

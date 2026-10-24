@@ -45,6 +45,21 @@ def iter_run_dirs(root: str | Path = "results"):
                 yield run_dir
 
 
+def find_summary(run_id: str, root: str | Path = "results") -> dict[str, Any] | None:
+    """Locate another run's ``summary.json`` by run id (used for paired baselines)."""
+    for run_dir in iter_run_dirs(root):
+        path = run_dir / "summary.json"
+        if not path.exists():
+            continue
+        try:
+            summary = _read_json(path)
+        except json.JSONDecodeError:
+            continue
+        if summary.get("run_id") == run_id:
+            return summary
+    return None
+
+
 def load_run(run_dir: str | Path) -> dict[str, Any]:
     run_dir = Path(run_dir)
     missing = [name for name in REQUIRED if not (run_dir / name).exists()]

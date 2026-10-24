@@ -91,7 +91,7 @@ max_batch = 1
 [measure]
 warmup = 3
 repeats = 5
-timer = "auto"                 # auto | perf_counter（cuda_event 待 W2 接线）
+timer = "auto"                 # auto | perf_counter | cuda_event（cuda_event 需 device=cuda）
 memory = ["torch_peak", "driver"]
 
 [accept]
@@ -106,7 +106,9 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 - `[engine].impl`：必须是 `bench.engines.build_engine` 认识的实现。
 - `[measure]`：默认 `warmup=3, repeats=5`；偏离默认必须在 `notes.md` 写原因。
 - `[accept]`：`mode=record_only` 的 run 不判 pass/fail；`mode=threshold` 必须引用
-  `configs/thresholds.toml` 的键，不能内联魔法数字。
+  `configs/thresholds.toml` 的键，不能内联魔法数字。`bench/thresholds.py` 负责求值：
+  `*_cv_max` 直接对 summary 求值，需要配对 baseline 或驱动侧显存的判据保持
+  `pending` 并写明原因——不会假装通过。
 
 ### 3.2 prompt 集
 
@@ -160,7 +162,7 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | 生成 | greedy | `max_new_tokens=128`；正确性 run 可不同，但必须记录 |
 | 进程 | 一个配置一个进程 | 跨配置重开进程，避免 allocator/thermal 污染 |
 | 顺序 | 同进程同顺序 | 基线在前、候选在后；怀疑顺序效应时反向再跑一个新 run |
-| 方差 | CV ≤ 10% | 超了标 `warning`，重跑整个配置，不挑点 |
+| 方差 | CV ≤ 10%（**按长度桶**算，每 prompt 一个 CV） | 超了标 `warning`，重跑整个配置，不挑点；`overall` 会把 16–2048 token 的长度跨度算进 CV |
 
 ### 5.2 指标定义
 
@@ -213,6 +215,8 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 
 - `scenario` 的 `arrival = "poisson"` 在 W3 才实现；当前 runner 只支持 closed-loop。
 - `microbench` / `scenario` 必须有**配对 baseline**（同 commit、同设备、同 workload、同 dtype）。
+- 配对前 `bench/thresholds.py` 会校验 `prompt_sha256` / `dtype` / `device_class` /
+  `max_new_tokens` 以及每条 prompt 的 `out_tokens`；任一不符判据记 `invalid`，不给比值。
 - 每个机制 run 的 `notes.md` 必须回答“**什么时候不划算**”；答不出就标 `inconclusive`。
 
 ---
