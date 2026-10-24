@@ -1,9 +1,11 @@
 # W2-0003 · attention 路径归因：SDPA 替换手写 attention
 # 与 W2-0002 同模型 / 同 prompt / 同 dtype / 同设备 / 同 max_new_tokens；唯一变化是
-# 代码版本的 attention 实现（W2-0002 是手写 matmul+mask，当前 HEAD 是 SDPA）。
+# 代码版本的 attention 实现（W2-0002 是手写 matmul+mask，这里是 SDPA）。
 # 运行：python -m bench.run --config configs/experiments/W2/0003-sdpa-attn.toml
-# 目的不是阶段门禁，而是回答：W2-0002 的 long-prefill 1.49x 里有多少是 attention 路径。
-# 判据用 record_only；CV/显存只作为 run 质量检查，不新增事后阈值。
+# 两个用途，一次 run 同时满足：
+#   1. 归因：W2-0002 的 long-prefill 1.49x 里有多少来自 attention 路径；
+#      用两份 summary 的 by_prompt 直接算，不靠 [baseline] 链接。
+#   2. 新基线：对 HF 参考臂（W2-0001）求同样的四条判据，取代 W2-0002 作为 W3 的对照。
 
 schema = 1
 
@@ -14,6 +16,7 @@ type = "microbench"
 slug = "sdpa-attn"
 title = "SDPA attention 路径：long-prefill 归因（对 W2-0002）"
 hypothesis = ["attn_path_explains_long_prefill"]
+supersedes = "W2-0002"
 seed = 0
 
 [[models]]
@@ -41,8 +44,8 @@ timer = "auto"
 memory = ["torch_peak", "driver"]
 
 [baseline]
-run_id = "W2-0002"
+run_id = "W2-0001"
 
 [accept]
-mode = "record_only"
-criteria = []
+mode = "threshold"
+criteria = ["ttft_cv_max", "tpot_cv_max", "memory_match_ratio", "decode_speed_vs_hf_min"]
