@@ -73,6 +73,39 @@
 
 ---
 
+## D3 · 注意力实现与批处理的口径
+
+- **日期**：2026-10-25
+- **状态**：accepted
+- **背景**：`W2-0002` 基线里 long 桶 prefill 比 HF 慢 1.49×（TTFT 31.8 vs 21.7 ms），
+  根因是手写 attention 物化 `T×T` 分数 + 显式 fp32 掩码。换 SDPA 修复了这一点，
+  但批处理一旦左 pad，flash / efficient 两个融合后端都退出、只剩 math（4 条序列：
+  按序列循环 80.3 ms，pad 后 506.7 ms）。W3 要做连续批，必须先定“注意力在哪、怎么批”，
+  否则机制收益会和 kernel 差异混在一起。
+- **证据**：`W2-0002`（手写）、`W2-0003`（SDPA）；2048 prefill：flash 25.4 ms / math 125.5 ms；
+  4 条序列（512–2048）循环 80.3 ms vs pad 506.7 ms；TPOT 17.10 → 15.08 ms（vs HF 1.113×）。
+- **判据**：逐序列 attention 占单步时间 < 15%（B≤8）；W3 吞吐 ≥ 1.3× 静态批
+  （`configs/thresholds.toml` 的 `[W3.continuous]`）。
+- **决定**：
+  1. **长度方向禁止 pad**；批维度可分桶（为将来的 CUDA graph）。
+  2. **线性层 / MLP 按批执行，attention 逐序列调用**：每条保持 `(1, T)`、无 mask、
+     `is_causal`，与 `W2-0003` 同一条代码路径。
+  3. 全仓库只有一条注意力实现（SDPA）；手写版本只作为 `tests/` 的参考对拍。
+     实际后端逐 run 记录在 manifest/summary 里。
+  4. **不引入 flash-attn varlen**：prefill 每序列已是一个大 kernel（4 条 80 ms 足够），
+     decode 每步打包 KV 反而更慢；CUDA graph 作为 W4 之后的可选项。
+  5. 注意力路径任何变更都要新开 run + `supersedes`，旧基线不复用。
+- **后果**：
+  - W3 的调度器只能改“这一步有谁”，不能改注意力的张量形状；
+  - W4 分页后是“按 block table gather → 逐序列 SDPA”，与 W3 同形，不是新问题；
+  - W7 的线性注意力状态本来就逐请求，逐序列不是妥协而是架构要求；
+  - W8 的 B=32 列，逐序列 launch 估算占比 20–30%，届时用 CUDA graph（整步捕获）
+    而不是换 varlen kernel。
+- **复盘点**：W3 结束时用实测占比校验 < 15%；W4 结束后看 gather 是否引入新热点；
+  torch 升级导致 SDPA 后端支持表变化时重新确认。
+
+---
+
 ## 模板
 
 ```markdown
