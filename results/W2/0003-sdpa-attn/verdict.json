@@ -1,0 +1,8 @@
+{
+  "run_id": "W2-0003",
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-10-25",
+  "decision_id": null,
+  "notes": "四条判据全 pass：decode 1.113× HF、TTFT 0.86–0.90×（三桶均优于 HF）、memory 0.991（最差 context 0.978）。归因：W2-0002 的 long-prefill 1.49× 几乎全部来自 attention 路径（31.8→19.5）；decode 的 −11% 来自 enable_gqa 去掉 K/V 复制，不归 SDPA。取代 W2-0002 作为 W3 对照基线；批处理长度方向不 pad（D3）。"
+}

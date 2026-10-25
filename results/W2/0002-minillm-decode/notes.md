@@ -44,3 +44,5 @@
 - W3：连续批处理。注意本 run 是 batch=1 的基线，`batch_sizes=[1]`，真批处理要等调度器。
 - 若要修 prefill：先换 SDPA/flash 注意力，或至少不在每个 prefill 里显式构造 `T×T` 掩码；
   修完重跑本配置，`decode_speed_vs_hf_min` 之外的 TTFT 比值应回到 1.0× 附近。
+
+> 已被 `W2-0003` 取代（SDPA attention）：本 run 的数字作为“改动前”保留，不再作为 W3 的对照基线。
