@@ -1,0 +1,44 @@
+# W2-0005 · HF generate 参考臂（本机重测）
+# W2-0001 是在另一台 4090 实例上跑的，跨实例的 host 速度差会让 host-bound 的 decode
+# 比值失去意义。本 run 与 W2-0006 在同一台机器、同一会话内背靠背跑，配对才算数。
+# 运行：python -m bench.run --config configs/experiments/W2/0005-hf-reference-this-host.toml
+
+schema = 1
+
+[exp]
+id = "W2-0005"
+stage = "W2"
+type = "microbench"
+slug = "hf-reference-this-host"
+title = "HF generate 参考臂（本机重测，W2-0006 的配对基线）"
+hypothesis = ["hf_arm_on_this_host_is_the_decode_baseline"]
+supersedes = "W2-0001"
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+batch_sizes = [1]
+arrival = "closed"
+
+[engine]
+impl = "hf"
+device = "cuda"
+max_batch = 1
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "threshold"
+criteria = ["ttft_cv_max", "tpot_cv_max", "memory_match_ratio"]
