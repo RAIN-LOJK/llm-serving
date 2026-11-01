@@ -1,0 +1,5 @@
+run_id: W2-0007
+status: completed
+device_class: measure-cuda
+rows: 160 (errors: 0)
+summary: results/W2/0007-fixed-attn-path-slabbudget/summary.json

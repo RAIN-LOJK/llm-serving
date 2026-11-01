@@ -1,6 +1,6 @@
 # W2-0006 · 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（本机配对）
 
-- 状态：`pass`（reviewer: rainhome, 2026-11-01）
+- 状态：`pass`（reviewer: rainhome, 2026-11-01）· **已被 `W2-0007` 取代**——commit `d8361d4` 改了 slab 的分配与释放时机，TTFT 21.25 → 21.85 ms，本 run 不再描述 shipped 代码；四条判据的结论与本节的分析仍然有效
 - 配置：`config.toml`（运行目录 `results/W2/0006-fixed-attn-path-paired`）
 - 类型：`microbench`；workload：`prompts`
 - 证据：`summary.json` / `metrics.jsonl`

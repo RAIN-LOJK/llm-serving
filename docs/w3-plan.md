@@ -13,8 +13,8 @@
 > | `ROADMAP.md` §14 参考实现索引 | W3 行的「实现细节见 `docs/w3-plan.md`」 | 改成指向 `docs/decisions.md` 的对应 D 条目 |
 > | `docs/w2-rework.md` §0 / §2 E6 | 前置与「口径段改写」引用 | 两个临时文件一起删，反向引用随之消失 |
 
-> **前置**：配对基线 **`W2-0006`**（固定注意力路径，四条判据 pass；HF 分母用同机的 `W2-0005`）。
-> `W2-0003`（旧口径 sdpa/cat）与 `W2-0004`（跨实例配对，判 `invalid`）都不能当基线。
+> **前置**：配对基线 **`W2-0007`**（固定注意力路径，四条判据 pass；HF 分母用同机的 `W2-0005`）。
+> `W2-0003`（旧口径 sdpa/cat）、`W2-0004`（跨实例配对，`invalid`）与 `W2-0006`（被取代）都不能当基线。
 > **D3 已于 2026-10-31 [rejected](decisions.md)，口径由 [D4](decisions.md) 定死**——prefill（T>1）逐序列 SDPA、
 > decode（T==1）`hand_baddbmm` + `KvSlab`。本文件里凡引用 D3 的段落都标成「当前口径（待替换）」，现在替换为 D4。
 > W3 的调度/到达过程参考见 §13。
@@ -126,13 +126,13 @@ model/minillm.py      forward 接受 KvSlab（B 行席位），T 必须为 1（D
 model/layers.py       TransformerBlock：decode 走 slab（attention 一次覆盖整批、MLP 按批）；RoPE 按 slab.pos 逐行
 serve/scheduler.py    新增：Request 状态机 + 准入/退出 + step 主循环（static/continuous）
 serve/engine.py       新增 prefill_one()/decode_slab()（已有单行版）；generate() 在 D4 定死后即 slab 路径
-                      **交接改成逐层交错**：现在 `_slab()` 一次分配 28 层、再循环 `fill_from`，
-                      于是整块 `KVcache` 与整块 slab 同时在场（ctx1517 共 348 MB），而这份
-                      `KVcache` 交完就不再被读（decode 只读 slab）。改成
-                      `分配第 l 层 → fill_from(l) → cache.kvs[l] = None`，重叠从 28 层压到 1 层
-                      （ctx1517 约 3.6 MB）。实测（W2-0006 notes）：峰值 1539.9 → 1389.0 MB，
-                      峰值退回 prefill 自己的 `T²` 工作区，长上下文 `memory_match_ratio` 0.859 → 0.950。
-                      并发下更必要：不释放则 B 个请求各多一份 prefill cache
+                      **交接已经逐层交错**（W2-0007 落地，`d8361d4`）：`分配第 l 层 → fill_from(l) →
+                      cache.kvs[l] = None`，末尾释放整块 slab。ctx1517 峰值 1534.6→1348.0 MB、
+                      memory ratio 0.859→0.978；代价是每请求重建 28 层、TTFT +2.8%。
+                      **W3 要改回去**：真实 serving 的 KV 跨请求复用（每并发槽一块 slab），
+                      并同步把 `memory_match_ratio` 的分子扩到所有活跃槽的预留——否则账外内存
+                      会像 W2-0004 那样落回分母。逐层交错本身保留，它让交接的瞬时重叠只有一层
+                      （ctx1517 约 6 MB），B 条并发请求各自交接时也不叠加成整块源/目标两份
 bench/loadgen.py      新增 Trace/poisson_trace/closed_trace + trace_sha256；poisson_arrivals 由
                       poisson_trace 取代（旧的 Iterator[(float, Prompt)] 带不了 budget 和稳定 hash，
                       保留一个会误导的「已留接口」不如删掉，并在 ROADMAP/本文件注明）
@@ -232,7 +232,7 @@ step k:
   不是 SDPA；它本来就不依赖 flash/efficient，没有「拿到 mask 就退 math」的惩罚；
 - 因此「禁长度 pad / 一遍注意力」这类约束在 W3 **构造上满足**，不靠纪律：prefill 永远逐序列、
   长度方向永不 pad（P-22 只约束 SDPA），decode 永远一次 `baddbmm` 覆盖整个 batch。
-  这个口径已冻结在 `docs/decisions.md` **D4**；`W2-0006`（`fixed-attn-path-paired`）是它的基线。
+  这个口径已冻结在 `docs/decisions.md` **D4**；`W2-0007`（`fixed-attn-path-slabbudget`）是它的基线。
 
 ---
 
@@ -240,11 +240,11 @@ step k:
 
 ### E0 · 重构无害性（1 run，microbench，threshold）
 
-`W3-0001`：`impl="minillm"`，与 `W2-0006` 同 prompt / 同 dtype / 同 batch=1 / 同 max_new_tokens，
-`[baseline] run_id="W2-0006"`，`[accept]` 复用 W2 四条判据（`ttft_cv_max/tpot_cv_max/memory_match_ratio/decode_speed_vs_hf_min`）。
+`W3-0001`：`impl="minillm"`，与 `W2-0007` 同 prompt / 同 dtype / 同 batch=1 / 同 max_new_tokens，
+`[baseline] run_id="W2-0007"`，`[accept]` 复用 W2 四条判据（`ttft_cv_max/tpot_cv_max/memory_match_ratio/decode_speed_vs_hf_min`）。
 **通过即证明 §2.2 的 model 改动没有动数字**；不通过就停下修，不做任何性能 run。
 （`decode_speed_vs_hf_min` 在这里当**漂移比值**用：两臂同 kernel 后它比较的是
-「W2-0006 的 TPOT / 本次的 TPOT」，≈1.0 即无漂移；名字沿用旧键，避免新增判据键。
+「W2-0007 的 TPOT / 本次的 TPOT」，≈1.0 即无漂移；名字沿用旧键，避免新增判据键。
 注意它**只在同实现配对时**校验 `attn_prefill/attn_decode`——对 HF 臂的正式判据只看通用键，见 D4 后果。）
 
 ### E1 · 批处理摊薄 host（Q1，5 runs，microbench，record_only）

@@ -124,7 +124,7 @@
 ## D4 · 注意力路径定死为「prefill=逐序列 SDPA / decode=hand_baddbmm+slab」
 
 - **日期**：2026-10-31
-- **状态**：**accepted**（口径已定；数值判定见 `W2-0006`——四条判据 pass，decode 1.001× HF、TTFT 0.89–0.91×）
+- **状态**：**accepted**（口径已定；数值判定见 `W2-0007`——四条判据 pass，decode 1.013× HF、TTFT 0.92–0.95×、memory 0.992）
 - **取代**：D3（rejected）留下的空位。D3 第 2 条「attention 逐序列」被它驳回的原因（`28×B` 次派发）
   在本决策里针对 **decode** 修正，prefill 继续保持逐序列。
 - **背景**：D3 驳回后 W3 没有注意力口径，而 W3 的配对判据要求两臂同 kernel。当前工作树上有
@@ -153,12 +153,12 @@
   6. 旧手写实现 `hand_legacy` **从运行路径移出**，搬到 `tests/reference/` 作数值 oracle。
 - **后果**：
   - 配置面从 8 种组合收到 1 条，manifest 的 `attn` 变成常量；
-  - `W2-0003` 不能作为 W3 的配对基线 → **`W2-0006`**（`supersedes = "W2-0004"`，HF 分母 `W2-0005`），`W3-0001` 挂它；
+  - `W2-0003` 不能作为 W3 的配对基线 → **`W2-0007`**（`supersedes = "W2-0006"`，HF 分母 `W2-0005`），`W3-0001` 挂它；
   - 配对校验必须拆两层：**通用键**（prompt hash / dtype / device / out_tokens）与**机制键**
     （attn / decode / batch / trace），否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 `invalid`；
   - `kv_mb` 改为「预留字节」（桶粒度 64），`memory_match_ratio` 的口径随之变化，如实报告；
   - `hand_baddbmm` 的 `baddbmm` 形状就是 W4 paged decode 的原型（块表 gather 插在 `k`/`v` 读取处）。
-- **复盘点**：`W2-0006` 的 V1/V2/V5；W4 结束后看分页是否让 slab 的桶粒度失去意义；
+- **复盘点**：`W2-0007` 的 V1/V2/V5；W4 结束后看分页是否让 slab 的桶粒度失去意义；
   torch 升级导致 SDPA 后端支持表变化时重新确认「无 mask 才走 flash」。
 - **清单**：[w2-rework.md](w2-rework.md)。
 

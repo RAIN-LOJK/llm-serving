@@ -22,14 +22,16 @@ logits_max_abs_diff = 0.05
 batch_sizes = [1, 2, 4]
 
 [W2.bench]
-# Calibrated 2026-11-01 against W2-0006 (paired arm W2-0005, both on this machine).
-# Measured on W2-0006 (sdpa prefill / hand_baddbmm+slab decode): ttft_cv 1.22%, tpot_cv 0.42%,
-# memory 0.957 median (0.859 at the longest context), decode 1.001x HF (per prompt 0.985-1.031).
+# Calibrated 2026-11-01 against W2-0007 (paired arm W2-0005, both on this machine).
+# Measured on W2-0007 (sdpa prefill / hand_baddbmm+slab decode, slab released with the request):
+# ttft_cv 1.12%, tpot_cv 0.44%, memory 0.992 median (0.979 at the longest context), decode 1.013x.
+# The W2-0006 calibration superseded here read 0.957 / 0.859: the slab hand-off fix flattened
+# the memory ratio's dependence on context length, so the target is no longer at risk there.
 # Targets stay put: they exist to catch drift, and the observed values sit inside them.
 # Ratios are only meaningful against an arm measured on the same host: W2-0001's 16.78 ms and
 # W2-0003's 1.113x came from a different 4090 instance and are not comparable (see W2-0005).
 status = "calibrated"
-basis_run = "W2-0006"
+basis_run = "W2-0007"
 # CV is judged inside a length bucket (overall mixes 16..2048 token prompts).
 ttft_cv_max = 0.10
 tpot_cv_max = 0.10

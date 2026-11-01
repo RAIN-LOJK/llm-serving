@@ -194,11 +194,14 @@
   四条判据全 pass，decode **1.001×**（逐 prompt 0.985–1.031）、TTFT 三桶 0.89–0.91×、memory 0.957。
   **判据训：跨实例的 host-bound 比值不稳定**——同一份 HF 代码在两台 4090 上差 1.28×，
   凡引用「相对 HF 多少倍」必须绑定跑它的机器；`W2-0001`/`W2-0003` 的比值从此只作历史记录。
+  随后修掉 slab 的两处记账缺陷（三桶驻留 → 单一 slab；整块分配 → 逐层分配 + 随请求释放），
+  代码变动使 `W2-0006` 的 TTFT 失效，故由 **`W2-0007`** 取代为 W3 的配对基线：
+  decode **1.013×**、TTFT 三桶 0.92–0.95×、memory **0.992**（全区间 0.979–0.992，与 ctx 无关）。
 
 ### W3 · 连续批处理
 
-- **前置**：配对基线 **`W2-0006`**（固定注意力路径；HF 分母用同机的 `W2-0005`；
-  `W2-0003`/`W2-0004` 是旧口径或无效配对，都不能当基线）；
+- **前置**：配对基线 **`W2-0007`**（固定注意力路径；HF 分母用同机的 `W2-0005`；
+  `W2-0003`/`W2-0004`/`W2-0006` 是旧口径、无效配对或被取代，都不能当基线）；
   注意力口径见 `docs/decisions.md` **D4（accepted）**——**D3 已于 2026-10-31 rejected**（逐序列 attention
   实测为 28×B 次派发，B=8 时占 step 的 25–50%）；开工清单与 W3 专用参考实现见 `docs/w3-plan.md`
 - 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson / gamma λ）——`loadgen.poisson_arrivals`
@@ -365,7 +368,7 @@ python scripts/exp_index.py --check
 |---|---|---|---|
 | W0 | 双载体探测 + D1 决策 | ✅ | `W0-0001` |
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
-| W2 | 基准框架 | ✅ | `W2-0006`（HF 分母 `W2-0005`） |
+| W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ⬜ | — |
 | W4 | 分页 KV | ⬜ | — |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
@@ -393,6 +396,7 @@ python scripts/exp_index.py --check
 | 2026-10-25 | v8 | **W2 收尾（注意力路径）**：`W2-0003` 换上 SDPA 后四条判据全 pass，decode **1.113×** HF、TTFT 三桶 0.86–0.90×；`W2-0002` 的 long-prefill 1.49× 归因为 attention 物化 `T²`（31.8→19.5 ms）。**pad 会让 flash/efficient 退出、只剩 math（6.3×）**，故立 D3：长度方向禁止 pad、线性层批 + attention 逐序列、全仓一条注意力路径、不引入 varlen kernel，CUDA graph 留到 W4 之后；`W2-0002` 被 `W2-0003` 取代 |
 | 2026-10-31 | v10 | **D4：注意力路径定死**。prefill（T>1）只用逐序列 SDPA（无 mask 才有 flash）；decode（T==1）只用 `hand_baddbmm` + `KvSlab`（一次调用覆盖整批，mask 融进 score GEMM）；**不做 sdpa+slab**（SDPA 拿 mask 即退 math，slab 的收益正好被抵消）。删掉 `attn_prefill/attn_decode/[engine].decode` 三个旋钮、`Caps` 能力声明与封闭注册表（「不回退」改由构造保证）、`slab_graph` 运行路径（`serve/graph.py` 保留为 parked）；`hand_legacy` 移到 `tests/reference/` 只做 oracle。**W2 回到返工中**：`W2-0003` 是旧口径，不能当 W3 的配对基线 → 新开 `W2-0004`（`supersedes`）重建锚点，清单见 `docs/w2-rework.md`。配对校验拆成通用键 / 机制键两层，否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 invalid |
 | 2026-11-01 | v11 | **W2 完成（返工后）**：`W2-0004` 判 `invalid`——两处失败都与注意力路径无关（slab 三桶驻留把账外内存放进 `memory_match_ratio` 的分母；HF 分母取自另一台 4090 实例）。改为单一 slab（`ce0af17`）后同机重测：`W2-0005`（HF）与 **`W2-0006`（自实现）**四条判据全 pass——decode **1.001×**（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 三桶 0.89–0.91×、memory 0.957、CV 1.22%/0.42%；`[W2.bench].basis_run` → `W2-0006`。**判据训：跨实例的 host-bound 比值不稳定**（同一份 HF 代码两台 4090 差 1.28×），引用「相对 HF 多少倍」必须绑定机器；`W2-0001`/`W2-0003` 的比值降级为历史记录。`W3-0001` 的基线改为 `W2-0006` |
+| 2026-11-01 | v12 | **W2 收尾（slab 生命周期）**：`W2-0006` 判 pass 后发现 slab 记账有两处缺陷——① 三桶缓存让 `memory_match_ratio` 的分母含账外内存（已在 `ce0af17` 改单一 slab）；② 交接时 slab 整块分配、且随请求保留，同一份 KV 两次同时在场。②修完才彻底：逐层分配 + 逐层拷 + 逐层释放 + 请求结束释放 slab（`d8361d4`），ctx1517 峰值 1534.6→1348.0 MB、ratio 0.859→0.978；**两处必须同时改**（各自单独无效，2×2 实测）。代价是每请求重建 28 层、TTFT 21.25→21.85 ms。代码变更使 `W2-0006` 不再描述 shipped 状态 → 新开 **`W2-0007`**（`supersedes`）作为 W3 配对基线：四条判据 pass、decode 1.013×、TTFT 0.92–0.95×、memory 0.992（全区间 0.979–0.992）、CV 1.12%/0.44%；`[W2.bench].basis_run` → `W2-0007`。**留待 W3**：真实 serving 的 KV 必须跨请求复用（每并发槽一块），届时 `memory_match_ratio` 的分子需覆盖所有活跃槽的预留，否则重演 `W2-0004` 的错配 |
 
 ---
 

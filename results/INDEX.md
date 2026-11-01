@@ -12,5 +12,6 @@
 | W2-0004 | W2 | microbench | 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.2 | invalid | completed | 2026-11-01 | e97649e |
 | W2-0005 | W2 | microbench | HF generate 参考臂（本机重测，W2-0006 的配对基线） | Qwen/Qwen3-0.6B | hf | ttft_ms 23.5 | pass | completed | 2026-11-01 | 71887a8 |
 | W2-0006 | W2 | microbench | 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（本机配对） | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.2 | pass | completed | 2026-11-01 | 50e3623 |
+| W2-0007 | W2 | microbench | 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（逐层分配、随请求释放） | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.8 | pass | completed | 2026-11-01 | 50e0dcd |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

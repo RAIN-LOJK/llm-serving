@@ -6,3 +6,4 @@ W2-0003,W2,microbench,SDPA attention 路径：long-prefill 归因（对 W2-0002�
 W2-0004,W2,microbench,固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab,Qwen/Qwen3-0.6B,minillm,ttft_ms 21.2,invalid,completed,2026-11-01,e97649e,results/W2/0004-fixed-attn-path
 W2-0005,W2,microbench,HF generate 参考臂（本机重测，W2-0006 的配对基线）,Qwen/Qwen3-0.6B,hf,ttft_ms 23.5,pass,completed,2026-11-01,71887a8,results/W2/0005-hf-reference-this-host
 W2-0006,W2,microbench,固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（本机配对）,Qwen/Qwen3-0.6B,minillm,ttft_ms 21.2,pass,completed,2026-11-01,50e3623,results/W2/0006-fixed-attn-path-paired
+W2-0007,W2,microbench,固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（逐层分配、随请求释放）,Qwen/Qwen3-0.6B,minillm,ttft_ms 21.8,pass,completed,2026-11-01,50e0dcd,results/W2/0007-fixed-attn-path-slabbudget
