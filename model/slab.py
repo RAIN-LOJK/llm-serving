@@ -63,6 +63,7 @@ class KvSlab:
         device: str | torch.device = "cpu",
         n_head: int | None = None,
         check_bounds: bool | str = True,
+        lazy: bool = False,
     ) -> None:
         if min(n_layer, batch, n_kv_head, head_dim, max_len) < 1:
             raise ValueError("KvSlab needs positive n_layer/batch/n_kv_head/head_dim/max_len")
@@ -82,9 +83,17 @@ class KvSlab:
             raise ValueError(f"check_bounds must be True, False or 'strict', got {check_bounds!r}")
         self.check_bounds = check_bounds
 
-        shape = (batch, n_kv_head, max_len, head_dim)
-        self.keys = [torch.zeros(shape, dtype=dtype, device=self.device) for _ in range(n_layer)]
-        self.values = [torch.zeros(shape, dtype=dtype, device=self.device) for _ in range(n_layer)]
+        # ``lazy=True`` leaves the per-layer buffers unmaterialised until ``ensure_layer``
+        # is called. The hand-off is then able to allocate layer l, copy it, and drop the
+        # source before layer l+1 exists, so the "same KV twice" overlap is one layer
+        # instead of all of them (serve/engine.py; W2-0006 notes).
+        self._shape = (batch, n_kv_head, max_len, head_dim)
+        if lazy:
+            self.keys = [None] * n_layer
+            self.values = [None] * n_layer
+        else:
+            self.keys = [torch.zeros(self._shape, dtype=dtype, device=self.device) for _ in range(n_layer)]
+            self.values = [torch.zeros(self._shape, dtype=dtype, device=self.device) for _ in range(n_layer)]
 
         # Positions are tensors so the same objects can be graph inputs; they are updated
         # in place, never replaced. The Python mirrors below are the fast-path guard.
@@ -107,6 +116,17 @@ class KvSlab:
         self._positions = torch.arange(max_len, device=self.device).view(1, 1, 1, max_len)
 
     # ---------------------------------------------------------------- lifecycle
+    def ensure_layer(self, layer: int) -> None:
+        """Materialise one layer's buffers if ``lazy=True`` left them absent.
+
+        Idempotent and allocation-free once the layer exists, so the eager path can call it
+        per layer and pay nothing. Called by ``serve/engine.py`` during the hand-off, in the
+        order ``ensure_layer(l) -> fill_from(l) -> drop source layer l``.
+        """
+        if self.keys[layer] is None:
+            self.keys[layer] = torch.zeros(self._shape, dtype=self.dtype, device=self.device)
+            self.values[layer] = torch.zeros(self._shape, dtype=self.dtype, device=self.device)
+
     def reset(self) -> None:
         """Forget every row (buffers are reused, not freed)."""
         self.pos.zero_()

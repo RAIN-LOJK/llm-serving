@@ -128,9 +128,22 @@ class MiniLLMEngine:
 
         logits, cache = self.prefill(prompt_ids)
         # Hand-off is inside the TTFT window: the copy is part of reaching the first token.
+        #
+        # Interleaved, one layer at a time: allocate layer l, copy it, drop the source layer.
+        # ``fill_from`` copies, so the prefill ``KVcache`` is dead the moment its layer has
+        # landed -- but the peak is recorded the instant the destinations exist, so
+        # allocating all 28 first and copying afterwards puts the same KV in memory twice
+        # (348 MB at ctx 1517) at the worst possible moment. Interleaving leaves one layer
+        # of overlap instead (~6 MB) and pulls the request peak back down to the prefill
+        # phase's own T^2 workspace (W2-0006 notes). It only helps because the slab is also
+        # released at the end of each request: a retained slab is already fully materialised
+        # when the next prefill starts, and the interleaving never gets a chance to matter.
         slab = self._slab(len(prompt_ids) + max_new_tokens)
         for layer in range(self.model.config.n_layer):
+            slab.ensure_layer(layer)
             slab.fill_from(cache, layer)
+            cache.kvs[layer] = None
+        del cache
 
         prefill_end = self._new_event()
         if prefill_end is not None:
@@ -172,16 +185,25 @@ class MiniLLMEngine:
         else:
             decode_ms = decode_wall_ms
 
+        # Release the slab before returning. Like the bucket cache this replaced, a slab
+        # that outlives its request is memory the *next* request's peak holds but its
+        # account cannot explain, and `memory_match_ratio` divides exactly those two.
+        # Measured at ctx 1517: retaining it 1532 MB (ratio 0.861), releasing it 1348 MB
+        # (ratio 0.978), for ~0.5 ms of extra TTFT spent rebuilding. W3 will keep one slab
+        # per concurrent slot and account for it explicitly, which is a different contract.
+        slab_mb = slab.mb()
+        self._current_slab = None
+
         return EngineOutput(
             token_ids=tokens,
             ttft_ms=ttft_ms,
             prefill_ms=prefill_ms,
             decode_ms=decode_ms,
             tpot_ms=(decode_wall_ms / (len(tokens) - 1)) if len(tokens) > 1 else None,
-            cache_mb=slab.mb(),
+            cache_mb=slab_mb,
             meta={
                 "impl": "minillm",
-                "slab_mb": slab.mb(),
+                "slab_mb": slab_mb,
                 "prompt_tokens": len(prompt_ids),
                 "out_tokens": len(tokens),
                 "eos_token_id": self.eos_token_id,
@@ -201,8 +223,10 @@ class MiniLLMEngine:
     def _slab(self, need: int) -> KvSlab:
         """Return a reset slab for ``need`` columns, reallocating only on a bucket change.
 
-        One slab, not a cache: see the note in ``__init__``. The reallocation happens
-        synchronously here and is counted in TTFT, which is where the hand-off copy
+        One slab, not a cache: see the note in ``__init__``. It is built **lazily** -- layers
+        materialise in ``KvSlab.ensure_layer`` as the hand-off reaches them -- so the copy
+        loop, not this call, decides when the destination memory exists. The reallocation
+        happens synchronously here and is counted in TTFT, which is where the hand-off copy
         already lives (D3), so a new bucket's cost is visible rather than hidden in a
         cached neighbour.
         """
@@ -217,6 +241,7 @@ class MiniLLMEngine:
                 dtype=self.model.token_embedding.weight.dtype,
                 device=self.device,
                 n_head=self.model.config.n_head,
+                lazy=True,
             )
         self._current_slab.reset()
         return self._current_slab
