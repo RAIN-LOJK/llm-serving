@@ -1,0 +1,50 @@
+# W2-0007 · 固定注意力路径（slab 生命周期修正后）
+
+# 与 W2-0006 同一条路径（prefill=sdpa / decode=hand_baddbmm+slab），只改了 slab 的分配与
+# 释放时机（commit d8361d4）：逐层分配 + 每请求结束释放。TTFT 因此移动 4.2%，W2-0006 已不再
+# 描述 shipped 代码，故新开本 run 作为 W3-0001 的配对基线。
+# 分母不变：HF 引擎本 run 未改动，仍挂同机的 W2-0005。
+# 运行：python -m bench.run --config configs/experiments/W2/0007-fixed-attn-path-slabbudget.toml
+
+schema = 1
+
+[exp]
+id = "W2-0007"
+stage = "W2"
+type = "microbench"
+slug = "fixed-attn-path-slabbudget"
+title = "固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（逐层分配、随请求释放）"
+hypothesis = ["one_attention_path_does_not_move_w2_numbers"]
+supersedes = "W2-0006"
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+batch_sizes = [1]
+arrival = "closed"
+
+[engine]
+impl = "minillm"
+device = "cuda"
+max_batch = 1
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[baseline]
+run_id = "W2-0005"
+
+[accept]
+mode = "threshold"
+criteria = ["ttft_cv_max", "tpot_cv_max", "memory_match_ratio", "decode_speed_vs_hf_min"]
