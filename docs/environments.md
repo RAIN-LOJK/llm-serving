@@ -13,7 +13,7 @@
 | 后端 | MPS（`torch.backends.mps`） | CUDA |
 | 用途 | 单元/集成测试、W0 逻辑验证、冒烟 | W0 正式探测、W2–W7 正式 benchmark |
 | 计时 | `perf_counter` + `torch.mps.synchronize()` | `torch.cuda.Event` + `synchronize()` |
-| 显存 | `torch.mps.driver_allocated_memory()` / `current_allocated_memory()` | `max_memory_allocated()` + `nvidia-smi` 采样 |
+| 显存 | `torch.mps.driver_allocated_memory()` / `current_allocated_memory()` | `max_memory_allocated()` + `torch.cuda.mem_get_info()` 设备级采样 |
 | 报告标签 | `device_class = "dev-mps"` | `device_class = "measure-cuda"` |
 
 本机实测（2026-10）：macOS / Apple M1 / 16GB / 无 CUDA / Python 3.12.15 /
@@ -39,7 +39,7 @@ GPU 加速包走单独文件：[requirements-cuda.txt](../requirements-cuda.txt)
 
 1. **不跨设备比较。** 报告表必须有 `device_class` 列；M1 与 4090 不放在同一列比较。
 2. **不在 M1 上产出的数字后面暗示 4090。** 简历/报告写“M1 实测”或“4090 实测”。
-3. **没有 4090 时不要伪造 CUDA 口径。** W2 的 `nvidia-smi` 验收项改为 MPS 口径并在
+3. **没有 4090 时不要伪造 CUDA 口径。** W2 的设备级显存对照项改为 MPS 口径并在
    报告里注明；W3/W4 的吞吐阈值相应降级为“趋势观察”，不写绝对值。
 4. **官方 run 在干净 git 树上跑。** dirty run 只做 exploratory。
 5. **权重不进仓库。** 只记录模型 repo + revision commit；HF cache 可随时重建。
@@ -140,6 +140,7 @@ CPU/内存、transformers/tokenizers/numpy/matplotlib 版本、`HF_HOME`、`CUDA
 - M1 的 Python/kernel launch 开销占比高，连续批处理的吞吐收益可能被掩盖；
   这正是 W3 要测的“交叉点”，不是失败。
 - MPS 的 bf16 支持取决于 macOS/torch 版本；若不可用，退回 fp16/fp32 并记录 dtype。
-- `nvidia-smi` 的进程显存包含 CUDA context，与 `torch.cuda.max_memory_allocated()`
-  不是同一口径；报告两个数，不要互相“对上 90%”式硬凑。
+- 设备级显存（`torch.cuda.mem_get_info()` 的 total - free，或 `nvidia-smi` 的同一列）包含 CUDA context，
+  与 `torch.cuda.max_memory_allocated()` 不是同一口径；报告两个数，不要互相“对上 90%”式硬凑。
+  它还是**整卡**数字：同卡有别的进程时会被抬高，正式 run 必须独占（P-27）。
 - HF `generate` 与手写 decode 的 TTFT 口径不同；比较时只比同口径，或明确注明。

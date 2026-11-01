@@ -184,21 +184,27 @@
 ### W2 · 基准框架
 
 - `bench/loadgen.py`：32 条固定 prompt（长度桶 16–64 / 256–512 / 1024–2048），closed-loop；到达率 λ 推到 W3（没有调度器时 λ 没有意义）
-- `bench/metrics.py`：TTFT / TPOT / tokens-s / 峰值显存 / KV 占用（公式账 + `nvidia-smi` 对照）
+- `bench/metrics.py`：TTFT / TPOT / tokens-s / 峰值显存 / KV 占用（公式账 + 设备级显存对照；`torch.cuda.mem_get_info`，不 fork 子进程，见 P-27）
 - 对照臂：HF `generate`（同模型、同 batch、同 `max_new_tokens`）
-- **验收**：5 次重复的 TTFT/TPOT 抖动 ≤ 10%（**按长度桶**取每 prompt 的 CV 中位数，`overall` 会被 16–2048 的长度跨度污染）；`weights+KV` 占 torch 分配器峰值的 ≥90%（按 context 分组取中位数，`nvidia-smi` 只作对照——它含 ~0.5 GB CUDA context，不能当分母）；decode ≥ 0.8× HF（按 prompt 配对取中位数，配对前校验 prompt hash / dtype / device / `max_new_tokens` / `out_tokens`）
+- **验收**：5 次重复的 TTFT/TPOT 抖动 ≤ 10%（**按长度桶**取每 prompt 的 CV 中位数，`overall` 会被 16–2048 的长度跨度污染）；`weights+KV` 占 torch 分配器峰值的 ≥90%（按 context 分组取中位数，设备级显存只作对照——它含 ~0.5 GB CUDA context，不能当分母）；decode ≥ 0.8× HF（按 prompt 配对取中位数，配对前校验 prompt hash / dtype / device / `max_new_tokens` / `out_tokens`）
+- **返工（2026-10-31 起）**：D3 驳回后注意力口径定死为 **prefill=逐序列 SDPA / decode=hand_baddbmm+KvSlab**
+  （`docs/decisions.md` **D4**），旋钮全部删除。`W2-0003` 是旧口径（sdpa/cat）的数字，不能作为 W3 的配对基线 →
+  新开 **`W2-0004`**（`supersedes = "W2-0003"`）重建锚点；清单与 `W2-0004` 的配置规格见
+  [`docs/w2-rework.md`](docs/w2-rework.md)。W2 状态回到「返工中」，直到 `W2-0004` 判 pass。
 
 ### W3 · 连续批处理
 
-- **前置**：基线 `W2-0003`（`W2-0002` 已被取代）；注意力口径见 `docs/decisions.md` **D3**——
-  **长度方向禁止 pad**、线性层批 + attention 逐序列、全仓一条注意力路径；开工清单见 `docs/w3-plan.md`
-- 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson λ，`loadgen.poisson_arrivals` 已留接口）；对照静态批
+- **前置**：基线 `W2-0004`（固定注意力路径；`W2-0003` 是旧口径，`W2-0002` 已被它取代）；
+  注意力口径见 `docs/decisions.md` **D4（accepted）**——**D3 已于 2026-10-31 rejected**（逐序列 attention
+  实测为 28×B 次派发，B=8 时占 step 的 25–50%）；开工清单与 W3 专用参考实现见 `docs/w3-plan.md`
+- 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson / gamma λ）——`loadgen.poisson_arrivals`
+  的占位实现将由带 `trace_sha256` 的 `poisson_trace` 取代（见 `docs/w3-plan.md`）；对照静态批
 - **验收**：高 λ 吞吐 ≥ 1.3×；p99 TTFT 分解为排队+计算；不同到达顺序输出一致
 - **预期风险**：0.6B 上 Python 开销占比大，收益可能不显著——**把交叉点测出来就是结论**
 
 ### W4 · 分页 KV
 
-- `BlockManager`（block_size 16/32 可配）、block table、按需分配/回收、物理块池
+- `BlockManager`（block_size 16/32 可配）、block table、按需分配/回收、物理块池（参考实现见 §14）
 - **验收**：同显存 max concurrency ≥ 1.5×（ctx=2048）；碎片率 < 5%；paged vs 连续输出逐 token 一致
 - 这一格复现 vLLM 论文的核心论点：**浪费来自"按最坏长度预留"**
 
@@ -206,19 +212,19 @@
 
 ### W5 · 混合层实现（一）：全注意力层改造
 
-- head_dim 256、输出门控、partial-RoPE（1/4 维）、M-RoPE（文本退化）
+- head_dim 256、输出门控、partial-RoPE（1/4 维）、M-RoPE（文本退化）；只读本地 HF 源码（§14）
 - **验收**：与 HF 单层对拍；因果性测试；改第 t token 不影响 t−1 的输出
 
 ### W6 · 混合层实现（二）：Gated DeltaNet
 
-- 短卷积（kernel 4）→ decode 循环形式 → **分块 prefill 形式**
+- 短卷积（kernel 4）→ decode 循环形式 → **分块 prefill 形式**；两套纯 torch 参考互拍（§14）
 - **验收**：分块 prefill 与逐步 decode **逐 token 一致**；全模型贪心 64 token 与 HF 对齐
 - **风险**：分块形式的 WY 表示是最难的一段。**止损**：若 W6 末只有 decode 形式可用，
   就接受"prefill 走逐步循环"的慢速实现（报告里注明性能代价），不硬啃
 
 ### W7 · 双状态管理与跨代对照
 
-- `StatePool`：线性层状态（每请求常数大小）与 KV 块（分页）统一句柄与生命周期
+- `StatePool`：线性层状态（每请求常数大小）与 KV 块（分页）统一句柄与生命周期（唯一先例见 §14）
 - 重跑 W3/W4 的机制，得到"混合架构下机制收益如何变化"
 - **验收**：
   - [ ] 同一调度器下两种模型都能跑，输出正确
@@ -243,7 +249,7 @@
 | prompt 集 | 32 条，长度桶固定，落盘 `bench/prompts.json` |
 | 生成 | greedy，`max_new_tokens=128` |
 | 计时 | CUDA：`torch.cuda.Event` + `synchronize()`；MPS：`perf_counter` + `torch.mps.synchronize()`；TTFT 含排队 |
-| 显存 | CUDA：`max_memory_allocated()` + `nvidia-smi` 采样；MPS：`driver_allocated_memory()`；区分权重 / KV / 线性状态 / 激活 |
+| 显存 | CUDA：`max_memory_allocated()` + `torch.cuda.mem_get_info()` 采样的设备级数字；MPS：`driver_allocated_memory()`；区分权重 / KV / 线性状态 / 激活 |
 | 环境 | GPU、驱动、torch/CUDA、transformers 版本、git commit 写进结果行 |
 | 设备 | `dev-mps`（M1：正确性/冒烟）与 `measure-cuda`（4090：正式数字）分表；**不跨设备比较** |
 | 方差 | 同进程同顺序；跨配置重开进程 |
@@ -355,7 +361,7 @@ python scripts/exp_index.py --check
 |---|---|---|---|
 | W0 | 双载体探测 + D1 决策 | ✅ | `W0-0001` |
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
-| W2 | 基准框架 | ✅ | `W2-0001` / `W2-0003` |
+| W2 | 基准框架 | 🔁 返工中 | `W2-0001` / `W2-0003`；待 `W2-0004` |
 | W3 | 连续批处理 | ⬜ | — |
 | W4 | 分页 KV | ⬜ | — |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
@@ -379,4 +385,35 @@ python scripts/exp_index.py --check
 | 2026-10-23 | v5 | **W1 完成**：Qwen3-0.6B 逐层对齐（4 prompt × 贪心 64/64 id，logits `max|Δ|` 2.0e-5，每层 9.8e-4–1.95e-3）；阈值 `1e-3 → 1e-2`——首 token 有 attention-sink 离群值（\|x\|≈7e3），fp32 一个 ulp 就有 9.8e-4，原阈值等于要求"≤1 ulp"；golden 改用 hook 采块输出（transformers 5.x 的 `hidden_states[-1]` 是 post-norm，见 P-16）、`rope_theta` 改从 `rope_parameters` 读（P-17） |
 | 2026-10-24 | v6 | **W2 工具链**：`impl="minillm"` 适配器、`cuda_event` 计时接线、`[accept]` 真求值；判据口径三处修正——CV 改按长度桶（`overall` 混了 16–2048 的长度跨度）、显存对齐改为 `weights+KV` / **torch 分配器峰值**（`nvidia-smi` 含 ~0.5 GB CUDA context，不能当分母，只作对照）、配对 baseline 先校验 prompt hash/dtype/device/`max_new_tokens`/`out_tokens`，不符记 `invalid`；另修 RoPE 每层一张 40960 行表（-280 MB，P-18）与 `logits_to_keep`（P-13） |
 | 2026-10-24 | v7 | **W2 完成**：`W2-0001`（HF 参考臂，TPOT 16.78 ms）与 `W2-0002`（自实现，17.10 ms）四条判据全 pass——decode **0.976×** HF、TTFT 持平（short/medium 1.00–1.01×）、桶级 CV 6.8%/3.6%、memory 0.988；**长上下文 prefill 1.49× 慢**（物化 `T²`、无 SDPA），记为负结果并作为 W3/W4 结论的前提；`[W2.bench]` 标 calibrated（basis `W2-0002`），memory 0.9 只对 context 中位数成立（最长 1517 token 为 0.889） |
+| 2026-10-31 | v9 | **D3 驳回 + 参考实现索引**：逐序列 attention 实测为 `28×B` 次派发（B=8 占 step 25%、B=32 占 50%，与 ctx 无关），D3 的 `<15%` 判据在 B=8 即不成立、且本机 torch 2.8 无可用的「一次 ragged 调用」（nested 非同构 / flex eager 慢 20–50× / flash-attn 未装）→ D3 改 `rejected`，W3 正式 run 等 W2 返工后的新 ADR；新增 §14 跨阶段「可抄代码」索引（来源 `docs/benchmark-resources.md`，W3 专用参考在 `docs/w3-plan.md`） |
 | 2026-10-25 | v8 | **W2 收尾（注意力路径）**：`W2-0003` 换上 SDPA 后四条判据全 pass，decode **1.113×** HF、TTFT 三桶 0.86–0.90×；`W2-0002` 的 long-prefill 1.49× 归因为 attention 物化 `T²`（31.8→19.5 ms）。**pad 会让 flash/efficient 退出、只剩 math（6.3×）**，故立 D3：长度方向禁止 pad、线性层批 + attention 逐序列、全仓一条注意力路径、不引入 varlen kernel，CUDA graph 留到 W4 之后；`W2-0002` 被 `W2-0003` 取代 |
+| 2026-10-31 | v10 | **D4：注意力路径定死**。prefill（T>1）只用逐序列 SDPA（无 mask 才有 flash）；decode（T==1）只用 `hand_baddbmm` + `KvSlab`（一次调用覆盖整批，mask 融进 score GEMM）；**不做 sdpa+slab**（SDPA 拿 mask 即退 math，slab 的收益正好被抵消）。删掉 `attn_prefill/attn_decode/[engine].decode` 三个旋钮、`Caps` 能力声明与封闭注册表（「不回退」改由构造保证）、`slab_graph` 运行路径（`serve/graph.py` 保留为 parked）；`hand_legacy` 移到 `tests/reference/` 只做 oracle。**W2 回到返工中**：`W2-0003` 是旧口径，不能当 W3 的配对基线 → 新开 `W2-0004`（`supersedes`）重建锚点，清单见 `docs/w2-rework.md`。配对校验拆成通用键 / 机制键两层，否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 invalid |
+
+---
+
+## 14. 参考实现索引（跨阶段，只列「可抄代码」）
+
+> 来源：`docs/benchmark-resources.md`（2026-10-30 调研）里的**代码类**资源，按阶段裁剪。
+> 规则：只作机制参照与对拍；直接复制代码需保留原许可证（下表均为 Apache-2.0 / MIT）。
+> 路径以本机 `transformers 5.20.2` / `fla 0.5.2` 为准，升级后需重新定位（先 `python -c "import transformers;print(transformers.__version__)"`）。
+> 数据类资源（ShareGPT / LongBench / RULER / BurstGPT）不在本表：它们只影响负载真实度，不影响任何判据。
+> W3 的调度/到达过程参考不在这里，见 `docs/w3-plan.md`。
+
+| 阶段 | 参考实现 | 位置 | 抄什么 | **不抄什么** |
+|---|---|---|---|---|
+| W2/W3 | `model/attention/base.py`（本项目自建，非外部参考） | 本仓库 `model/attention/` | 注意力后端的契约：**两个入口**（prefill / decode）与「不回退」的构造性保证（`T>1` → SDPA，`T==1` → `hand_baddbmm`，见 D4）；`model/attention/__init__.py::provenance()` 写进 manifest/summary；`hand_legacy` 移到 `tests/reference/` 冻结为**数值 oracle**（与 git `26b268d^` 逐 bit 相同） | 不做可选后端的注册表 / 能力声明（D4 定死后是死重量）、不做 entry-point 自动发现、不允许静默回退、不让 oracle 进性能结论 |
+| W3 | nano-vllm `engine/{scheduler,sequence,llm_engine}.py` | `github.com/GeeeekExplorer/nano-vllm`（~1200 行） | `Sequence` 字段与调度主循环的**接口形状**（为 W4 的 block table 预留） | preempt / chunked prefill / CUDA graph；W3 实现细节见 `docs/w3-plan.md` |
+| W4 | nano-vllm `engine/block_manager.py` | 同上 | 物理块池、block table、free list、按需分配/回收 | 其 attention/kernel 部分 |
+| W4 | LightLLM `kv_cache_mem_manager/{allocator,mem_manager}.py` | `github.com/ModelTC/LightLLM` | 纯 Python、token/块级分配器（比固定 block 更轻），与逐序列 attention 的 gather 更贴 | 模型专属子类（deepseek/glm…）、多进程架构 |
+| W4 | PagedAttention（SOSP'23） | `arxiv.org/abs/2309.06180` | block_size 16/32、block table、碎片率定义 | 自定义 CUDA kernel（本项目不写 kernel） |
+| W5 | `transformers/models/qwen3_next/modular_qwen3_next.py` | `site-packages/transformers/models/qwen3_next/` | 全注意力层装配、输出门控（`chunk(q_proj(x),2)` + `sigmoid(gate)`）、`Qwen3NextRMSNormGated`（norm before gate） | MoE / 多卡分支 |
+| W5 | `transformers/models/qwen3_5/modular_qwen3_5.py` | `site-packages/transformers/models/qwen3_5/` | 0.8B 的覆盖：`Qwen3_5GatedDeltaNet`、partial-RoPE（`dim=int(head_dim*partial_rotary_factor)` ⇒ inv_freq 只按 64 维算）、`rope_parameters` 读取、mrope_section | 视觉塔 |
+| W6 | `qwen3_5/modeling_qwen3_5.py`: `torch_chunk_gated_delta_rule`(L287) / `torch_recurrent_gated_delta_rule`(L424) | 同上 | **「分块 == 循环」两个端点的纯 torch 实现**；`chunk_size=64` 默认；`conv_state` 长度 = kernel−1 | 其 Triton/CUDA 分支 |
+| W6 | fla `fla/ops/gated_delta_rule/naive.py` | `site-packages/fla/`（0.5.2） | **第二套独立实现**，与上一行互拍；状态布局 `[K,V]`、g 在 log-space、beta 已 sigmoid | `chunk.py` / `fused_recurrent.py`（Triton kernel） |
+| W7 | LightLLM `common/state_cache_manager.py` + `qwen3next_mem_manager.py` | 同上 | 唯一把「KV 块池 + 线性常数状态池」放进同一 manager 的开源实现：常数状态池的句柄与生命周期 | 其调度器与 kernel |
+| W7 | vLLM V1 `v1/core/kv_cache_coordinator.py` | `github.com/vllm-project/vllm` | 多 cache type 的协调抽象（概念） | 整个 V1 引擎（分布式 / CUDA graph / 后端全家桶） |
+
+两件已核实、可省弯路的事：
+
+- `olmo_hybrid/modeling_olmo_hybrid.py` 里的同名 `torch_*_gated_delta_rule` 与 `qwen3_5` 版**逐行相同**，不能当第三个独立对拍端点。
+- 0.8B 的 `config.json` 里**没有** `use_qk_l2norm_in_kernel`（走 `Qwen3NextGatedDeltaNet` 的类默认），`partial_rotary_factor` / `mrope_section` 也**不在顶层**（在 `rope_parameters` 内）——与 P-17 同类坑。

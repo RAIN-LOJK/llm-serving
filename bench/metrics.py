@@ -158,31 +158,20 @@ def reset_peak() -> None:
 def driver_memory_mb() -> float | None:
     """Driver-level memory, kept separate from the torch allocator number.
 
-    On CUDA this asks nvidia-smi for the current process; on MPS it uses the driver
-    allocation counter; on CPU it falls back to RSS.
+    On CUDA this is ``cudaMemGetInfo`` through ``torch.cuda.mem_get_info``: used = total -
+    free, i.e. the device-level number that includes the CUDA context (~0.5 GB here). It is
+    the same axis the old ``nvidia-smi`` subprocess query measured, at ~8 us instead of a
+    50-90 ms fork+exec that landed *inside* the measured window (P-27). The trade is that
+    it is device-wide, not per-process: a run sharing the GPU inflates it, so official
+    runs stay exclusive. Only ever a cross-check, never the memory denominator
+    (configs/thresholds.toml).
+
+    On MPS it uses the driver allocation counter; on CPU it falls back to RSS.
     """
     try:
         if torch.cuda.is_available():
-            import os
-            import subprocess
-
-            proc = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-compute-apps=pid,used_memory",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if proc.returncode == 0:
-                total = 0.0
-                for line in proc.stdout.splitlines():
-                    parts = [p.strip() for p in line.split(",")]
-                    if len(parts) >= 2 and parts[0] == str(os.getpid()):
-                        total += float(parts[1])
-                return total or None
+            free_bytes, total_bytes = torch.cuda.mem_get_info()
+            return (total_bytes - free_bytes) / 2**20
         mps = getattr(torch.backends, "mps", None)
         if mps is not None and mps.is_available() and hasattr(torch.mps, "driver_allocated_memory"):
             return torch.mps.driver_allocated_memory() / 2**20

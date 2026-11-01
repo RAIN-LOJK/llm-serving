@@ -38,3 +38,5 @@ class MiniLLMConfig(PretrainedConfig):
         self.head_dim = head_dim
         self.rope_theta = rope_theta
         self.qk_norm = qk_norm
+        # Attention is not configurable (docs/decisions.md D4): model/layers.py dispatches on
+        # T to the two constant backends. There is deliberately no attn_prefill/attn_decode.

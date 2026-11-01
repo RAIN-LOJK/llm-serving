@@ -1,10 +1,10 @@
-"""SDPA attention contracts: causal fast path, padding, chunked prefill, GQA.
+"""Attention dispatch contracts: causal fast path, padding, chunked prefill, GQA.
 
-The engine has one attention path now. These tests pin the three shapes that are easy to
-get silently wrong:
+The engine has one attention path now (D4): prefill (T > 1) is SDPA, decode (T == 1) is
+``hand_baddbmm``. These tests pin the shapes that are easy to get silently wrong:
 
 * full prefill -> ``is_causal=True`` and no materialized mask;
-* decode (one query) -> no mask at all;
+* decode (one query) -> no SDPA call at all, and the decode backend still gets no mask;
 * padded / chunked prefill -> an explicit boolean mask, because ``is_causal`` only aligns
   when the query and key blocks start at the same position.
 """
@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from model import KVcache
+from model.attention import DECODE_BACKEND
 
 
 def _capture_sdpa(monkeypatch):
@@ -44,7 +45,7 @@ def test_full_prefill_uses_causal_sdpa_without_mask(tiny_model, monkeypatch):
         assert call["enable_gqa"] is True
 
 
-def test_decode_uses_no_mask(tiny_model, monkeypatch):
+def test_decode_uses_the_baddbmm_backend_and_no_mask(tiny_model, monkeypatch):
     tokens = torch.randint(0, tiny_model.config.vocab_size, (1, 7))
     cache = KVcache(tiny_model.config.n_layer)
 
@@ -52,13 +53,21 @@ def test_decode_uses_no_mask(tiny_model, monkeypatch):
         tiny_model(tokens[:, :6], past_keys_values=cache)
 
     calls = _capture_sdpa(monkeypatch)
+    seen = []
+    real = DECODE_BACKEND.decode
+
+    def spy(q, k, v, **kwargs):
+        seen.append(kwargs)
+        return real(q, k, v, **kwargs)
+
+    monkeypatch.setattr(DECODE_BACKEND, "decode", spy)
     with torch.no_grad():
         tiny_model(tokens[:, 6:7], past_keys_values=cache)
 
-    assert calls
-    for call in calls:
-        assert call["attn_mask"] is None
-        assert call["is_causal"] is False
+    assert seen, "the decode step did not reach the hand_baddbmm backend"
+    for kwargs in seen:
+        assert kwargs["mask"] is None
+    assert calls == [], "decode (T == 1) must not dispatch to SDPA on the frozen path"
 
 
 def test_leftpad_uses_explicit_mask(tiny_model, monkeypatch):

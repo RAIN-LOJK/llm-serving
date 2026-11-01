@@ -3,7 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from typing import Optional
+from model.attention import DECODE_BACKEND, PREFILL_BACKEND
 from model.config import MiniLLMConfig
+from model.slab import KvSlab
 
 
 # ============================================================
@@ -57,8 +59,15 @@ def apply_rotary_emb(x: torch.Tensor, cos, sin):
     """
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2:]
-    sin = sin.unsqueeze(0).unsqueeze(2)
-    cos = cos.unsqueeze(0).unsqueeze(2)
+    # (T, D/2) is the shared-table form: broadcast over batch, as every measurement before
+    # the slab path did. (B, T, D/2) is the per-row form the slab needs, because rows sit
+    # at different positions; the two differ only in which dim was unsqueezed.
+    if cos.dim() == 2:
+        sin = sin.unsqueeze(0).unsqueeze(2)
+        cos = cos.unsqueeze(0).unsqueeze(2)
+    else:
+        sin = sin.unsqueeze(2)
+        cos = cos.unsqueeze(2)
     out0 = x1 * cos - x2 * sin
     out1 = x1 * sin + x2 * cos
     return torch.cat([out0, out1], dim=-1)
@@ -118,10 +127,20 @@ class Attention(nn.Module):
         # RoPE 表由 MiniLLM 每步算一次传进来；这里只记参数，不存表（见 rope_cos_sin）
         self.rope_theta = float(getattr(config, "rope_theta", 10000.0))
 
+        # 注意力数学住在外挂后端里（契约见 model/attention/base.py）。口径已定死（D4）：
+        # T > 1 走 PREFILL_BACKEND（sdpa），T == 1 走 DECODE_BACKEND（hand_baddbmm）。
+        # 没有注册表、没有配置项、没有回退目标。
+        self.backend_prefill = PREFILL_BACKEND  # T > 1
+        self.backend_decode = DECODE_BACKEND  # T == 1（含 past_len == 0）
+
     def forward(self, x, attention_mask=None, idx = 0, past_keys_values:Optional[KVcache]=None,
                 cos=None, sin=None):
         B, T, C = x.shape  # (batch, seq_len, n_embd)
-        past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
+        # ``KvSlab.past_len`` reads a tensor back to the host (``.item()``), which is illegal
+        # inside a captured graph. In slab mode the cursor is only needed by the mask, and
+        # the slab owns that, so skip the read entirely.
+        slab = past_keys_values if isinstance(past_keys_values, KvSlab) else None
+        past_len = 0 if (slab is not None or past_keys_values is None) else past_keys_values.past_len(idx)
 
         # 1. Q/K/V 投影并 reshape 为多头形状
         q = self.q_norm(self.q_proj(x).view(B, T, self.n_head, self.head_dim))
@@ -129,9 +148,38 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim)
         # 2. 对 Q/K 施加 RoPE（cos/sin 由模型层算好传入；直接调用本层时现算）
         if cos is None or sin is None:
+            if slab is not None:
+                raise ValueError(
+                    "the KvSlab path needs per-row cos/sin from the model (rows sit at "
+                    "different positions); do not call the layer directly with a slab"
+                )
             cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
+
+        # 2b. Fixed-slab decode: write this token into the layer's buffer and attend over
+        # the whole buffer with the slab's in-place mask, so there is no per-step ``cat``
+        # and the tensor addresses never change (CUDA graph needs that).
+        if slab is not None:
+            if T != 1:
+                raise ValueError(
+                    "the KvSlab path is decode-only (T == 1); prefill keeps KVcache + flash "
+                    "and hands over with KvSlab.fill_from()"
+                )
+            slab.write(idx, k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
+            k_all, v_all = slab.get(idx)
+            # The mask is identical for every layer, so the slab already turned it into the
+            # additive bias once at the step boundary (``build_mask``). Passing ``bias=``
+            # avoids rebuilding the same (B*H_kv, G, L) tensor 28 times per step.
+            y = self.backend_decode.decode(
+                q.transpose(1, 2),
+                k_all,
+                v_all,
+                bias=slab.bias,
+                dropout_p=self.attn_dropout.p if self.training else 0.0,
+            )
+            return self.resid_dropout(self.o_proj(y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)))
+
         # 3. 转置为 (B, n_head, T, head_dim) 方便矩阵乘法
         q = q.transpose(1, 2)
         k = k.transpose(1, 2)
@@ -143,10 +191,10 @@ class Attention(nn.Module):
                 v = torch.cat((past_v, v), 2)
             past_keys_values.set_kv(idx, (k, v))
 
-        # 4. SDPA: the causal mask lives inside the kernel when the query/key blocks are
-        # aligned. A full prefill (past_len == 0) uses is_causal=True and never materializes
-        # a T x T mask; decode (T == 1) needs no mask. Chunked prefill (past_len > 0 and
-        # T > 1) and padded batches need an explicit mask, built only on those paths.
+        # 4. Mask decision stays here, not in the backends: a full prefill (past_len == 0)
+        # lets the kernel build causality internally and never materializes a T x T mask;
+        # decode (T == 1) needs none unless the batch is padded; chunked prefill
+        # (past_len > 0 and T > 1) and padded batches need an explicit bool mask.
         need_offset_causal = past_len > 0 and T > 1
         attn_mask = None
         is_causal = False
@@ -171,15 +219,19 @@ class Attention(nn.Module):
         else:
             is_causal = past_len == 0 and T > 1
 
-        y = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            is_causal=is_causal,
-            enable_gqa=(self.n_kv_head != self.n_head),
-        )
+        # 5. Dispatch to the fixed backend for this phase. One call per layer per forward.
+        # The call is deliberately not wrapped in try/except: a backend error must surface,
+        # never silently select another implementation (there is none to select).
+        phase = "prefill" if T > 1 else "decode"
+        backend = self.backend_prefill if phase == "prefill" else self.backend_decode
+        dropout_p = self.attn_dropout.p if self.training else 0.0
+        if phase == "prefill":
+            y = backend.prefill(
+                q, k, v, is_causal=is_causal, mask=attn_mask, dropout_p=dropout_p
+            )
+        else:
+            y = backend.decode(q, k, v, mask=attn_mask, dropout_p=dropout_p)
+
         y = y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)
         return self.resid_dropout(self.o_proj(y))
 

@@ -15,6 +15,9 @@ class GenerationResult:
     decode_ms: float | None = None
     peak_mem_mb: float | None = None
     # Per-sequence state, counted from the cache tensors themselves (W0 carriers).
+    # For the in-house engine kv_mb/cache_mb are the slab's *reserved* bytes (rounded up
+    # to a 64-column bucket), not the length the history has grown to: the reservation is
+    # the KV footprint's upper bound, which is what the memory account compares.
     weights_mb: float | None = None
     kv_mb: float | None = None
     state_mb: float | None = None

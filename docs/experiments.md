@@ -174,7 +174,7 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | TPOT | `(末 token − 首 token)/(N−1)` | 不含 prefill |
 | E2E | 入队 → 末 token | |
 | throughput | 输出 token/s、请求/s | 报 offered 与 achieved |
-| peak mem | 权重 / KV / 线性状态 / 激活 | `weights_mb`（参数字节）、`kv_mb / state_mb / conv_mb`（直接数 `past_key_values`，与设备无关）、`peak_mem_mb`（设备计数器）、`mem_delta_mb`（相对加载后的 driver 增量）；分项能测就测，不能测就标 `unavailable` |
+| peak mem | 权重 / KV / 线性状态 / 激活 | `weights_mb`（参数字节）、`kv_mb / state_mb / conv_mb`（直接数 `past_key_values`，与设备无关）、`peak_mem_mb`（设备计数器）、`mem_delta_mb`（相对加载后的设备级增量，`torch.cuda.mem_get_info`）；分项能测就测，不能测就标 `unavailable` |
 | CV | `std/mean` | summary 自动算 |
 
 ### 5.3 设备分层
@@ -182,12 +182,12 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | 设备类 | 用途 | 计时/显存 |
 |---|---|---|
 | `dev-mps`（本机 M1 16GB） | 正确性、冒烟、相对趋势 | `perf_counter` + `torch.mps.synchronize()`；`driver_allocated_memory` |
-| `measure-cuda`（4090 24GB） | 正式吞吐/显存数字 | `torch.cuda.Event` + `synchronize()`；`max_memory_allocated` + `nvidia-smi` |
+| `measure-cuda`（4090 24GB） | 正式吞吐/显存数字 | `torch.cuda.Event` + `synchronize()`；`max_memory_allocated` + `torch.cuda.mem_get_info` 设备级对照 |
 | `cpu` | 单元测试/确定性对比 | `perf_counter`；RSS |
 
 - **不同设备类的数字永不同表。** 报告表格必须带 `device_class` 列。
 - M1 上的吞吐/延迟只说明趋势；不把 M1 数字写成 4090 数字。
-- 若没有 4090，W2 的 `nvidia-smi` 验收项改为 MPS 口径并在报告里注明，不能假装有 CUDA 数据。
+- 若没有 4090，W2 的设备级显存对照项改为 MPS 口径并在报告里注明，不能假装有 CUDA 数据。
 
 ### 5.4 HF 与自实现
 

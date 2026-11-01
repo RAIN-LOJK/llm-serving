@@ -425,6 +425,12 @@ def _execute(
             attn_impl = getattr(engine, "attn_implementation", None)
             if attn_impl is not None:
                 manifest["engine"]["attn_implementation"] = attn_impl
+            # Which attention backends actually ran. The value is a constant now (D4), but
+            # it is still provenance: a future kernel swap must show up in the run, not in
+            # a comment, or two runs would be compared across different engines.
+            attn_backends = getattr(engine, "attn_backends", None)
+            if callable(attn_backends):
+                manifest["engine"]["attn"] = dict(attn_backends())
 
             timer = metricsmod.make_timer(engine.device, str((cfg.get("measure") or {}).get("timer", "auto")))
             cases = list(_cases_for_model(cfg, engine, prompt_set))
@@ -591,6 +597,7 @@ def _summary(
     if manifest.get("type") in {"microbench", "scenario"} and not cfg.get("baseline", {}).get("run_id"):
         warnings.append("no paired baseline run_id; mechanism conclusions are incomplete")
 
+    attn = (manifest.get("engine") or {}).get("attn") or {}
     protocol = {
         "warmup": _warmup_count(cfg),
         "repeats": _repeat_count(cfg),
@@ -599,6 +606,11 @@ def _summary(
         "prompt_sha256": (manifest.get("prompt") or {}).get("sha256"),
         "dtype": (manifest.get("engine") or {}).get("dtype"),
         "device_class": manifest.get("device_class"),
+        # Constant provenance of the frozen attention policy (D4): prefill "sdpa",
+        # decode "hand_baddbmm" for this engine. Absent for the HF/dummy arms, which
+        # is why the pairing check treats "both None" as equal (bench/thresholds.py).
+        "attn_prefill": attn.get("prefill"),
+        "attn_decode": attn.get("decode"),
     }
 
     accept = cfg.get("accept") or {}

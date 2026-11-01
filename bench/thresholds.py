@@ -85,28 +85,94 @@ def _check_cv(summary: Mapping[str, Any], limit: float, metric: str) -> dict[str
     }
 
 
-def _protocol_mismatches(summary: Mapping[str, Any], baseline: Mapping[str, Any]) -> list[str]:
-    """A pair is only comparable if it ran the same workload on the same kind of device."""
+# Protocol keys that make any two arms comparable: same workload, same protocol,
+# same kind of device. A cross-implementation ratio (our engine vs the HF arm) needs
+# only these -- the HF arm has no in-house attention backend to record, so demanding
+# ``attn_prefill`` equality there would mark every honest pairing invalid.
+_COMMON_KEYS = (
+    "max_new_tokens",
+    "prompt_sha256",
+    "dtype",
+    "device_class",
+)
+
+# Protocol keys that make two *in-house* arms comparable: same engine, same kernels.
+# Two self-implemented runs on different backends measure different engines; the ratio
+# would be unattributable (the same reason dtype/device are checked).
+_MECHANISM_KEYS = (
+    "attn_prefill",
+    "attn_decode",
+)
+
+
+def _protocol_mismatches(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any], *, mechanism: bool = False
+) -> list[str]:
+    """A pair is only comparable if it ran the same workload on the same kind of device.
+
+    ``mechanism=True`` additionally demands the same attention backend pair. Use it when
+    both arms are this repo's engine (e.g. a refactor-invariance check); leave it off for
+    a cross-implementation ratio against the HF arm, which reports no backend.
+    """
     ours = summary.get("protocol") or {}
     theirs = baseline.get("protocol") or {}
+    keys = _COMMON_KEYS + (_MECHANISM_KEYS if mechanism else ())
     problems = []
-    for key in ("max_new_tokens", "prompt_sha256", "dtype", "device_class"):
+    for key in keys:
         if ours.get(key) != theirs.get(key):
             problems.append(f"{key}: {ours.get(key)!r} vs baseline {theirs.get(key)!r}")
     return problems
 
 
+def _is_inhouse(value: Any) -> bool:
+    """True for a backend name this repo ran itself (``sdpa``, ``hand_baddbmm``...).
+
+    The HF arm records ``hf:<transformers impl>``: a different implementation class, not a
+    kernel this repo can swap, so a cross-implementation pairing must not demand equality.
+    """
+    return bool(value) and not str(value).startswith("hf:")
+
+
+def _reports_mechanism(protocol: Mapping[str, Any] | None) -> bool:
+    """True when the arm's provenance describes an in-house attention backend pair."""
+    protocol = protocol or {}
+    return _is_inhouse(protocol.get("attn_prefill")) or _is_inhouse(protocol.get("attn_decode"))
+
+
+def mechanism_mismatches(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> list[str]:
+    """Mechanism-layer pairing check: common keys **and** the same in-house backends.
+
+    This is the stricter layer. ``decode_speed_vs_hf_min`` needs only the common keys
+    against the HF arm, but two self-implemented runs on different kernels measure
+    different engines and must not be paired. Call this (or pass ``mechanism=True`` to
+    ``_decode_ratio``) before trusting a ratio between two of this repo's runs.
+    """
+    return _protocol_mismatches(summary, baseline, mechanism=True)
+
+
 def _decode_ratio(
-    summary: Mapping[str, Any], baseline: Mapping[str, Any] | None
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    *,
+    mechanism: bool | None = None,
 ) -> tuple[float | None, int, list[str]]:
     """median(tpot_baseline / tpot_ours) over the prompts both arms ran.
 
     Any prompt whose output length differs makes the pair incomparable: TPOT over 40 tokens
     and TPOT over 60 are different quantities.
+
+    ``mechanism=None`` (the default) applies the mechanism keys exactly when the baseline
+    reports an in-house backend: an HF-arm baseline records ``hf:...`` and is checked on the
+    common keys only, while two self-implemented runs must agree on
+    ``attn_prefill``/``attn_decode``.
     """
     if not baseline:
         return None, 0, []
-    problems = _protocol_mismatches(summary, baseline)
+    if mechanism is None:
+        mechanism = _reports_mechanism(baseline.get("protocol"))
+    problems = _protocol_mismatches(summary, baseline, mechanism=mechanism)
     ours = {(entry.get("model"), entry.get("prompt")): entry for entry in summary.get("by_prompt") or []}
     theirs = {(entry.get("model"), entry.get("prompt")): entry for entry in baseline.get("by_prompt") or []}
     ratios = []

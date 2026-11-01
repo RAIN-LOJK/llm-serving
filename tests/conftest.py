@@ -27,6 +27,29 @@ def _deterministic_seed():
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _cpu_threads():
+    """Cap CPU threads: on a 128-core box the default (64) is pathological for the
+    *decode-shaped* work the slow tests do.
+
+    Measured on Qwen3-0.6B fp32 / CPU, one greedy step (batch 1, ctx ~39):
+
+        threads   1     2     4     8    16    64
+        ms/step  286   181   103    55    43   371
+
+    At 64 threads every tiny matmul pays more in thread sync than it gains in
+    parallelism, so ``test_align_qwen3.py`` took ~4.5 min; at 16 it takes ~50 s.
+    Purely a scheduling knob: no numerics change. ``MINILLM_TORCH_THREADS`` overrides.
+    """
+    import os
+
+    wanted = int(os.environ.get("MINILLM_TORCH_THREADS", "0")) or min(16, os.cpu_count() or 1)
+    previous = torch.get_num_threads()
+    torch.set_num_threads(wanted)
+    yield
+    torch.set_num_threads(previous)
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _torch_kernel_fallbacks():
     """Pin transformers' Qwen3.5 kernels to their torch fallbacks.
 

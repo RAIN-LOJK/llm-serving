@@ -5,6 +5,7 @@ from transformers import PreTrainedModel
 
 from model.config import MiniLLMConfig
 from model.layers import RMSNorm, TransformerBlock, rope_cos_sin
+from model.slab import KvSlab
 
 
 class MiniLLM(PreTrainedModel):
@@ -20,7 +21,25 @@ class MiniLLM(PreTrainedModel):
         self.norm = RMSNorm(config.n_embd, config.norm_eps)
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
 
+        # Per-row RoPE needs a table to index into (positions arrive as a tensor, so the
+        # table cannot be rebuilt per forward inside a captured graph). One table for the
+        # whole model, keyed by (length, device, dtype) -- not one per layer (P-18).
+        self._rope_cache: tuple[torch.Tensor, torch.Tensor] | None = None
+        self._rope_key: tuple | None = None
+
         self.post_init()
+
+    def _rope_rows(self, positions: torch.Tensor, length: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-row cos/sin gathered from one table: (B, 1, head_dim // 2)."""
+        key = (length, positions.device, self.token_embedding.weight.dtype)
+        if self._rope_key != key:
+            self._rope_cache = rope_cos_sin(
+                self.head_dim, self.rope_theta, 0, length,
+                positions.device, self.token_embedding.weight.dtype,
+            )
+            self._rope_key = key
+        cos, sin = self._rope_cache
+        return cos[positions].unsqueeze(1), sin[positions].unsqueeze(1)
 
     def get_input_embeddings(self):
         return self.token_embedding
@@ -47,10 +66,22 @@ class MiniLLM(PreTrainedModel):
         B, T = tokens.shape
         x = self.token_embedding(tokens)
 
-        past_len = 0 if past_keys_values is None else past_keys_values.past_len(0)
-        cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
+        slab = past_keys_values if isinstance(past_keys_values, KvSlab) else None
+        if slab is None:
+            past_len = 0 if past_keys_values is None else past_keys_values.past_len(0)
+            cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
+        else:
+            if T != 1:
+                raise ValueError("the KvSlab path is decode-only; prefill via KVcache then fill_from()")
+            # The mask must already allow the column this step writes, and it is rebuilt
+            # in place so a captured graph only reads it.
+            slab.build_mask(next_token=True)
+            cos, sin = self._rope_rows(slab.pos, slab.max_len)
+
         for idx, layer in enumerate(self.layers):
             x = layer(x, attention_mask, idx, past_keys_values, cos, sin)
+        if slab is not None:
+            slab.advance()
 
         x = self.norm(x)
         if logits_to_keep is not None:

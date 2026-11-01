@@ -8,6 +8,7 @@ import torch
 from bench.metrics import (
     CudaEventTimer,
     Timer,
+    driver_memory_mb,
     make_timer,
     per_prompt_summary,
     repeat_stability,
@@ -105,3 +106,20 @@ def test_per_prompt_summary_groups_by_prompt():
     assert [entry["prompt"] for entry in entries] == ["s01", "s02"]
     assert entries[0]["n"] == 2
     assert entries[0]["ttft_ms"]["median"] == 11.0
+
+
+def test_driver_memory_on_cuda_reads_the_device_counter(monkeypatch):
+    """P-27: the device-level number comes from torch, not from a 50-90 ms nvidia-smi.
+
+    It is sampled inside the measured window; a subprocess there pollutes the timing it is
+    supposed to accompany. ``used = total - free`` is the same axis nvidia-smi reports.
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda *a, **k: (2**30, 4 * 2**30))
+    assert driver_memory_mb() == pytest.approx(3 * 1024.0)
+
+
+def test_driver_memory_falls_back_to_rss_without_a_gpu(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    value = driver_memory_mb()
+    assert value is None or value > 0.0

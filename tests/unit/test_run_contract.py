@@ -90,6 +90,11 @@ def test_run_contract_and_index(tmp_path: Path):
 
     assert manifest["status"] == "completed"
     assert manifest["n_rows"] == 4  # 2 contexts x 2 repeats
+    # Which attention backend ran is provenance, not a note: a paired comparison across
+    # two different backends must come out "invalid" rather than produce a ratio.
+    assert manifest["engine"]["attn"] == {"prefill": "dummy", "decode": "dummy"}
+    assert summary["protocol"]["attn_prefill"] == "dummy"
+    assert summary["protocol"]["attn_decode"] == "dummy"
     assert summary["n_rows"] == 4
     assert summary["overall"]["ttft_ms"]["n"] == 4
     assert verdict["verdict"] == "unreviewed"

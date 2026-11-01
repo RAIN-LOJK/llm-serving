@@ -1,10 +1,10 @@
 """The in-house decoder (``serve/engine.py``) behind the runner's Engine protocol.
 
 Loads straight from the local HF cache through ``model.loading`` — no ``from_pretrained``,
-so what the benchmark measures is the hand-written decoder end to end. Attention runs
-through PyTorch SDPA (``F.scaled_dot_product_attention``); the surrounding cache, RoPE and
-decode loop stay in this repo. Timing comes from the engine itself (CUDA events when it
-runs on a GPU), not from the runner's wall clock.
+so what the benchmark measures is the hand-written decoder end to end. The attention path is
+frozen (``docs/decisions.md`` D4): prefill runs on SDPA, decode on ``hand_baddbmm`` over a
+``KvSlab``. The surrounding cache, RoPE and decode loop stay in this repo. Timing comes from
+the engine itself (CUDA events when it runs on a GPU), not from the runner's wall clock.
 
 ``encode`` uses ``add_special_tokens=False`` to match ``bench/engines/hf.py``: if the two
 arms tokenized differently, the comparison would silently measure different prompts.
@@ -17,6 +17,7 @@ from typing import Any, Sequence
 import torch
 
 from bench.engines.base import Engine, GenerationResult
+from model.attention import provenance as attention_provenance
 from bench.metrics import driver_memory_mb, peak_memory_mb
 from model.loading import cached_snapshot, load_checkpoint
 from serve.engine import MiniLLMEngine
@@ -71,11 +72,21 @@ class ServeEngine:
         )
         self.tokenizer = AutoTokenizer.from_pretrained(path, local_files_only=True)
         self.eos_token_id = self.tokenizer.eos_token_id
-        self.engine = MiniLLMEngine(self.model, eos_token_id=self.eos_token_id)
+        self.engine = MiniLLMEngine(
+            self.model, eos_token_id=self.eos_token_id
+        )
         self.vocab_size = int(self.model.config.vocab_size)
         self.weights_mb = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 2**20
         # Baseline for "how much does one sequence add on top of the weights".
         self._baseline_mem_mb = driver_memory_mb()
+
+    def attn_backends(self) -> dict[str, str]:
+        """The constant attention path the decoded model runs (W2/W3 attribution).
+
+        ``{"prefill": "sdpa", "decode": "hand_baddbmm"}``. The value is a constant (D4);
+        it is still recorded so a future kernel swap shows up in the run's provenance.
+        """
+        return dict(attention_provenance())
 
     def encode(self, text: str) -> list[int]:
         if self.tokenizer is None:

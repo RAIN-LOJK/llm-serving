@@ -37,6 +37,9 @@ class DummyEngine:
         base = zlib.crc32(text.encode("utf-8")) + self.seed
         return [(base + i) % self.vocab_size for i in range(length)]
 
+    def attn_backends(self) -> dict[str, str]:
+        return {"prefill": "dummy", "decode": "dummy"}
+
     def generate(self, prompt_ids: Sequence[int], max_new_tokens: int) -> GenerationResult:
         start = now()
         tokens: list[int] = []

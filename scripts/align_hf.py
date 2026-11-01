@@ -52,8 +52,19 @@ LOGITS_TOL = 0.05
 
 # ------------------------------------------------------------------------------- forward
 
+def device_of(model: MiniLLM) -> torch.device:
+    """The device the checkpoint actually lives on (the harness is device-agnostic)."""
+    try:
+        return next(model.parameters()).device
+    except StopIteration:  # pragma: no cover - a parameterless model is not a case here
+        return torch.device("cpu")
+
+
 def layer_hidden(model: MiniLLM, tokens: torch.Tensor, attention_mask: torch.Tensor | None = None):
     """Block outputs for every layer: (n_layers, batch, seq, hidden)."""
+    device = device_of(model)
+    tokens = tokens.to(device)
+    attention_mask = None if attention_mask is None else attention_mask.to(device)
     captured: list[torch.Tensor] = []
     handles = [
         layer.register_forward_hook(
@@ -77,9 +88,16 @@ def greedy_ids(
     attention_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Greedy decode that keeps the pad mask at full key width (PITFALLS P-05)."""
+    device = device_of(model)
+    tokens = tokens.to(device)
+    attention_mask = None if attention_mask is None else attention_mask.to(device)
     kv = KVcache(model.config.n_layer)
     mask = attention_mask
-    ones = torch.ones(tokens.shape[0], 1, dtype=mask.dtype) if mask is not None else None
+    ones = (
+        torch.ones(tokens.shape[0], 1, dtype=mask.dtype, device=device)
+        if mask is not None
+        else None
+    )
     out: list[torch.Tensor] = []
     with torch.no_grad():
         logits = model(tokens, attention_mask=mask, past_keys_values=kv)[0][:, -1]
@@ -120,19 +138,21 @@ def compare(
 
     for i in range(n_prompts):
         length = int(lengths[i])
-        ids = torch.from_numpy(input_ids[i : i + 1, -length:]).long()
+        ids = torch.from_numpy(input_ids[i : i + 1, -length:]).long().to(device_of(model))
         blocks, logits = layer_hidden(model, ids)
         pick = torch.from_numpy(positions[i]).long()
         ref = torch.from_numpy(hidden[i]).float()  # (layers, positions, hidden)
-        got = blocks[:, 0].index_select(1, pick)  # (layers, positions, hidden)
+        got = blocks[:, 0].index_select(1, pick.to(blocks.device)).cpu()  # (layers, positions, hidden)
         per_layer = torch.maximum(per_layer, (got - ref).abs().amax(dim=(1, 2)).double())
 
-        logits_delta[i] = (logits[0, -1].double() - torch.from_numpy(logits_ref[i]).double()).abs().max()
+        logits_delta[i] = (
+            logits[0, -1].double().cpu() - torch.from_numpy(logits_ref[i]).double()
+        ).abs().max()
         if check_greedy:
             out = greedy_ids(model, ids, greedy_ref.shape[1])
             ref_ids = torch.from_numpy(greedy_ref[i]).long()
             valid = ref_ids >= 0
-            greedy_ok += int(torch.equal(out[0][valid], ref_ids[valid]))
+            greedy_ok += int(torch.equal(out[0][valid].cpu(), ref_ids[valid]))
 
     ok_layers = bool(per_layer.max() <= layer_tol)
     ok_logits = bool(logits_delta.max() <= logits_tol)

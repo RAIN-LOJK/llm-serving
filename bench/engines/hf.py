@@ -154,6 +154,11 @@ class HFEngine:
         self.arch = type(self.model).__name__
         self.attn_implementation = getattr(model_config, "_attn_implementation", None)
 
+    def attn_backends(self) -> dict[str, str]:
+        """The HF arm's attention is transformers' own; record it rather than guessing."""
+        resolved = getattr(self, "attn_implementation", None) or "hf_default"
+        return {"prefill": f"hf:{resolved}", "decode": f"hf:{resolved}"}
+
     def encode(self, text: str) -> list[int]:
         if self.tokenizer is None:
             raise RuntimeError("call load() before encode()")

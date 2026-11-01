@@ -4,6 +4,11 @@ Red until ``model/`` grows QK-Norm, an explicit ``head_dim`` and ``rope_theta``:
 
     MINILLM_RUN_HF=1 python -m pytest tests/integration/test_align_qwen3.py -q
 
+Runs on CUDA when one is available (one greedy step: ~331 ms on CPU at the default
+thread count, ~43 ms at 16 threads, and a few ms on the 4090). The golden arrays were
+produced on CPU, so this is a cross-device comparison within the recorded tolerances;
+``MINILLM_ALIGN_DEVICE=cpu`` reproduces the original same-device run.
+
 While porting, ``python scripts/align_hf.py`` prints the per-layer ``max|Δ|`` table.
 The fixture is committed under ``tests/golden/``; this test never regenerates it.
 """
@@ -50,7 +55,15 @@ def aligned(tolerances):
     )
     if model_path is None:
         pytest.skip("the checkpoint revision recorded in meta.json is not in the HF cache")
-    return load_qwen3(model_path), golden
+    return load_qwen3(model_path, device=str(align_device())), golden
+
+
+def align_device() -> torch.device:
+    """``MINILLM_ALIGN_DEVICE`` if set, else CUDA when available, else CPU."""
+    override = os.environ.get("MINILLM_ALIGN_DEVICE")
+    if override:
+        return torch.device(override)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
 def prompt_ids(golden: dict, index: int) -> torch.Tensor:
@@ -104,9 +117,9 @@ def test_greedy_tokens_match(aligned):
     for index in range(len(golden["meta"]["prompts"])):
         expected = valid_prefix(golden, index)
         got = greedy_ids(model, prompt_ids(golden, index), n_ids)[0]
-        if torch.equal(got[: expected.numel()], expected):
+        if torch.equal(got[: expected.numel()].cpu(), expected):
             continue
-        step = int((got[: expected.numel()] != expected).nonzero()[0])
+        step = int((got[: expected.numel()].cpu() != expected).nonzero()[0])
         prompt = golden["meta"]["prompts"][index]
         raise AssertionError(
             f"prompt {prompt['id']}: diverges at step {step} "
@@ -128,7 +141,7 @@ def test_batch_sizes_agree(aligned):
         )
         for row in range(count):
             expected = valid_prefix(golden, row)
-            assert torch.equal(batched[row][: expected.numel()], expected), (
+            assert torch.equal(batched[row][: expected.numel()].cpu(), expected), (
                 f"batch {count} row {row} diverges from the golden"
             )
 

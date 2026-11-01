@@ -75,8 +75,8 @@
 
 ## D3 · 注意力实现与批处理的口径
 
-- **日期**：2026-10-25
-- **状态**：accepted
+- **日期**：2026-10-25（2026-10-31 **rejected**）
+- **状态**：**rejected**（驳回依据见本节末；替代口径待 W2 返工后另立 ADR）
 - **背景**：`W2-0002` 基线里 long 桶 prefill 比 HF 慢 1.49×（TTFT 31.8 vs 21.7 ms），
   根因是手写 attention 物化 `T×T` 分数 + 显式 fp32 掩码。换 SDPA 修复了这一点，
   但批处理一旦左 pad，flash / efficient 两个融合后端都退出、只剩 math（4 条序列：
@@ -103,6 +103,64 @@
     而不是换 varlen kernel。
 - **复盘点**：W3 结束时用实测占比校验 < 15%；W4 结束后看 gather 是否引入新热点；
   torch 升级导致 SDPA 后端支持表变化时重新确认。
+
+### 驳回（2026-10-31）
+
+- **驳回理由**：第 2 条（attention 逐序列）只测过「prefill 时 pad 会退 math」，**从没量过 decode 的代价**。
+  实测（Qwen3-0.6B 形状，28 层，bf16，纯 attention 微bench）：
+  - 逐序列 SDPA 每 step = `28×B` 次调用，B=8 → **5.8–8.8 ms**，B=32 → **21–37 ms**，且**与 ctx 几乎无关**
+    （ctx512 5.77 ms vs ctx2048 5.36 ms）→ 是**派发开销**，不是算力/带宽；
+  - 放进 step 里：B=8 约占 **25%**、B=32 约占 **50%** → **第 3 条自己写的「< 15%」在 B=8 就不成立**；
+  - 「一次 fused ragged 调用」在本机 torch 2.8 上**没有可用实现**：jagged nested 要求 q/kv 同一 ragged 维
+    （decode 的 q=1、kv=L_i 不同构）；`flex_attention` eager 慢 20–50×，`create_block_mask` 在
+    B×H×Q×KV 上物化（B=32/ctx2048 要 35 GiB，OOM）；`flash_attn` 未安装。
+  - 第 4 条把一个**可测的成本**（28×B 次派发）当成了「不值得做」，方向反了：它恰恰是 W3 归因的主要污染源。
+- **后果**：本决策不再约束后续阶段。W3 的注意力口径、是否 pad、是否引入 varlen/graph，由 W2 返工后的新 ADR 定；
+  在那之前 W3 只允许跑 exploratory，正式数字不引用。D3 里仍然成立的部分：prefill 的长度 pad 会让
+  SDPA 退 math（实测 B=32/ctx2048 慢 8×），这一条作为**测量事实**保留。
+
+---
+
+## D4 · 注意力路径定死为「prefill=逐序列 SDPA / decode=hand_baddbmm+slab」
+
+- **日期**：2026-10-31
+- **状态**：**accepted**（口径已定；数值判定见 `W2-0004`，失败则按 ROADMAP §8 止损）
+- **取代**：D3（rejected）留下的空位。D3 第 2 条「attention 逐序列」被它驳回的原因（`28×B` 次派发）
+  在本决策里针对 **decode** 修正，prefill 继续保持逐序列。
+- **背景**：D3 驳回后 W3 没有注意力口径，而 W3 的配对判据要求两臂同 kernel。当前工作树上有
+  `{attn_prefill, attn_decode, decode}` 三个旋钮、8 种组合，其中 7 种没人跑，且 `decode_mode`
+  与 `attn_decode` 部分重叠——这正是「配置面本身成为变量」的病。
+- **证据**（均为已有实测，未新跑）：
+  - prefill-2048：flash 25.4 ms / math 125.5 ms；4 条序列逐序列 80.3 ms vs pad 506.7 ms（`W2-0002`/`W2-0003` 归因）；
+  - decode（Qwen3-0.6B 形状，28 层，bf16）：逐序列 SDPA 5.8–8.8 ms/step（B=8），带 mask 的批 SDPA 7.4 ms，
+    `hand_baddbmm` 0.7 ms/step（B=8/L=512）；step 总量 ≈20 ms；
+  - 单请求 `W2-0003`：TPOT 15.08 ms、TTFT 三桶 0.86–0.90× HF。
+- **判据**（预注册，`W2-0004` 判定）：
+  - V1 四条 W2 判据对 HF 臂全 pass（`decode_speed_vs_hf_min ≥ 0.80`）；
+  - V2 与 `W2-0003` 的 TPOT 差 **记录不判**；预测 ≤ +10%，> 15% 记负结果，**不为 B=1 开 cat 分支**；
+  - V5 `test_align_qwen3` 贪心 64 token 全等（新路径的数值门）。
+- **决定**：
+  1. **prefill（T > 1）只用逐序列 SDPA**，`is_causal=True`、无 mask，长度方向**永不 pad**。
+     flash 不是「prefill 的选项」而是「无 mask 的结果」，pad 一次就没了。
+  2. **decode（T == 1）只用 `hand_baddbmm` + `KvSlab`**，一次调用覆盖整个 batch，bool mask 融进 score GEMM。
+     不做 `sdpa + slab`：SDPA 拿到 mask 后 flash/efficient 全部退出，slab 的收益被 mask 惩罚抵消。
+  3. **删掉全部注意力旋钮**（`attn_prefill` / `attn_decode` / `[engine].decode`）。后端常量写死在
+     `model/attention/__init__.py`，provenance 记录常量名而不是选择值。
+  4. **删掉能力声明（`Caps`）与封闭注册表**。「不允许静默回退」改由构造保证：`Attention.forward` 按
+     `T > 1` 直接调对应常量，没有可回退的目标。
+  5. **CUDA graph 不进 W3 数字**（`serve/graph.py` 保留为 parked，W4 接线）。graph 会消灭 W3 要测的
+     host 成本本身，且关掉 host 后瓶颈转移到 KV 读取——不是「去掉隐患」，是把隐患挪个位置。
+  6. 旧手写实现 `hand_legacy` **从运行路径移出**，搬到 `tests/reference/` 作数值 oracle。
+- **后果**：
+  - 配置面从 8 种组合收到 1 条，manifest 的 `attn` 变成常量；
+  - `W2-0003` 不能作为 W3 的配对基线 → 新开 **`W2-0004`**（`supersedes = "W2-0003"`），`W3-0001` 挂它；
+  - 配对校验必须拆两层：**通用键**（prompt hash / dtype / device / out_tokens）与**机制键**
+    （attn / decode / batch / trace），否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 `invalid`；
+  - `kv_mb` 改为「预留字节」（桶粒度 64），`memory_match_ratio` 的口径随之变化，如实报告；
+  - `hand_baddbmm` 的 `baddbmm` 形状就是 W4 paged decode 的原型（块表 gather 插在 `k`/`v` 读取处）。
+- **复盘点**：`W2-0004` 的 V1/V2/V5；W4 结束后看分页是否让 slab 的桶粒度失去意义；
+  torch 升级导致 SDPA 后端支持表变化时重新确认「无 mask 才走 flash」。
+- **清单**：[w2-rework.md](w2-rework.md)。
 
 ---
 

@@ -32,8 +32,9 @@ basis_run = "W2-0003"
 ttft_cv_max = 0.10
 tpot_cv_max = 0.10
 # (weights + KV) / torch allocator peak, per context, judged on the median context.
-# Not judged against nvidia-smi: the driver number includes the CUDA context (~0.5 GB at
-# this size), which no formula predicts, so the target would be unreachable by construction.
+# Not judged against the device-level number (torch.cuda.mem_get_info): it includes the CUDA
+# context (~0.5 GB at this size) and spans the whole card, which no formula predicts, so the
+# target would be unreachable by construction.
 # The residual is activation workspace (T^2 attention) -- a property of the implementation,
 # so long-context rows are reported next to the median instead of being averaged away.
 memory_match_ratio = 0.90

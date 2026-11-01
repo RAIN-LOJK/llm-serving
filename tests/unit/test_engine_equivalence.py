@@ -6,7 +6,7 @@ so they stay in the fast gate and do not need Qwen3 weights.
 
 The Qwen3 end-to-end check is the W1 golden (``test_align_qwen3.py``); this file guards the
 prefill/decode split that the golden path does not exercise (it calls ``model.forward``
-directly).
+directly). ``cache_mb`` is the slab's reserved bytes (bucket-rounded), not the grown length.
 """
 
 from __future__ import annotations
@@ -15,12 +15,24 @@ import pytest
 import torch
 
 from llm_utils.inference import generate
-from model import MiniLLM
+from model import MiniLLM, MiniLLMConfig
 from serve.engine import MiniLLMEngine
+
+SLAB_GRANULARITY = 64
 
 
 def prompt(tiny_model: MiniLLM, length: int = 12) -> torch.Tensor:
     return torch.randint(0, tiny_model.config.vocab_size, (length,))
+
+
+def _wide_model() -> MiniLLM:
+    """Tiny model with room for more than one slab bucket (max_position 256 > 64)."""
+    return MiniLLM(
+        MiniLLMConfig(
+            vocab_size=64, max_position_embeddings=256, n_embd=32, n_head=4, n_kv_head=2,
+            n_layer=2, dropout=0.0, bias=False,
+        )
+    ).eval()
 
 
 def test_greedy_ids_match_transitional_generate(tiny_model: MiniLLM):
@@ -64,14 +76,28 @@ def test_eos_stops_before_the_budget(tiny_model: MiniLLM):
     assert out.token_ids == [first], "EOS token must not be followed by more decoding"
 
 
-def test_cache_accounting_grows_with_decoding(tiny_model: MiniLLM):
-    tokens = prompt(tiny_model).tolist()
-    engine = MiniLLMEngine(tiny_model)
+def test_cache_accounting_reports_the_reserved_bucket():
+    """``cache_mb`` is the slab's reserved bytes, rounded up to a 64-column bucket."""
+    model = _wide_model()
+    engine = MiniLLMEngine(model)
+    tokens = prompt(model, 12).tolist()
 
-    short = engine.generate(tokens, 1)
-    long = engine.generate(tokens, 6)
+    small = engine.generate(tokens, 1)
+    large = engine.generate(tokens, 60)
 
-    assert long.cache_mb > short.cache_mb > 0
+    assert small.cache_mb > 0
+    assert large.cache_mb > small.cache_mb, "a bigger budget must land in a bigger bucket"
+    itemsize = model.token_embedding.weight.element_size()
+    for out, budget in ((small, 1), (large, 60)):
+        need = len(tokens) + budget
+        bucket = min(-(-need // SLAB_GRANULARITY) * SLAB_GRANULARITY, model.config.max_position_embeddings)
+        expected = (
+            model.config.n_layer * 2 * 1 * model.config.n_kv_head * bucket
+            * model.head_dim * itemsize
+        ) / 2**20
+        assert out.cache_mb == pytest.approx(expected), (
+            f"budget {budget}: cache_mb {out.cache_mb} != reserved bucket {bucket} ({expected})"
+        )
 
 
 def test_prefill_rejects_oversized_prompt(tiny_model: MiniLLM):

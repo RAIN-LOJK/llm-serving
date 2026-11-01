@@ -159,6 +159,64 @@ def test_decode_ratio_rejects_a_dtype_mismatch(table):
     assert any("dtype" in problem for problem in result[0]["problems"])
 
 
+def test_decode_ratio_rejects_a_different_attention_backend(table):
+    """两个自实现臂换后端 = 换了一个引擎；比值不可归因，必须 invalid 而不是给数字。
+
+    机制层键（``attn_prefill`` / ``attn_decode``）只在 baseline 报告自实现后端时生效
+    （``_reports_mechanism``），HF 臂不在这一层。
+    """
+    summary = summary_with()
+    summary["by_prompt"] = [{"model": "m", "prompt": "s01", "tpot_ms": {"median": 10.0},
+                             "out_tokens": {"median": 40}}]
+    baseline = {
+        "protocol": {**PROTOCOL, "attn_prefill": "sdpa", "attn_decode": "hand_baddbmm"},
+        "by_prompt": [{"model": "m", "prompt": "s01", "tpot_ms": {"median": 12.0},
+                       "out_tokens": {"median": 40}}],
+    }
+    result = thresholds.evaluate(["decode_speed_vs_hf_min"], summary, table, baseline=baseline)
+    assert result[0]["status"] == "invalid"
+    assert any("attn_prefill" in problem for problem in result[0]["problems"])
+
+
+def test_decode_ratio_accepts_the_hf_arm_as_baseline(table):
+    """``decode_speed_vs_hf_min`` is a cross-implementation ratio: HF reports no in-house
+    backend (``hf:...``), so only the common keys may gate it."""
+    summary = summary_with()
+    summary["by_prompt"] = [{"model": "m", "prompt": "s01", "tpot_ms": {"median": 10.0},
+                             "out_tokens": {"median": 40}}]
+    baseline = {
+        "protocol": {
+            **PROTOCOL,
+            "attn_prefill": "hf:hf_default",
+            "attn_decode": "hf:hf_default",
+        },
+        "by_prompt": [{"model": "m", "prompt": "s01", "tpot_ms": {"median": 12.0},
+                       "out_tokens": {"median": 40}}],
+    }
+    result = thresholds.evaluate(["decode_speed_vs_hf_min"], summary, table, baseline=baseline)
+    assert result[0]["status"] == "pass"
+    assert result[0]["value"] == pytest.approx(1.2)
+    # Explicitly asking for the mechanism layer still refuses it (different engines).
+    assert thresholds.mechanism_mismatches(summary, baseline)
+
+
+def test_mechanism_layer_refuses_two_inhouse_arms_on_different_backends(table):
+    ours = {"protocol": {**PROTOCOL, "attn_prefill": "sdpa", "attn_decode": "hand_baddbmm"}}
+    same = {"protocol": dict(ours["protocol"])}
+    other = {"protocol": {**PROTOCOL, "attn_prefill": "sdpa", "attn_decode": "sdpa"}}
+
+    assert thresholds.mechanism_mismatches(ours, same) == []
+    problems = thresholds.mechanism_mismatches(ours, other)
+    assert any("attn_decode" in problem for problem in problems)
+
+
+def test_common_keys_ignore_backend_provenance(table):
+    """The common layer must not invalidate a cross-implementation pairing."""
+    ours = {"protocol": {**PROTOCOL, "attn_prefill": "sdpa", "attn_decode": "hand_baddbmm"}}
+    baseline = {"protocol": {**PROTOCOL, "attn_prefill": "hf:hf_default"}}
+    assert thresholds._protocol_mismatches(ours, baseline) == []
+
+
 def test_decode_ratio_rejects_a_different_prompt_set(table):
     summary = summary_with()
     baseline = {"protocol": {**PROTOCOL, "prompt_sha256": "other"}, "by_prompt": []}
