@@ -4,5 +4,5 @@
   "reviewer": "rainhome",
   "reviewed_at": "2026-11-01",
   "decision_id": "D4",
-  "notes": "四条判据全 pass（配对基线 W2-0005，同机同会话重测的 HF 臂）：decode 1.001×（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 0.894/0.912/0.905×（短/中/长桶，均优于 HF）、memory 0.957（最差 context 0.859）、CV 1.22%/0.42%。假设 one_attention_path_does_not_move_w2_numbers 成立：W2-0003 的 1.113× 来自另一台 4090 实例（该机 HF 臂 TPOT 16.78 vs 本机 21.43），跨实例的 host-bound 比值不可比，W2-0004 的 0.781 记作配对无效。取代 W2-0003 作为 W3 配对基线（同 kernel 口径，机制键相等）。负结果/留待 W3：交接后 prefill 的 KVcache 未提前释放，单请求内同一份 KV 存在两份（slab 预留 + 实际长度），长上下文 memory ratio 因此从 0.943(441) 降到 0.859(1517)；shipped 后不泄漏，只在请求内，B≥2 时按并发放大，W3 接线时一并处理。"
+  "notes": "四条判据全 pass（配对基线 W2-0005，同机同会话重测的 HF 臂）：decode 1.001×（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 0.894/0.912/0.905×（短/中/长桶，均优于 HF）、memory 0.957（最差 context 0.859）、CV 1.22%/0.42%。假设 one_attention_path_does_not_move_w2_numbers 成立：W2-0003 的 1.113× 来自另一台 4090 实例（该机 HF 臂 TPOT 16.78 vs 本机 21.43），跨实例的 host-bound 比值不可比，W2-0004 的 0.781 记作配对无效。取代 W2-0003 作为 W3 配对基线（同 kernel 口径，机制键相等）。负结果/留待 W3：交接后 prefill 的 KVcache 未提前释放，单请求内同一份 KV 存在两份（slab 预留 + 实际长度），长上下文 memory ratio 因此从 0.943(441) 降到 0.859(1517)。峰值在 slab 整块分配那刻就定下：实测 del cache / 逐层释放三种顺序峰值同为 1539.9 MB（ctx1517），释放只降驻留（decode 期间 1498→1332 MB），不降 peak，要降 peak 须 slab 逐层惰性分配（未测，W3 再定）。不泄漏，只在请求内，W3 接线时处理驻留。"
 }
