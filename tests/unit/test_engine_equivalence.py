@@ -100,6 +100,31 @@ def test_cache_accounting_reports_the_reserved_bucket():
         )
 
 
+def test_only_one_slab_is_ever_resident():
+    """W2-0005: a bucket change reallocates instead of accumulating a cache.
+
+    ``memory_match_ratio`` divides the single request's account by the whole process's
+    allocator peak. Every resident neighbour bucket is memory on the denominator side
+    that the numerator cannot explain, which is what sank W2-0004 (ctx 987: 0.737 with
+    three resident buckets, 0.870 with one). The protocol keeps warmup out of the timed
+    region, so a cache buys no measured time back.
+    """
+    model = _wide_model()
+    engine = MiniLLMEngine(model)
+    tokens = prompt(model, 12).tolist()
+
+    engine.generate(tokens, 1)  # 13 -> bucket 64
+    first = engine._current_slab
+    engine.generate(tokens, 60)  # 72 -> bucket 128
+    second = engine._current_slab
+
+    assert second is not first, "a bigger bucket must reallocate"
+    assert first.max_len == SLAB_GRANULARITY and second.max_len == 2 * SLAB_GRANULARITY
+
+    engine.generate(tokens, 1)  # back to the small bucket: rebuilt, not reused
+    assert engine._current_slab.max_len == SLAB_GRANULARITY
+
+
 def test_prefill_rejects_oversized_prompt(tiny_model: MiniLLM):
     engine = MiniLLMEngine(tiny_model)
     too_long = [0] * (tiny_model.config.max_position_embeddings + 1)

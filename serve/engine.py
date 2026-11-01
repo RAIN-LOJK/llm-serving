@@ -9,8 +9,6 @@ from model import KVcache, KvSlab, MiniLLM
 # "start at 256, double" rounded 2048 + 128 up to 4096, so every decode step read
 # ~2x the columns it needed.
 SLAB_GRANULARITY = 64
-# A handful of buckets covers the prompt set; keep only the most recently created ones.
-MAX_CACHED_SLABS = 3
 
 
 @dataclass
@@ -48,7 +46,15 @@ class MiniLLMEngine:
         self.vocab_size = model.config.vocab_size
         self.max_position = model.config.max_position_embeddings
         self._use_cuda_events = self.device.type == "cuda"
-        self._slabs: dict[int, KvSlab] = {}
+        # Exactly one slab, reallocated when the bucket changes (W2-0005). A bucket cache
+        # was measured to be pure cost under this protocol: prompts are grouped, so a new
+        # bucket is built once and `warmup=3` already keeps that build out of the timed
+        # region, while every retained neighbour stayed in `max_memory_allocated()` as
+        # memory the formula account does not know about (W2-0004: ctx 987 ratio 0.737
+        # with 3 resident buckets vs 0.870 with one). Keeping one slab makes the
+        # allocator peak describe the request being measured, which is what
+        # `memory_match_ratio` divides by.
+        self._current_slab: KvSlab | None = None
 
     @torch.inference_mode()
     def prefill(self, prompt_ids: list[int]) -> tuple[torch.Tensor, KVcache]:
@@ -193,13 +199,16 @@ class MiniLLMEngine:
 
     @torch.inference_mode()
     def _slab(self, need: int) -> KvSlab:
-        """Return a reset slab for ``need`` columns, reusing a cached bucket if possible."""
+        """Return a reset slab for ``need`` columns, reallocating only on a bucket change.
+
+        One slab, not a cache: see the note in ``__init__``. The reallocation happens
+        synchronously here and is counted in TTFT, which is where the hand-off copy
+        already lives (D3), so a new bucket's cost is visible rather than hidden in a
+        cached neighbour.
+        """
         size = self._slab_bucket(need)
-        slab = self._slabs.get(size)
-        if slab is None:
-            if len(self._slabs) >= MAX_CACHED_SLABS:
-                self._slabs.pop(next(iter(self._slabs)))  # FIFO: drop the oldest bucket
-            slab = KvSlab(
+        if self._current_slab is None or self._current_slab.max_len != size:
+            self._current_slab = KvSlab(
                 self.model.config.n_layer,
                 1,
                 self.model.config.n_kv_head,
@@ -209,9 +218,8 @@ class MiniLLMEngine:
                 device=self.device,
                 n_head=self.model.config.n_head,
             )
-            self._slabs[size] = slab
-        slab.reset()
-        return slab
+        self._current_slab.reset()
+        return self._current_slab
 
     def _sync(self) -> None:
         if self.device.type == "cuda":

@@ -41,7 +41,7 @@ W3 的注意力口径悬空，而 W3 的吞吐判据 C1 需要一个**同 kernel
 | prefill（T > 1） | **逐序列 SDPA**，`is_causal=True`、`attn_mask=None` | 只有无 mask 的调用才可能落到 flash；长度方向**永不 pad**（pad 后 flash/efficient 退出、只剩 math，实测 prefill-2048 25.4 → 125.5 ms） |
 | decode（T == 1） | **`hand_baddbmm`**，容器 **`KvSlab`** | 一次 `baddbmm` 覆盖整个 batch，mask 融进 score GEMM（实测 B=8/L=512/28 层 0.7 ms/step，逐序列 SDPA 5.8–8.8 ms，带 mask 的批 SDPA 7.4 ms） |
 | 容器 | prefill 用 `KVcache`，decode 用 `KvSlab`（`fill_from` 交接） | slab 地址稳定、无 `cat`；`cat` 只保留给过渡版 `llm_utils/inference.py` 与测试参考 |
-| 桶粒度 | 64 列，封顶 `max_position_embeddings`，最多缓存 3 块 | 原实现 256 起按 2 倍翻：2048 + 128 → **4096**，B=8 时每 step 白读 ~448 MiB |
+| 桶粒度 | 64 列，封顶 `max_position_embeddings`，**只保留 1 块**（换桶即重建；W2-0005 修正，见 §4.3） | 原实现 256 起按 2 倍翻：2048 + 128 → **4096**，B=8 时每 step 白读 ~448 MiB |
 | 每步收 L | **不做**（见 P-25） | 切片后 `kT` 不再是连续视图，`bmm` 会隐式拷贝整个 K，比 padding 更贵 |
 | CUDA graph | **不进 W3 数字**；`serve/graph.py` 保留为 parked | graph 会消灭 W3 要测的 host 成本本身；W4 再接线。**注意：graph 只影响 slab 的内部实现，不影响 slab 是否该存在**——slab 的理由是无 `cat` 拷贝 + 给 `hand_baddbmm` 一个稠密调用，两者都不依赖 graph |
 | slab 的正当性前提 | **W3 会跑 B ≥ 2**；B=1 时它是净负担（实测 +9~17%，见 §4.1） | 单请求下 `cat` 每步只复制 ctx×`2·n_kv·D`,ctx2048 约 28 MiB ≈ 0.04 ms；slab 的固定记账反而更贵。**若 W3 退化成只跑 B=1，应重新考虑 slab 的去留** |
@@ -70,7 +70,7 @@ W3 的注意力口径悬空，而 W3 的吞吐判据 C1 需要一个**同 kernel
 
 | # | 内容 | 验收 |
 |---|---|---|
-| B1 | `_slab_bucket` 改 64 列粒度、封顶 `max_position`、缓存上限 3（FIFO 淘汰） | 桶 2176 而不是 4096；`cache_mb` = 预留字节，写进 notes |
+| B1 | `_slab_bucket` 改 64 列粒度、封顶 `max_position`；**单一 slab，换桶即重建**（原「缓存 3 块」在 W2-0004 被证伪，见 §4.3） | 桶 2176 而不是 4096；`cache_mb` = 预留字节，写进 notes |
 | B2 | **明确不做**按步收 L，登记 P-25 | PITFALLS 有这一条 |
 | B3 | `KvSlab.fill_from(cache, layer, row=None)`：按席位写入，`pos[row]` 独立 | CPU 单测：两行不同长度各填各的 |
 | B4 | `kiv`/`v` 的 `write` 已经是按行 scatter，`pos` 是 `(B,)`，批 decode 只需要 engine 层循环 | `decode_slab(tokens: list[int], slab) -> (B, V)` |
@@ -222,6 +222,6 @@ additive bias 1.95 ms/step、`check_bounds` 每步约 30 次 D2H 同步、`write
 |---|---|---|---|
 | R1 | `hand_baddbmm` 在 B=1 明显慢于 SDPA（派发主导） | V2 超 15% | 记录为「单一代码路径的税」；不按形状分叉（那会重新引入旋钮）。**已实测 1.09–1.17×，见 §4.1** |
 | R2 | 跨 kernel 后 greedy 与 W2-0003 不一致 | V4 有差异 | 正常，只要求 golden 全等（V5）。**已实测：teacher forcing 下 logits 相对差 1.3–2.1e-2，部分 prompt 第 0–5 步 argmax 分叉** |
-| R3 | 桶粒度改小后 slab 重建频繁、首步变慢 | W2-0004 的 TTFT p95 抬升 | 预热覆盖（warmup=3），桶缓存上限提到 4；不改回 2 倍翻 |
+| R3 | 桶粒度改小后 slab 重建频繁、首步变慢 | 某一桶的 TTFT 显著抬升 | 预热覆盖（warmup=3）已把重建挡在计时外；**不再用桶缓存**（W2-0005，§4.3）——缓存让 `memory_match_ratio` 的分母包含账外内存 |
 | R4 | `memory_match_ratio` 因预留字节下滑 | V3 | 如实报；W4 分页是根治手段 |
 | R5 | 把「归因探针」当成优化任务，越拆越细 | 探针迭代超过 1 轮 | 这类探针的产出只用于**二选一**（记负结果 vs 修一处）；不追毫秒级分解。`scripts/probe_decode_paths.py` 已内置「残差 ≤ 5% 时跳过 (b)」 |
