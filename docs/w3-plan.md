@@ -126,12 +126,13 @@ model/minillm.py      forward 接受 KvSlab（B 行席位），T 必须为 1（D
 model/layers.py       TransformerBlock：decode 走 slab（attention 一次覆盖整批、MLP 按批）；RoPE 按 slab.pos 逐行
 serve/scheduler.py    新增：Request 状态机 + 准入/退出 + step 主循环（static/continuous）
 serve/engine.py       新增 prefill_one()/decode_slab()（已有单行版）；generate() 在 D4 定死后即 slab 路径
-                      **移交后释放 prefill 的 KVcache**：`fill_from` 是拷贝，交完就不再读，
-                      但它活到 generate() 返回 → 同一份 KV 在单请求内两份（W2-0006 实测 48–166 MB
-                      @ctx 441–1517）。最简修法：交接循环里逐层 `cache.kvs[l] = None`。
-                      **注意它降的是驻留，不是 peak**：slab 在交接前一次性分配，峰值出现在
-                      「slab 已分配 + KVcache 未释放」那一刻，与释放顺序无关（实测三种顺序同 peak）。
-                      要降 peak 得让 slab 逐层惰性分配，W3 不做（W2-0006 notes）
+                      **交接改成逐层交错**：现在 `_slab()` 一次分配 28 层、再循环 `fill_from`，
+                      于是整块 `KVcache` 与整块 slab 同时在场（ctx1517 共 348 MB），而这份
+                      `KVcache` 交完就不再被读（decode 只读 slab）。改成
+                      `分配第 l 层 → fill_from(l) → cache.kvs[l] = None`，重叠从 28 层压到 1 层
+                      （ctx1517 约 3.6 MB）。实测（W2-0006 notes）：峰值 1539.9 → 1389.0 MB，
+                      峰值退回 prefill 自己的 `T²` 工作区，长上下文 `memory_match_ratio` 0.859 → 0.950。
+                      并发下更必要：不释放则 B 个请求各多一份 prefill cache
 bench/loadgen.py      新增 Trace/poisson_trace/closed_trace + trace_sha256；poisson_arrivals 由
                       poisson_trace 取代（旧的 Iterator[(float, Prompt)] 带不了 budget 和稳定 hash，
                       保留一个会误导的「已留接口」不如删掉，并在 ROADMAP/本文件注明）
