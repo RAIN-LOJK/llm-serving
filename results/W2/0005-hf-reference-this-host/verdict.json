@@ -1,8 +1,8 @@
 {
   "run_id": "W2-0005",
-  "verdict": "unreviewed",
-  "reviewer": null,
-  "reviewed_at": null,
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-01",
   "decision_id": null,
-  "notes": ""
+  "notes": "HF 臂在本机的重测，取代 W2-0001 作为 decode 分母。三条判据 pass：ttft_cv 0.81%、tpot_cv 0.52%、memory 0.992（最差 context 0.974）。TPOT 21.43 ms、TTFT 23.46 ms、peak 1192 MB。与 W2-0001 的 16.78 ms 相差 1.28×（代码/dtype/prompt hash/max_new_tokens 全同，只差机器实例），故 W2-0004 的 0.781 记作跨实例配对无效。判据训：decode 每步墙钟由 host 主导，跨实例的「相对 HF 倍数」不可迁移，引用时必须绑定机器。"
 }

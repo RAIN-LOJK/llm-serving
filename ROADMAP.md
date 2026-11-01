@@ -187,14 +187,18 @@
 - `bench/metrics.py`：TTFT / TPOT / tokens-s / 峰值显存 / KV 占用（公式账 + 设备级显存对照；`torch.cuda.mem_get_info`，不 fork 子进程，见 P-27）
 - 对照臂：HF `generate`（同模型、同 batch、同 `max_new_tokens`）
 - **验收**：5 次重复的 TTFT/TPOT 抖动 ≤ 10%（**按长度桶**取每 prompt 的 CV 中位数，`overall` 会被 16–2048 的长度跨度污染）；`weights+KV` 占 torch 分配器峰值的 ≥90%（按 context 分组取中位数，设备级显存只作对照——它含 ~0.5 GB CUDA context，不能当分母）；decode ≥ 0.8× HF（按 prompt 配对取中位数，配对前校验 prompt hash / dtype / device / `max_new_tokens` / `out_tokens`）
-- **返工（2026-10-31 起）**：D3 驳回后注意力口径定死为 **prefill=逐序列 SDPA / decode=hand_baddbmm+KvSlab**
-  （`docs/decisions.md` **D4**），旋钮全部删除。`W2-0003` 是旧口径（sdpa/cat）的数字，不能作为 W3 的配对基线 →
-  新开 **`W2-0004`**（`supersedes = "W2-0003"`）重建锚点；清单与 `W2-0004` 的配置规格见
-  [`docs/w2-rework.md`](docs/w2-rework.md)。W2 状态回到「返工中」，直到 `W2-0004` 判 pass。
+- **返工已完结（2026-11-01）**：D3 驳回后注意力口径定死为 **prefill=逐序列 SDPA / decode=hand_baddbmm+KvSlab**
+  （`docs/decisions.md` **D4**），旋钮全部删除。`W2-0004` 因两处**与注意力路径无关**的原因判 `invalid`
+  （slab 三桶驻留让 `memory_match_ratio` 的分母含账外内存；HF 分母来自另一台 4090 实例）→
+  改为单一 slab 后在**同一台机器**上重测两臂：`W2-0005`（HF，TPOT 21.43 ms）+ **`W2-0006`（自实现，21.43 ms）**，
+  四条判据全 pass，decode **1.001×**（逐 prompt 0.985–1.031）、TTFT 三桶 0.89–0.91×、memory 0.957。
+  **判据训：跨实例的 host-bound 比值不稳定**——同一份 HF 代码在两台 4090 上差 1.28×，
+  凡引用「相对 HF 多少倍」必须绑定跑它的机器；`W2-0001`/`W2-0003` 的比值从此只作历史记录。
 
 ### W3 · 连续批处理
 
-- **前置**：基线 `W2-0004`（固定注意力路径；`W2-0003` 是旧口径，`W2-0002` 已被它取代）；
+- **前置**：配对基线 **`W2-0006`**（固定注意力路径；HF 分母用同机的 `W2-0005`；
+  `W2-0003`/`W2-0004` 是旧口径或无效配对，都不能当基线）；
   注意力口径见 `docs/decisions.md` **D4（accepted）**——**D3 已于 2026-10-31 rejected**（逐序列 attention
   实测为 28×B 次派发，B=8 时占 step 的 25–50%）；开工清单与 W3 专用参考实现见 `docs/w3-plan.md`
 - 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson / gamma λ）——`loadgen.poisson_arrivals`
@@ -361,7 +365,7 @@ python scripts/exp_index.py --check
 |---|---|---|---|
 | W0 | 双载体探测 + D1 决策 | ✅ | `W0-0001` |
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
-| W2 | 基准框架 | 🔁 返工中 | `W2-0001` / `W2-0003`；待 `W2-0004` |
+| W2 | 基准框架 | ✅ | `W2-0006`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ⬜ | — |
 | W4 | 分页 KV | ⬜ | — |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
@@ -388,6 +392,7 @@ python scripts/exp_index.py --check
 | 2026-10-31 | v9 | **D3 驳回 + 参考实现索引**：逐序列 attention 实测为 `28×B` 次派发（B=8 占 step 25%、B=32 占 50%，与 ctx 无关），D3 的 `<15%` 判据在 B=8 即不成立、且本机 torch 2.8 无可用的「一次 ragged 调用」（nested 非同构 / flex eager 慢 20–50× / flash-attn 未装）→ D3 改 `rejected`，W3 正式 run 等 W2 返工后的新 ADR；新增 §14 跨阶段「可抄代码」索引（来源 `docs/benchmark-resources.md`，W3 专用参考在 `docs/w3-plan.md`） |
 | 2026-10-25 | v8 | **W2 收尾（注意力路径）**：`W2-0003` 换上 SDPA 后四条判据全 pass，decode **1.113×** HF、TTFT 三桶 0.86–0.90×；`W2-0002` 的 long-prefill 1.49× 归因为 attention 物化 `T²`（31.8→19.5 ms）。**pad 会让 flash/efficient 退出、只剩 math（6.3×）**，故立 D3：长度方向禁止 pad、线性层批 + attention 逐序列、全仓一条注意力路径、不引入 varlen kernel，CUDA graph 留到 W4 之后；`W2-0002` 被 `W2-0003` 取代 |
 | 2026-10-31 | v10 | **D4：注意力路径定死**。prefill（T>1）只用逐序列 SDPA（无 mask 才有 flash）；decode（T==1）只用 `hand_baddbmm` + `KvSlab`（一次调用覆盖整批，mask 融进 score GEMM）；**不做 sdpa+slab**（SDPA 拿 mask 即退 math，slab 的收益正好被抵消）。删掉 `attn_prefill/attn_decode/[engine].decode` 三个旋钮、`Caps` 能力声明与封闭注册表（「不回退」改由构造保证）、`slab_graph` 运行路径（`serve/graph.py` 保留为 parked）；`hand_legacy` 移到 `tests/reference/` 只做 oracle。**W2 回到返工中**：`W2-0003` 是旧口径，不能当 W3 的配对基线 → 新开 `W2-0004`（`supersedes`）重建锚点，清单见 `docs/w2-rework.md`。配对校验拆成通用键 / 机制键两层，否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 invalid |
+| 2026-11-01 | v11 | **W2 完成（返工后）**：`W2-0004` 判 `invalid`——两处失败都与注意力路径无关（slab 三桶驻留把账外内存放进 `memory_match_ratio` 的分母；HF 分母取自另一台 4090 实例）。改为单一 slab（`ce0af17`）后同机重测：`W2-0005`（HF）与 **`W2-0006`（自实现）**四条判据全 pass——decode **1.001×**（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 三桶 0.89–0.91×、memory 0.957、CV 1.22%/0.42%；`[W2.bench].basis_run` → `W2-0006`。**判据训：跨实例的 host-bound 比值不稳定**（同一份 HF 代码两台 4090 差 1.28×），引用「相对 HF 多少倍」必须绑定机器；`W2-0001`/`W2-0003` 的比值降级为历史记录。`W3-0001` 的基线改为 `W2-0006` |
 
 ---
 

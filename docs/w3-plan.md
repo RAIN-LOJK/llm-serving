@@ -13,7 +13,8 @@
 > | `ROADMAP.md` §14 参考实现索引 | W3 行的「实现细节见 `docs/w3-plan.md`」 | 改成指向 `docs/decisions.md` 的对应 D 条目 |
 > | `docs/w2-rework.md` §0 / §2 E6 | 前置与「口径段改写」引用 | 两个临时文件一起删，反向引用随之消失 |
 
-> **前置**：基线 `W2-0004`（固定注意力路径；`W2-0003` 是旧口径，不能作为配对基线）。
+> **前置**：配对基线 **`W2-0006`**（固定注意力路径，四条判据 pass；HF 分母用同机的 `W2-0005`）。
+> `W2-0003`（旧口径 sdpa/cat）与 `W2-0004`（跨实例配对，判 `invalid`）都不能当基线。
 > **D3 已于 2026-10-31 [rejected](decisions.md)，口径由 [D4](decisions.md) 定死**——prefill（T>1）逐序列 SDPA、
 > decode（T==1）`hand_baddbmm` + `KvSlab`。本文件里凡引用 D3 的段落都标成「当前口径（待替换）」，现在替换为 D4。
 > W3 的调度/到达过程参考见 §13。
@@ -224,7 +225,7 @@ step k:
   不是 SDPA；它本来就不依赖 flash/efficient，没有「拿到 mask 就退 math」的惩罚；
 - 因此「禁长度 pad / 一遍注意力」这类约束在 W3 **构造上满足**，不靠纪律：prefill 永远逐序列、
   长度方向永不 pad（P-22 只约束 SDPA），decode 永远一次 `baddbmm` 覆盖整个 batch。
-  这个口径已冻结在 `docs/decisions.md` **D4**；`W2-0004`（`fixed-attn-path`）是它的基线。
+  这个口径已冻结在 `docs/decisions.md` **D4**；`W2-0006`（`fixed-attn-path-paired`）是它的基线。
 
 ---
 
@@ -232,11 +233,11 @@ step k:
 
 ### E0 · 重构无害性（1 run，microbench，threshold）
 
-`W3-0001`：`impl="minillm"`，与 `W2-0004` 同 prompt / 同 dtype / 同 batch=1 / 同 max_new_tokens，
-`[baseline] run_id="W2-0004"`，`[accept]` 复用 W2 四条判据（`ttft_cv_max/tpot_cv_max/memory_match_ratio/decode_speed_vs_hf_min`）。
+`W3-0001`：`impl="minillm"`，与 `W2-0006` 同 prompt / 同 dtype / 同 batch=1 / 同 max_new_tokens，
+`[baseline] run_id="W2-0006"`，`[accept]` 复用 W2 四条判据（`ttft_cv_max/tpot_cv_max/memory_match_ratio/decode_speed_vs_hf_min`）。
 **通过即证明 §2.2 的 model 改动没有动数字**；不通过就停下修，不做任何性能 run。
 （`decode_speed_vs_hf_min` 在这里当**漂移比值**用：两臂同 kernel 后它比较的是
-「W2-0004 的 TPOT / 本次的 TPOT」，≈1.0 即无漂移；名字沿用旧键，避免新增判据键。
+「W2-0006 的 TPOT / 本次的 TPOT」，≈1.0 即无漂移；名字沿用旧键，避免新增判据键。
 注意它**只在同实现配对时**校验 `attn_prefill/attn_decode`——对 HF 臂的正式判据只看通用键，见 D4 后果。）
 
 ### E1 · 批处理摊薄 host（Q1，5 runs，microbench，record_only）
