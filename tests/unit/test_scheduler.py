@@ -1,4 +1,4 @@
-"""Scheduler contract tests (docs/w3-plan.md §5.2) on a fake engine and clock.
+"""Scheduler contract tests (docs/decisions.md D5) on a fake engine and clock.
 
 No torch, no weights: the engine is duck-typed exactly like the contract the real
 engine will implement (``prefill_into_seat`` / ``decode_batch`` / ``freeze_seat`` /
@@ -213,7 +213,7 @@ def _by_id(requests: list[Request]) -> dict[int, Request]:
     return {req.id: req for req in requests}
 
 
-# ---------------------------------------------------------------- §5.2
+# ---------------------------------------------------------------- scheduler contract
 def test_capacity_never_exceeded():
     clock = FakeClock()
     engine = FakeEngine(clock, max_batch=3)

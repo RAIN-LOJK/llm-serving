@@ -1,6 +1,7 @@
 # serve/ · 推理引擎
 
-> 状态：`engine.py` / `scheduler.py` 已落地（W2 / W3）；`block_manager.py`(W4) 与 `state_pool.py`(W7) 待实现。
+> 状态：`engine.py` / `scheduler.py` 已落地并完成 W3（连续批 C1 **2.01×**，C2/C3 pass；见 `ROADMAP.md` §5）；
+> `block_manager.py`(W4) 与 `state_pool.py`(W7) 待实现。
 > 本文件只固定模块边界，避免把调度/缓存逻辑塞回 `llm_utils/`。
 
 | 模块 | 职责 | 阶段 |

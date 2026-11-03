@@ -145,6 +145,10 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | 配置 | `config.toml` + `config_sha256` |
 
 - **官方性能 run 必须在干净 git 树上跑**；dirty run 只能 exploratory，索引标 `dirty`，报告不引用。
+- **scenario（W3+）额外 provenance**：`trace_sha256`、`arrival / rate / burstiness / requests /
+  budgets / seed`、`scheduler.policy`、`max_batch`、`capacity_estimate_req_s`（只作记录，不进判据）。
+  `trace_sha256` 由 `(seed, rate, n, budgets, prompt_sha256, burstiness, shuffle)` 完全确定，
+  是配对比较的第一道校验；两臂 trace 不同 → 判据 `invalid`，不给比值。
 - `reproduce.sh` 先校验 commit，再用 `--out results-repro` 重跑到新目录；不覆盖原 run。
 - 权重只放 HF cache，不进仓库；run 里只记录 revision。
 
@@ -163,6 +167,10 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | 进程 | 一个配置一个进程 | 跨配置重开进程，避免 allocator/thermal 污染 |
 | 顺序 | 同进程同顺序 | 基线在前、候选在后；怀疑顺序效应时反向再跑一个新 run |
 | 方差 | CV ≤ 10%（**按长度桶**算，每 prompt 一个 CV） | 超了标 `warning`，重跑整个配置，不挑点；`overall` 会把 16–2048 token 的长度跨度算进 CV |
+
+> 饱和 scenario 是例外：开放环过载下 TTFT/e2e 由队列位置决定，per-prompt CV 会远超 0.10；
+> 此时看 **trace 级 `tok_s` CV**（W3 实测 0.11–0.53%），C2 是逐请求结构判据。不要把 W2 的单请求
+> 0.10 延迟 CV 目标套到饱和 scenario 上。
 
 ### 5.2 指标定义
 
@@ -214,7 +222,9 @@ criteria = ["P1.peak_mem_ratio", "P2.crossover_tokens"]
 | `scenario` | 负载下的调度/缓存收益 | 固定 prompt 集；到达率或并发；TTFT/TPOT/吞吐 | 没有排队/饱和说明 |
 | `smoke` | 契约/管线是否通 | 可直接用 `dummy` 引擎 | 拿 smoke 数字当证据 |
 
-- `scenario` 的 `arrival = "poisson"` 在 W3 才实现；当前 runner 只支持 closed-loop。
+- `scenario` 的 `arrival = "poisson"` 已在 W3 接线（`bench/loadgen.py::poisson_trace`，带
+  `trace_sha256`）；`closed` 仍可用于 E1 的 batch 摊销探针。饱和口径只看
+  `queue_depth_at_last_arrival > 0`，不看 run 结束的 `queued`，也不用 capacity 常量（D5）。
 - `microbench` / `scenario` 必须有**配对 baseline**（同 commit、同设备、同 workload、同 dtype）。
 - 配对前 `bench/thresholds.py` 会校验 `prompt_sha256` / `dtype` / `device_class` /
   `max_new_tokens` 以及每条 prompt 的 `out_tokens`；任一不符判据记 `invalid`，不给比值。

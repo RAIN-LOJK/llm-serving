@@ -1,5 +1,5 @@
 # W3-0013 · E2 continuous / B=32 / mixed
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0013-continuous-b32-mixed.toml
 
 # 混合长度对：预算 {16,32,64,128} 均匀抽样。B 放大；只报比值，不判 C1。

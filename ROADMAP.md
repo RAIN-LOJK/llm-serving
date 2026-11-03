@@ -198,16 +198,29 @@
   代码变动使 `W2-0006` 的 TTFT 失效，故由 **`W2-0007`** 取代为 W3 的配对基线：
   decode **1.013×**、TTFT 三桶 0.92–0.95×、memory **0.992**（全区间 0.979–0.992，与 ctx 无关）。
 
-### W3 · 连续批处理
+### W3 · 连续批处理（2026-11-03 完成）
 
-- **前置**：配对基线 **`W2-0007`**（固定注意力路径；HF 分母用同机的 `W2-0005`；
-  `W2-0003`/`W2-0004`/`W2-0006` 是旧口径、无效配对或被取代，都不能当基线）；
-  注意力口径见 `docs/decisions.md` **D4（accepted）**——**D3 已于 2026-10-31 rejected**（逐序列 attention
-  实测为 28×B 次派发，B=8 时占 step 的 25–50%）；开工清单与 W3 专用参考实现见 `docs/w3-plan.md`
-- 请求队列 + 每步准入/退出 + per-request 状态机；到达过程（poisson / gamma λ）——`loadgen.poisson_arrivals`
-  的占位实现将由带 `trace_sha256` 的 `poisson_trace` 取代（见 `docs/w3-plan.md`）；对照静态批
-- **验收**：高 λ 吞吐 ≥ 1.3×；p99 TTFT 分解为排队+计算；不同到达顺序输出一致
-- **预期风险**：0.6B 上 Python 开销占比大，收益可能不显著——**把交叉点测出来就是结论**
+- **前置**：配对基线 **`W2-0007`**（固定注意力路径；HF 分母用同机的 `W2-0005`）；
+  注意力口径见 `docs/decisions.md` **D4（accepted）**；负载/调度口径见 **D5（accepted）**
+  （trace/席位/饱和/吞吐双口径）。D3 已于 2026-10-31 rejected。
+- **实现**：请求队列 + per-request 状态机 + 每步准入/退出；`bench/loadgen.py::poisson_trace`
+  （gamma + 总时长归一化）带 `trace_sha256`；静态/连续两臂共用同一个 `Scheduler` 与
+  `decode_batch`，只差 `policy`；席位 = 一块 `KvSlab` 的 `max_batch` 行（准入 prefill 写穿、
+  退出 freeze 不回收，回收留给 W4 块池）。
+- **验收（实测）**：
+  - **C1 吞吐 2.01×**：`W3-0011`（continuous）vs `W3-0010`（static），B=8 mixed，同 trace
+    `33bc2397…`、同 max_batch=8；311.43 / 154.94 tok/s，target 1.30。
+  - **C2 pass**：`ttft_p99_decomposed`，逐请求 `ttft == queue + prefill`，最大偏差 1.8e-12 ms。
+  - **C3 pass**：三对配对 run 的 request-row `token_sha256` 全等（32/89/89 keys，0 mismatch）
+    + 机制层单测（批 decode == 逐序列、冻结席位不改其它行）。
+  - **E1**：P1 **7.94×**（ctx511）/ **7.90×**（ctx2048）；P2 **3.78×**（高于预注册 2.5–3×）；
+    R1 未触发（`step_ms` 1.06×/1.10×）。
+  - **负结果/边界**：uniform 1.023×（P3 如设计，负结果）；B=32 mixed 1.606×（低于 P4 的
+    1.8–2.2×，record-only）；B=32 × ctx2048 留给 W4。
+- **教训**：E1 的 ctx512 合成 prompt 在第 3 个 token EOS，`W3-0003/0004/0005` 判 invalid，
+  改用 ctx511 重跑（P-31）；R1 的 `step_ms` 含 prefill，判读改用稳态 decode 步（D5 后果 10）。
+- **证据 run**：`W3-0001/0002`（E0）、`W3-0017–0019` + `0006/0007`（E1）、
+  `W3-0010/0011`（C1/C2/C3）、`W3-0008/0009`（P3）、`W3-0012/0013`（B=32）。
 
 ### W4 · 分页 KV
 
@@ -369,7 +382,7 @@ python scripts/exp_index.py --check
 | W0 | 双载体探测 + D1 决策 | ✅ | `W0-0001` |
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
 | W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
-| W3 | 连续批处理 | ⬜ | — |
+| W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
 | W4 | 分页 KV | ⬜ | — |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
@@ -397,6 +410,7 @@ python scripts/exp_index.py --check
 | 2026-10-31 | v10 | **D4：注意力路径定死**。prefill（T>1）只用逐序列 SDPA（无 mask 才有 flash）；decode（T==1）只用 `hand_baddbmm` + `KvSlab`（一次调用覆盖整批，mask 融进 score GEMM）；**不做 sdpa+slab**（SDPA 拿 mask 即退 math，slab 的收益正好被抵消）。删掉 `attn_prefill/attn_decode/[engine].decode` 三个旋钮、`Caps` 能力声明与封闭注册表（「不回退」改由构造保证）、`slab_graph` 运行路径（`serve/graph.py` 保留为 parked）；`hand_legacy` 移到 `tests/reference/` 只做 oracle。**W2 回到返工中**：`W2-0003` 是旧口径，不能当 W3 的配对基线 → 新开 `W2-0004`（`supersedes`）重建锚点，清单见 `docs/w2-rework.md`。配对校验拆成通用键 / 机制键两层，否则自实现臂与 HF 臂的 `decode_speed_vs_hf_min` 会被误判 invalid |
 | 2026-11-01 | v11 | **W2 完成（返工后）**：`W2-0004` 判 `invalid`——两处失败都与注意力路径无关（slab 三桶驻留把账外内存放进 `memory_match_ratio` 的分母；HF 分母取自另一台 4090 实例）。改为单一 slab（`ce0af17`）后同机重测：`W2-0005`（HF）与 **`W2-0006`（自实现）**四条判据全 pass——decode **1.001×**（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 三桶 0.89–0.91×、memory 0.957、CV 1.22%/0.42%；`[W2.bench].basis_run` → `W2-0006`。**判据训：跨实例的 host-bound 比值不稳定**（同一份 HF 代码两台 4090 差 1.28×），引用「相对 HF 多少倍」必须绑定机器；`W2-0001`/`W2-0003` 的比值降级为历史记录。`W3-0001` 的基线改为 `W2-0006` |
 | 2026-11-01 | v12 | **W2 收尾（slab 生命周期）**：`W2-0006` 判 pass 后发现 slab 记账有两处缺陷——① 三桶缓存让 `memory_match_ratio` 的分母含账外内存（已在 `ce0af17` 改单一 slab）；② 交接时 slab 整块分配、且随请求保留，同一份 KV 两次同时在场。②修完才彻底：逐层分配 + 逐层拷 + 逐层释放 + 请求结束释放 slab（`d8361d4`），ctx1517 峰值 1534.6→1348.0 MB、ratio 0.859→0.978；**两处必须同时改**（各自单独无效，2×2 实测）。代价是每请求重建 28 层、TTFT 21.25→21.85 ms。代码变更使 `W2-0006` 不再描述 shipped 状态 → 新开 **`W2-0007`**（`supersedes`）作为 W3 配对基线：四条判据 pass、decode 1.013×、TTFT 0.92–0.95×、memory 0.992（全区间 0.979–0.992）、CV 1.12%/0.44%；`[W2.bench].basis_run` → `W2-0007`。**留待 W3**：真实 serving 的 KV 必须跨请求复用（每并发槽一块），届时 `memory_match_ratio` 的分子需覆盖所有活跃槽的预留，否则重演 `W2-0004` 的错配 |
+| 2026-11-03 | v13 | **W3 完成**：C1 **2.01×**（`W3-0011`/`W3-0010`，B=8 mixed，同 trace `33bc2397…`）、C2 pass、C3 0 mismatch；E1 P1 7.94×/7.90×、P2 3.78×；P3 uniform 1.023×（负结果）；B=32 mixed 1.606×（低于 P4 的 1.8–2.2×，record-only）；E0 四条判据 pass。**发现 synthetic ctx512 EOS**（`W3-0003–0005` invalid，ctx511 重跑，P-31）；R1 的 `step_ms` 含 prefill，判读改为稳态 decode 步；D5 改 accepted，`[W3.continuous]` 标 calibrated（basis `W3-0011`）。 |
 
 ---
 
@@ -406,12 +420,12 @@ python scripts/exp_index.py --check
 > 规则：只作机制参照与对拍；直接复制代码需保留原许可证（下表均为 Apache-2.0 / MIT）。
 > 路径以本机 `transformers 5.20.2` / `fla 0.5.2` 为准，升级后需重新定位（先 `python -c "import transformers;print(transformers.__version__)"`）。
 > 数据类资源（ShareGPT / LongBench / RULER / BurstGPT）不在本表：它们只影响负载真实度，不影响任何判据。
-> W3 的调度/到达过程参考不在这里，见 `docs/w3-plan.md`。
+> W3 的调度/到达过程参考不在这里，见 `docs/decisions.md` **D5**（负载与调度口径）。
 
 | 阶段 | 参考实现 | 位置 | 抄什么 | **不抄什么** |
 |---|---|---|---|---|
 | W2/W3 | `model/attention/base.py`（本项目自建，非外部参考） | 本仓库 `model/attention/` | 注意力后端的契约：**两个入口**（prefill / decode）与「不回退」的构造性保证（`T>1` → SDPA，`T==1` → `hand_baddbmm`，见 D4）；`model/attention/__init__.py::provenance()` 写进 manifest/summary；`hand_legacy` 移到 `tests/reference/` 冻结为**数值 oracle**（与 git `26b268d^` 逐 bit 相同） | 不做可选后端的注册表 / 能力声明（D4 定死后是死重量）、不做 entry-point 自动发现、不允许静默回退、不让 oracle 进性能结论 |
-| W3 | nano-vllm `engine/{scheduler,sequence,llm_engine}.py` | `github.com/GeeeekExplorer/nano-vllm`（~1200 行） | `Sequence` 字段与调度主循环的**接口形状**（为 W4 的 block table 预留） | preempt / chunked prefill / CUDA graph；W3 实现细节见 `docs/w3-plan.md` |
+| W3 | nano-vllm `engine/{scheduler,sequence,llm_engine}.py` | `github.com/GeeeekExplorer/nano-vllm`（~1200 行） | `Sequence` 字段与调度主循环的**接口形状**（为 W4 的 block table 预留） | preempt / chunked prefill / CUDA graph；W3 的实现与判据见 `docs/decisions.md` **D5**，结果见 §5 W3 |
 | W4 | nano-vllm `engine/block_manager.py` | 同上 | 物理块池、block table、free list、按需分配/回收 | 其 attention/kernel 部分 |
 | W4 | LightLLM `kv_cache_mem_manager/{allocator,mem_manager}.py` | `github.com/ModelTC/LightLLM` | 纯 Python、token/块级分配器（比固定 block 更轻），与逐序列 attention 的 gather 更贴 | 模型专属子类（deepseek/glm…）、多进程架构 |
 | W4 | PagedAttention（SOSP'23） | `arxiv.org/abs/2309.06180` | block_size 16/32、block table、碎片率定义 | 自定义 CUDA kernel（本项目不写 kernel） |

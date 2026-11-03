@@ -1,5 +1,5 @@
 # W3-0008 · E2 static / B=8 / uniform
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0008-static-b8-uniform.toml
 
 # P3 负结果对：均匀 128 token 下连续/静态预期 ~1.00x，结论进 notes 的负结果专章，不跑 ratio 判据。

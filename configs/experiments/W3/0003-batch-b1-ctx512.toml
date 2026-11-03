@@ -1,5 +1,5 @@
 # W3-0003 · E1 批处理摊薄 host：ctx512 / B=1 参照
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0003-batch-b1-ctx512.toml
 
 # budgets=[128]；本格是 E1 自己的基线（不与 W2-0007 比）。

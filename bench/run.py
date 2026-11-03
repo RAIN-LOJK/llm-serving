@@ -145,7 +145,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if workload.get("arrival", "closed") not in {"closed", "poisson"}:
         errors.append("[workload].arrival must be 'closed' or 'poisson'")
 
-    # ---- W3 scenario contract (docs/decisions.md D5, w3-plan §4) ----------------
+    # ---- W3 scenario contract (docs/decisions.md D5) ----------------
     policy = str((cfg.get("scheduler") or {}).get("policy", "")) if "scheduler" in cfg else ""
     scenario = workload.get("arrival") == "poisson" or engine.get("impl") == "continuous"
     if "scheduler" in cfg and not isinstance(cfg.get("scheduler"), dict):
@@ -817,7 +817,7 @@ def _summary(
     )
     # Scenario runs write three row kinds into one stream. `overall`/`groups`/`stability`
     # keep the W2 meaning exactly by reading request rows only; the trace-level numbers go
-    # into their own blocks (w3-plan §6.2), and step rows feed `steps.by_active`.
+    # into their own blocks (docs/decisions.md D5), and step rows feed `steps.by_active`.
     request_rows = [r for r in rows if r.get("row_kind", "request") == "request"]
     trace_rows = [r for r in rows if r.get("row_kind") == "trace"]
     step_rows = [r for r in rows if r.get("row_kind") == "step"]
@@ -944,7 +944,7 @@ def _summary(
         "protocol": protocol,
     }
     if scenario_blocks is not None:
-        # §6.2 blocks, plus the tok/s key metric a scenario index row should show.
+        # D5 blocks, plus the tok/s key metric a scenario index row should show.
         result.update(
             {
                 "throughput": scenario_blocks["throughput"],

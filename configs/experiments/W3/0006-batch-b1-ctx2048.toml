@@ -1,5 +1,5 @@
 # W3-0006 · E1 长上下文参照：ctx2048 / B=1
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0006-batch-b1-ctx2048.toml
 
 # 与 W3-0003 比的是 slab 读取量随 ctx 的增长（这里没有 cat）。

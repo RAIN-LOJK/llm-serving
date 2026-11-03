@@ -1,6 +1,6 @@
-"""W3 §5.5: trace-level aggregation is pure, so it is pinned with hand-built rows.
+"""W3 scenario aggregation: trace-level aggregation is pure, so it is pinned with hand-built rows.
 
-The rows below use the field names frozen in ``docs/w3-plan.md`` §6.1. Nothing here touches
+The rows below use the field names frozen in ``docs/decisions.md`` D5. Nothing here touches
 a model, a GPU, or a clock: ``aggregate`` must be checkable from numbers alone, otherwise
 the C2 decomposition check cannot be trusted.
 """

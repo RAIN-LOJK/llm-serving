@@ -1,13 +1,13 @@
-"""Trace-level aggregation for W3 scenario runs (D5 semantics, ``docs/w3-plan.md`` §6.2).
+"""Trace-level aggregation for W3 scenario runs (D5 semantics, ``docs/decisions.md``).
 
 Pure functions: rows in, summary blocks out. No file or accelerator access; everything here
-is derived from the three ``metrics.jsonl`` row kinds of §6.1:
+is derived from the three ``metrics.jsonl`` row kinds of D5:
 
 - ``request`` rows: one per request per repeat (latency percentiles, decode-only tokens);
 - ``step`` rows: one per scheduler step (per-``active`` means);
 - ``trace`` rows: one per repeat, the authoritative throughput row.
 
-The row fields are read by the names frozen in §6.1 — the runner and the thresholds
+The row fields are read by the names frozen in D5 — the runner and the thresholds
 readers key off those names, so do not rename anything in the returned dicts.
 """
 
@@ -131,7 +131,7 @@ def _throughput(
     for row in trace_rows:
         value = _finite(row.get("achieved_rate"))
         if value is None:
-            # §6.2: fall back to req_s when the row does not carry its own achieved_rate.
+            # D5: fall back to req_s when the row does not carry its own achieved_rate.
             value = _finite(row.get("req_s"))
         achieved_values.append(value)
     achieved_rate = summarize(achieved_values)
@@ -231,7 +231,7 @@ def _steps(step_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for row in rows:
             gap = _finite(row.get("host_gap_ms"))
             if gap is None:
-                # §6.1: host_gap_ms = step_ms - decode_event_ms - prefill_ms. Any missing
+                # D5: host_gap_ms = step_ms - decode_event_ms - prefill_ms. Any missing
                 # term means the gap is unknowable for this step, not zero.
                 s = _finite(row.get("step_ms"))
                 d = _finite(row.get("decode_event_ms"))
@@ -260,7 +260,7 @@ def aggregate(
     budgets: Sequence[int] | None = None,
     max_batch: int = 1,
 ) -> dict[str, Any]:
-    """Build the §6.2 ``throughput``/``latency``/``steps``/``consistency`` blocks.
+    """Build the D5 ``throughput``/``latency``/``steps``/``consistency`` blocks.
 
     ``budgets`` is the trace's budget distribution (used only for
     ``analytic_straggler_ratio``) and ``max_batch`` the seat count. Latency percentiles are

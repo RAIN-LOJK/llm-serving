@@ -1,4 +1,4 @@
-"""W3 first layer: seats in one ``KvSlab`` and the batched decode forward (w3-plan §5.1).
+"""W3 first layer: seats in one ``KvSlab`` and the batched decode forward (docs/decisions.md D5).
 
 The concurrency unit of W3 is **one slab, one row per seat** (D5, §2.1). Every step
 forwards the whole block -- idle seats included -- and each row keeps its own cursors,
@@ -27,7 +27,7 @@ from model.attention.hand_baddbmm import BACKEND as DECODE_BACKEND_IMPL
 from model.layers import MLP, rope_cos_sin
 from serve.engine import MiniLLMEngine
 
-# Three prompts of different lengths (5 / 9 / 13), like §5.1's case.
+# Three prompts of different lengths (5 / 9 / 13), like the E0 case.
 PROMPTS = [
     [3, 5, 7, 11, 13],
     [3, 5, 7, 11, 13, 17, 19, 23, 29],
@@ -68,7 +68,7 @@ def _tokens(seats) -> list[int]:
     return [token for _, token in seats]
 
 
-# ------------------------------------------------------------------ the six §5.1 cases
+# ------------------------------------------------------------------ the six W3 cases
 
 def test_seated_decode_matches_per_sequence():
     """A B-row slab with different prompt lengths == one KVcache per sequence."""

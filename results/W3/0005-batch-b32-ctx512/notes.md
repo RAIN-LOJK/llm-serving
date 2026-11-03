@@ -11,17 +11,19 @@
 
 ## 观察
 
-- 关键数字（引用 summary.json）：
-- 与预测的偏差：
+- `out_tokens=3`（160/160 行），同一 token 序列；ctx512 synthetic prompt EOS。
+- 每 trace 2 个 step；`active==32` 行 `step_ms=675.17`、`prefill_ms=651.70`、`decode_event=22.99`。
+- P2 字面 3.85× 只是 4×B 的算术镜像；`decode_only_tok_s` 同样被 `active=0` 步扭曲。
 
 ## 结论（含“什么时候不划算”）
 
-（待填）
+建议：**invalid**（不用于 E1）。与 `W3-0003/0004` 同因（P-31），由 `W3-0019`（ctx511/B=32）取代。
 
 ## 限制与偏差
 
-- 设备 / dtype / 样本量 / 已知噪声：
+- 3 token/trace；R1 字面 4.46× 是 prefill 步，不是 host 失败。
+- 该 run 的 `step_ms` 不能与 128-token 的 run 横比。
 
 ## 下一步
 
-（待填）
+由 `W3-0019` 取代。

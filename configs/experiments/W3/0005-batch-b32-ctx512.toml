@@ -1,5 +1,5 @@
 # W3-0005 · E1 批处理摊薄 host：ctx512 / B=32（P2）
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0005-batch-b32-ctx512.toml
 
 # P2：B=8→32 每 token 再降，但 step 时间开始被 slab 读取抬高。

@@ -1,5 +1,5 @@
 # W3-0001 · E0a 重构无害性：同样单请求路径，四条判据对齐 W2-0007
-# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# W3 口径见 docs/decisions.md D5。
 # 运行：python -m bench.run --config configs/experiments/W3/0001-single-request-recheck.toml
 
 schema = 1

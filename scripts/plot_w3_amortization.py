@@ -108,7 +108,7 @@ LEADER_STUB = 0.045      # data units of leader just outside the right spine
 LINK = "#b6b4ab"         # hairline leader: neutral, never a series colour
 XLIM = (-0.35, 2.02)     # the plot area stops just right of the B=32 tick
 
-# E1 matrix (docs/w3-plan.md §3). B is re-read from protocol.max_batch when
+# E1 matrix (docs/decisions.md D5). B is re-read from protocol.max_batch when
 # present; these values are the fallback and define what "complete" means.
 # W3-0003..0005 are the invalid ctx512 cells (EOS after 3 tokens); they stay in
 # results/ as evidence but are not plotted. W3-0017..0019 rerun the same B
@@ -783,7 +783,7 @@ def main() -> int:
         print("  expected runs: " + ", ".join(f"{rid} (ctx{ctx}/B{batch})"
                                                for rid, (ctx, batch) in E1_RUNS.items()),
               file=sys.stderr)
-        print("  run E1 (docs/w3-plan.md §3), then re-run this script.", file=sys.stderr)
+        print("  run E1 (docs/decisions.md D5), then re-run this script.", file=sys.stderr)
         return 2
 
     points, problems, _ = load_points(stage)

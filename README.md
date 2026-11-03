@@ -18,15 +18,17 @@
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | W0 | 双载体探测 + D1 决策 | ✅ `W0-0001` |
-| W1 | Qwen3-0.6B 对齐 + golden | ⬜ 下一步 |
-| W2 | 基准框架 | ⬜ |
-| W3 | 连续批处理 | ⬜ |
-| W4 | 分页 KV | ⬜ |
+| W1 | Qwen3-0.6B 对齐 + golden | ✅ `tests/golden/qwen3-0-6b/0001` |
+| W2 | 基准框架 | ✅ `W2-0007` |
+| W3 | 连续批处理 | ✅ `W3-0010/0011`（C1 2.01×） |
+| W4 | 分页 KV | ⬜ 下一步 |
 | W5–W7 | 混合层 + 双状态管理 + 跨代对照 | ⬜ |
 | W8 | 报告与判据矩阵 | ⬜ |
 
-W0 已完成（双载体探测，D1 接受移植）：P1 成立（8k 7.80× / 32k 8.90×），P2 不成立（交叉点 ≈193 token），
-P3 数值成立但暂不可归因。下一步 W1：把 `Qwen3-0.6B` 装进自己的解码器并对齐。
+W0–W3 已完成。W3 的连续批在 B=8、混合长度、过载 trace 上做到 **2.01×** 吞吐
+（`W3-0011` vs `W3-0010`；311.43 / 154.94 tok/s），p99 TTFT 从 30.6 s 压到 8.4 s；
+C2（TTFT 分解）与 C3（两臂逐 id 一致）均 pass。均匀长度下只有 1.02×，是设计内的负结果。
+下一步 W4：分页 KV。
 
 ## 快速开始
 
@@ -57,10 +59,10 @@ python scripts/exp_index.py --check
 ```text
 model/         手写算子：RoPE / GQA / KVcache / SwiGLU / RMSNorm / TransformerBlock
 llm_utils/     过渡层：sampling + 批量 generate（S2 后由 serve/engine.py 接管）
-serve/         W2–W7：engine / scheduler / block_manager / state_pool（待实现）
-bench/         run / metrics / loadgen / prompts.json（runner 骨架已就位）
+serve/         W2–W7：engine / scheduler 已落地；block_manager(W4) / state_pool(W7) 待实现
+bench/         run / metrics / loadgen（含 poisson_trace）/ prompts.json
 configs/       实验配置（experiments/）与集中阈值（thresholds.toml）
-scripts/       env_snapshot / exp_index；W0/W1 再加 probe_* / make_golden / align_hf
+scripts/       env_snapshot / exp_index / probe_* / make_golden / align_hf / plot_*
 tests/         pytest：unit + integration + golden
 results/       run 目录（W*/NNNN-slug/）+ 自动生成的 INDEX.md
 docs/          实验约定 / 决策 / 环境 / 载体 / 混合注意力

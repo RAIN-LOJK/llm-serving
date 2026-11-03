@@ -30,7 +30,7 @@ What the caller must guarantee
 
 Seats (W3)
 ----------
-One slab row is one *seat* (``docs/w3-plan.md`` §2.1). ``active`` marks the rows holding a
+One slab row is one *seat* (``docs/decisions.md`` D5). ``active`` marks the rows holding a
 live request; the whole block is still forwarded every step (idle rows carry a placeholder
 token and their output is dropped, D4). ``activate``/``freeze`` move a row in and out of
 service without moving KV bytes (P-26: seats are not reclaimed until W4's block pool).

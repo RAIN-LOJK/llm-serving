@@ -341,7 +341,7 @@ def _request_row(
     max_batch: int,
     repeat: int,
 ) -> dict[str, Any]:
-    """One request row in the field names ``bench/scenario.py`` reads (§6.1)."""
+    """One request row in the field names ``bench/scenario.py`` reads (D5)."""
     arrival = request.t_arrival
     first = request.t_first if request.t_first is not None else arrival
     finish = request.t_finish if request.t_finish is not None else first

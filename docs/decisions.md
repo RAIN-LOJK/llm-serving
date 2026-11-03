@@ -167,7 +167,7 @@
 ## D5 · W3 负载与调度口径（trace / 席位 / 饱和 / 判据）
 
 - **日期**：2026-11-01
-- **状态**：proposed（W3 开工时立，判定后改 accepted/rejected）
+- **状态**：accepted（2026-11-03；C1/C2/C3 全部成立）
 - **取代/关系**：**D4 仍然有效且不被本决策修改**：D4 定注意力路径（prefill=T>1 逐序列 SDPA /
   decode=T==1 `hand_baddbmm`+`KvSlab`），本决策只定 W3 的负载与指标口径。本决策不碰 D4 的任何一条
   （prefill 形状、decode kernel、旋钮删除、graph 不进 W3 数字都原样保留）。
@@ -182,7 +182,14 @@
     且逐请求 `ttft ≈ queue + prefill`（误差 < 1 ms）；
   - C3 到达顺序不变性：单测（两种到达顺序逐 id 相同）+ 配对 run 的 `token_sha256` 交叉核对；
   - C5 批处理摊薄 host（Q1，非机制判据）：记录 `tok/s(B)` 曲线，`record_only`，不设阈值键。
-- **决定**（逐行搬自 [w3-plan.md](w3-plan.md) §2.1，跑之前定死）：
+- **证据（2026-11-03）**：E0 门禁 `W3-0001/0002`；E1 `W3-0017/0018/0019`（ctx511）+
+  `W3-0006/0007`（ctx2048）——P1 **7.94×/7.90×**（≥5×），P2 **3.78×**（高于预注册 2.5–3×），
+  R1 未触发（`step_ms` 1.06×/1.10×）；E2 `W3-0010/0011`（B=8 mixed，同 trace `33bc2397…`、
+  同 max_batch=8）——C1 **2.01×**（311.43 / 154.94 tok/s），C2 pass，C3 request-row
+  `token_sha256` 89/89 keys 0 mismatch；uniform `W3-0008/0009` = **1.023×**（P3 负结果）；
+  B=32 `W3-0012/0013` = **1.606×**（record_only，低于 P4 的 1.8–2.2×）。
+  `W3-0003/0004/0005` 因 synthetic prompt EOS 判 invalid（P-31），由 `W3-0017..0019` 取代。
+- **决定**（W3 开工前冻结的负载与调度口径）：
 
   | 项 | 定义 |
   |---|---|
@@ -230,8 +237,20 @@
      数据使该行 prefill 占 88%，字面 4.46× 是假阳性。判读 R1 用稳态 decode 步（排除 prefill 行）或
      `decode_event_ms`；ctx2048 的 24.19/22.02 = 1.10× 是有效对照。`decode_only_tok_s` 同理不能把
      `active=0` 空转步算进分母（128 token 时 ≈0.8%，3 token 时 ≈50%）。
-- **复盘点**：W3 结束时用 E1/E2 的实测回填本节（判据结果、`tok/s(B)` 曲线与 p99 的实际样本量）；
-  若 C1 判负，按 ROADMAP §8「< 1.2× 不硬调」收口，不改判据、不挑点。
+  11. **饱和 scenario 的 per-prompt CV 警告不是 W2 的延迟 CV 判据**：E2 六格各 61–76 条
+     `ttft_ms/e2e_ms CV>0.10` 警告，是开放环过载下队列位置随 repeat 抖动的必然结果；C2 是
+     结构判据（逐请求恒等），R5 只看 trace 级 `tok_s` CV（实测 0.11–0.53%），未触发。
+     不要把 W2 的单请求 0.10 CV 目标套到饱和 scenario 上，也不要因此重跑。
+  12. **summary 汇总层有三个已知缺口（不影响判据，报告用 trace/request rows 补）**：
+     `throughput.queue_depth_max` 为 `null`（trace row 有值：72/67/88/62/96/48）；
+     `protocol.policy` 为 `null`（`manifest.scheduler.policy` 正确）；
+     `consistency` 没有 token-hash 对比字段（C3 用 request rows 按 `(prompt_id,budget)` 核对）。
+     收口时在 notes 里注明，不在 W3 改代码。
+- **复盘点（2026-11-03 已回填）**：C1 2.01×、C2 pass、C3 89/89 keys 0 mismatch；
+  E1 P1 7.94×/7.90×、P2 3.78×；P3 1.023×；P4 B=8 2.01× 命中、B=32 1.606× 低于 1.8–2.2×
+  （scale 效应，record_only，不是 C1 失败）；P5 queue share 99.1–99.9%。
+  未决：P6（注意力占比）未单独测；B=32 × ctx2048 留给 W4；summary 三处汇总缺口（见后果 12）。
+  若后续复跑发现 C1 <1.20，仍按 ROADMAP §8「不硬调」收口，不改判据、不挑点。
 
 ---
 

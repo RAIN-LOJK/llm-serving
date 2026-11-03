@@ -1,4 +1,4 @@
-"""W3 pool admission: prefill writes straight into the seat's row (w3-plan §2.2/§2.4).
+"""W3 pool admission: prefill writes straight into the seat's row (docs/decisions.md D5).
 
 The pool path must not build a second copy of the prompt's KV next to the pool row that is
 already allocated (E0b: 166 MiB of prefill ``KVcache`` on top of the 182 MiB pool at ctx

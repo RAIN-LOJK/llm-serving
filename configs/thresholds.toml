@@ -46,8 +46,18 @@ memory_match_ratio = 0.90
 decode_speed_vs_hf_min = 0.80
 
 [W3.continuous]
-status = "target"
-basis_run = ""
+# Calibrated 2026-11-03 against W3-0011 (continuous B=8 mixed) vs W3-0010
+# (static, same trace 33bc2397... and max_batch=8).
+# Measured: C1 2.01x (311.43 / 154.94 tok/s), C2 decomposed pass (max 1.8e-12 ms),
+# C3 request-row token_sha256 0 mismatch over 89 (prompt, budget) keys.
+# Context: uniform pair W3-0008/0009 = 1.023x (P3 negative result, record-only);
+# B=32 mixed pair W3-0012/0013 = 1.606x (record-only, below the 1.8-2.2x P4 band).
+# Targets stay put: 1.30 is the pre-registered target; <1.20 is the negative line.
+# Do not read the per-prompt TTFT/e2e CV warnings of saturated scenario runs as
+# W2's 0.10 latency-CV target: R5 only looks at the trace-level tok_s CV, which
+# was 0.11-0.53% here.
+status = "calibrated"
+basis_run = "W3-0011"
 throughput_speedup_min = 1.30
 ttft_p99_decomposed = true
 

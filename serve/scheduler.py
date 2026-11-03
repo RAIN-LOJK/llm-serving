@@ -1,4 +1,4 @@
-"""Static-wave vs continuous-refill scheduler for W3 (docs/w3-plan.md §2.1/§2.4).
+"""Static-wave vs continuous-refill scheduler for W3 (docs/decisions.md D5).
 
 One :meth:`Scheduler.step` is exactly the sequence frozen in the plan:
 
