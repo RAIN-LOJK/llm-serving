@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "run_id": "W3-0001",
+  "stage": "W3",
+  "type": "microbench",
+  "slug": "single-request-recheck",
+  "title": "E0a 重构无害性：席位 API 落地后单请求路径不动数字",
+  "hypothesis": [
+    "seat_api_does_not_move_w2_numbers"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-11-03T06:22:29+00:00",
+  "finished_at": "2026-11-03T06:34:05+00:00",
+  "duration_s": 696.334,
+  "operator": "root",
+  "git": {
+    "commit": "552c72e1d3c33426635d017e6fd8cbc0662f44e9",
+    "branch": "main",
+    "dirty": false,
+    "describe": "552c72e"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W3/0001-single-request-recheck.toml",
+  "config_sha256": "b9545739fb58c0becd1c75374576f38e0729342149703ce0d3bfd380f483b0ba",
+  "prompt": {
+    "path": "bench/prompts.json",
+    "version": "v0-2026-10",
+    "sha256": "7548f3a6c7e6f601b8100e0798e9c8bc60b33a0db9c251537692395f1ce3a663",
+    "n_prompts": 32
+  },
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "minillm",
+    "device": "cuda",
+    "max_batch": 1,
+    "resolved_device": "cuda",
+    "vocab_size": 151936,
+    "dtype": "bfloat16",
+    "attn": {
+      "prefill": "sdpa",
+      "decode": "hand_baddbmm"
+    }
+  },
+  "workload": {
+    "kind": "prompts",
+    "prompts": "bench/prompts.json",
+    "max_new_tokens": 128,
+    "batch_sizes": [
+      1
+    ],
+    "arrival": "closed"
+  },
+  "measure": {
+    "warmup": 3,
+    "repeats": 5,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "threshold",
+    "criteria": [
+      "ttft_cv_max",
+      "tpot_cv_max",
+      "memory_match_ratio",
+      "decode_speed_vs_hf_min"
+    ]
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W3/0001-single-request-recheck.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "n_rows": 160,
+  "n_errors": 0,
+  "summary": "summary.json"
+}

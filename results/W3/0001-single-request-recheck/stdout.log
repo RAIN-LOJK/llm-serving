@@ -1,0 +1,5 @@
+run_id: W3-0001
+status: completed
+device_class: measure-cuda
+rows: 160 (errors: 0)
+summary: results/W3/0001-single-request-recheck/summary.json
