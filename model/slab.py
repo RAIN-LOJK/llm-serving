@@ -28,15 +28,26 @@ What the caller must guarantee
   bias (the fused-mask form ``hand_baddbmm`` consumes); all are preallocated buffers
   updated in place so a captured graph only has to read them.
 
+Seats (W3)
+----------
+One slab row is one *seat* (``docs/w3-plan.md`` §2.1). ``active`` marks the rows holding a
+live request; the whole block is still forwarded every step (idle rows carry a placeholder
+token and their output is dropped, D4). ``activate``/``freeze`` move a row in and out of
+service without moving KV bytes (P-26: seats are not reclaimed until W4's block pool).
+``advance`` moves only active rows by default -- in place, no host sync -- while
+``advance(all_rows=True)`` keeps the pre-W3 "every row +1" behaviour for the W2
+single-request path and the parked graph replay.
+
 Host bookkeeping
 ----------------
 Every bound check used to be ``bool((pos > max_len).any())`` -- a device-to-host sync, and
 ``write`` paid one per layer (28 syncs/step on Qwen3-0.6B, each draining the pipeline).
-The positions are now mirrored in Python lists (``_host_pos`` / ``_host_valid``) and the
-default guard compares ints: no ``.item()``, no ``bool(tensor)``, no sync on the normal
-path. Overflow is still reported. ``check_bounds="strict"`` reads the tensors back for a
-caller that poked ``pos``/``valid`` directly or wants the old exact check;
-``check_bounds=False`` is the graph-capture mode (replay never runs this Python anyway).
+The positions are now mirrored in Python lists (``_host_pos`` / ``_host_valid`` /
+``_host_active``) and the default guard compares ints: no ``.item()``, no
+``bool(tensor)``, no sync on the normal path. Overflow is still reported.
+``check_bounds="strict"`` reads the tensors back for a caller that poked
+``pos``/``valid`` directly or wants the old exact check; ``check_bounds=False`` is the
+graph-capture mode (replay never runs this Python anyway).
 """
 
 from __future__ import annotations
@@ -99,8 +110,13 @@ class KvSlab:
         # in place, never replaced. The Python mirrors below are the fast-path guard.
         self.pos = torch.zeros(batch, dtype=torch.long, device=self.device)
         self.valid = torch.zeros(batch, dtype=torch.long, device=self.device)
+        # Seat state (W3): True = the row holds a live request. Every row is active after
+        # construction and after ``reset()``, so the W2 single-request path (which never
+        # touches this tensor) keeps its "every row advances" behaviour unchanged.
+        self.active = torch.ones(batch, dtype=torch.bool, device=self.device)
         self._host_pos = [0] * batch
         self._host_valid = [0] * batch
+        self._host_active = [True] * batch
         # Bool allow-mask (True = may attend), (batch, 1, 1, max_len). In-place updates only.
         self.mask = torch.zeros(batch, 1, 1, max_len, dtype=torch.bool, device=self.device)
         # Additive bias for the decode kernel, (batch*n_kv_head, n_group, max_len), the
@@ -128,19 +144,70 @@ class KvSlab:
             self.values[layer] = torch.zeros(self._shape, dtype=self.dtype, device=self.device)
 
     def reset(self) -> None:
-        """Forget every row (buffers are reused, not freed)."""
+        """Forget every row (buffers are reused, not freed); every seat becomes active."""
         self.pos.zero_()
         self.valid.zero_()
+        self.active.fill_(True)
         self.mask.zero_()
         self.bias.zero_()
         self._host_pos = [0] * self.batch
         self._host_valid = [0] * self.batch
+        self._host_active = [True] * self.batch
 
-    def advance(self) -> None:
-        """One token was written for every row: move both cursors (in place)."""
-        self.pos += 1
+    # ---------------------------------------------------------------- seats (W3)
+    def activate(self, row: int, length: int) -> None:
+        """Seat row ``row`` at ``length`` tokens: an occupied, live seat.
+
+        Called after ``fill_from(cache, layer, row=row)`` has moved the bytes in. Only the
+        cursors and the flag move here -- no KV is copied -- and a row may be activated
+        again (a new request reusing the seat simply overwrites both).
+        """
+        self._check_row(row)
+        length = int(length)
+        self.pos[row] = length
+        self.valid[row] = length
+        self.active[row] = True
+        self._host_pos[row] = length
+        self._host_valid[row] = length
+        self._host_active[row] = True
+
+    def freeze(self, row: int) -> None:
+        """Retire seat ``row``: cursors back to 0, flag off. No KV move, no release (P-26).
+
+        The row keeps being forwarded (the block shape is fixed) with its mask fully
+        closed; its next ``write`` lands in column 0 and is overwritten by the next
+        ``fill_from``/``activate`` that takes the seat.
+        """
+        self._check_row(row)
+        self.pos[row] = 0
+        self.valid[row] = 0
+        self.active[row] = False
+        self._host_pos[row] = 0
+        self._host_valid[row] = 0
+        self._host_active[row] = False
+
+    def _check_row(self, row: int) -> None:
+        if not 0 <= int(row) < self.batch:
+            raise IndexError(f"row {row} outside the slab's batch of {self.batch}")
+
+    def advance(self, *, all_rows: bool = False) -> None:
+        """One token was written: move the cursors of every active row (in place).
+
+        The default only advances rows whose seat is active -- the frozen rows' cursors
+        stay put, so ``build_mask`` keeps them closed without a second code path. The
+        update is entirely on the device (``pos.add_(active)``, bool adds as 0/1) and never
+        reads back to the host, so a captured step can contain it. ``all_rows=True``
+        restores the pre-W3 "every row +1" behaviour for callers that never use seats
+        (W2's single-request path, ``serve/graph.py``'s parked replay).
+        """
+        if all_rows:
+            self.pos += 1
+        else:
+            # bool adds as 0/1 into the long cursor in place: no temporary to allocate and
+            # no dependency on the Python mirror, so a captured step can contain it.
+            self.pos.add_(self.active)
         self.valid.copy_(torch.maximum(self.valid, self.pos))
-        self.advance_host()
+        self.advance_host(all_rows=all_rows)
         if self.check_bounds and self._overflowed_advance_guard():
             raise IndexError(
                 f"KvSlab overflow: max_len={self.max_len}; a request decoded past its budget"
@@ -181,15 +248,21 @@ class KvSlab:
         """
         self._host_pos = [int(v) for v in self.pos.tolist()]
         self._host_valid = [int(v) for v in self.valid.tolist()]
+        self._host_active = [bool(v) for v in self.active.tolist()]
 
-    def advance_host(self) -> None:
+    def advance_host(self, *, all_rows: bool = False) -> None:
         """Mirror one already-performed step in Python (a graph replay ran ``advance``).
 
         The device tensors moved inside the captured graph, so their Python mirrors have to
         follow. One token per row per replay makes this exact and synchronisation-free.
+        ``all_rows=True`` mirrors ``advance(all_rows=True)``; frozen rows are skipped by
+        default, matching ``advance``.
         """
-        self._host_pos = [p + 1 for p in self._host_pos]
-        self._host_valid = [max(v, p) for v, p in zip(self._host_valid, self._host_pos)]
+        for row in range(self.batch):
+            if not all_rows and not self._host_active[row]:
+                continue
+            self._host_pos[row] += 1
+            self._host_valid[row] = max(self._host_valid[row], self._host_pos[row])
 
     # ---------------------------------------------------------------- mask
     def build_mask(self, *, next_token: bool = False) -> torch.Tensor:
@@ -199,8 +272,14 @@ class KvSlab:
         column this step is about to write (``pos``), because the write happens inside the
         layer loop while the mask is read by the same forward. Called once per forward, so
         everything that depends only on the batch (not the layer) is paid once.
+
+        A frozen seat (``active[row] == False``) is closed for its whole row: its
+        ``valid`` is 0 anyway, but folding ``active`` into ``limit`` makes the invariant
+        explicit and keeps it true even if a stale ``valid`` survived. ``hand_baddbmm``
+        zeroes the bias of a row that may attend nothing (P-24), so the row's output is a
+        deterministic value, not NaN.
         """
-        limit = self.valid + int(next_token) if next_token else self.valid
+        limit = self._limit(next_token)
         if self.check_bounds and self._overflowed_limit_guard(next_token):
             raise IndexError(
                 f"KvSlab overflow: needs {self._guard_limit(next_token)} columns, "
@@ -215,35 +294,50 @@ class KvSlab:
         return self.mask
 
     # ---------------------------------------------------------------- bounds
+    # Every guard here is in terms of *active* seats -- a frozen row sits at pos 0 and can
+    # never overflow, but the Python fast path (``max(...)``) would still read it if the
+    # bookkeeping ever drifted. ``strict`` folds ``active`` into the tensor comparison so
+    # the two modes agree.
+
     def _overflowed_write_guard(self) -> bool:
         if self.check_bounds == "strict":
-            return bool((self.pos >= self.max_len).any())
-        return max(self._host_pos) >= self.max_len
+            return bool(((self.pos >= self.max_len) & self.active).any())
+        return max(self._active_host_pos()) >= self.max_len
 
     def _overflowed_advance_guard(self) -> bool:
         # ``advance`` is where the cursor first goes *past* the last column it wrote, so it
         # reports a budget that was spent exactly (``pos > max_len``), like the old check.
         if self.check_bounds == "strict":
-            return bool((self.pos > self.max_len).any())
-        return max(self._host_pos) > self.max_len
+            return bool(((self.pos > self.max_len) & self.active).any())
+        return max(self._active_host_pos()) > self.max_len
 
     def _overflowed_limit_guard(self, next_token: bool) -> bool:
         if self.check_bounds == "strict":
-            limit = self.valid + int(next_token) if next_token else self.valid
-            return bool((limit > self.max_len).any())
-        return max(self._host_valid) + int(next_token) > self.max_len
+            return bool((self._limit(next_token) > self.max_len).any())
+        return max(self._active_host_valid()) + int(next_token) > self.max_len
+
+    def _limit(self, next_token: bool) -> torch.Tensor:
+        """Per-row attended-column count, zero for a frozen seat (see ``build_mask``)."""
+        return (self.valid + int(next_token)) * self.active
 
     def _guard_pos(self) -> int:
         """Value for the overflow message; only strict mode reads the tensor back."""
         if self.check_bounds == "strict":
             return int(self.pos.max())
-        return max(self._host_pos)
+        return max(self._active_host_pos())
 
     def _guard_limit(self, next_token: bool) -> int:
         if self.check_bounds == "strict":
-            limit = self.valid + int(next_token) if next_token else self.valid
-            return int(limit.max())
-        return max(self._host_valid) + int(next_token)
+            return int(self._limit(next_token).max())
+        return max(self._active_host_valid()) + int(next_token)
+
+    def _active_host_pos(self) -> list[int]:
+        rows = [self._host_pos[row] for row in range(self.batch) if self._host_active[row]]
+        return rows or [0]
+
+    def _active_host_valid(self) -> list[int]:
+        rows = [self._host_valid[row] for row in range(self.batch) if self._host_active[row]]
+        return rows or [0]
 
     def fill_from(self, cache, layer: int, row: int | None = None, length: int | None = None) -> None:
         """Seed the slab from a prefill that used ``model.KVcache`` (one-time copy).

@@ -206,6 +206,28 @@ def summarize(values: Iterable[float | None]) -> dict[str, float | int]:
     }
 
 
+def percentiles(
+    values: Iterable[float | None],
+    qs: Sequence[float] = (0.50, 0.95, 0.99),
+) -> dict[str, float | None]:
+    """Nearest-rank percentiles keyed ``p50``/``p95``/``p99``.
+
+    Same rank rule as :func:`summarize` (``ceil(q*n)``, 1-based, clamped), so a request-level
+    p95 and the p95 inside a summary mean the same thing. ``None``/non-finite entries are
+    ignored; an empty sample returns ``None`` for every key instead of raising.
+    """
+    vals = sorted(float(v) for v in values if v is not None and math.isfinite(float(v)))
+    n = len(vals)
+    out: dict[str, float | None] = {}
+    for q in qs:
+        qf = float(q)
+        if not 0.0 <= qf <= 1.0:
+            raise ValueError(f"percentile q must be within [0, 1], got {q!r}")
+        key = f"p{round(qf * 100)}"
+        out[key] = None if n == 0 else vals[min(n - 1, max(0, math.ceil(qf * n) - 1))]
+    return out
+
+
 def repeat_stability(
     rows: Sequence[dict[str, Any]],
     metric_names: Sequence[str] = ("ttft_ms", "tpot_ms"),

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from bench.engines.base import Engine, GenerationResult
+from bench.engines.continuous import ContinuousEngine
 from bench.engines.dummy import DummyEngine
 from bench.engines.hf import HFEngine
 from bench.engines.minillm import ServeEngine
@@ -16,6 +17,7 @@ from bench.engines.minillm import ServeEngine
 __all__ = [
     "Engine",
     "GenerationResult",
+    "ContinuousEngine",
     "DummyEngine",
     "HFEngine",
     "ServeEngine",
@@ -23,7 +25,6 @@ __all__ = [
 ]
 
 _NOT_YET = {
-    "continuous": "continuous batching lives in serve/scheduler.py (W3)",
     "paged": "paged KV lives in serve/block_manager.py (W4)",
     "hybrid": "hybrid attention lives in serve/state_pool.py (W7)",
 }
@@ -58,6 +59,22 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "float32"))),
             device=device,
             model_path=model_cfg.get("path"),
+        )
+    if impl == "continuous":
+        # W3 (D5): one scheduler over a trace. Same weights/tokenizer path as `minillm`;
+        # `name="dummy"` selects the deterministic stand-in used by the smoke config.
+        # `policy` lives in `[scheduler]` (a top-level table), not `[engine]`, so the
+        # runner passes it in through `engine_cfg["_policy"]` after config validation.
+        return ContinuousEngine(
+            name=name,
+            revision=model_cfg.get("revision"),
+            dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "float32"))),
+            device=device,
+            model_path=model_cfg.get("path"),
+            max_batch=int(engine_cfg.get("max_batch", 1)),
+            policy=str(engine_cfg.get("_policy", "continuous")),
+            vocab_size=int(engine_cfg.get("vocab_size", 1024)),
+            seed=int(engine_cfg.get("seed", 0)),
         )
     if impl in _NOT_YET:
         raise NotImplementedError(f"engine impl={impl!r}: {_NOT_YET[impl]}")

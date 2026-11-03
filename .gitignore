@@ -30,7 +30,7 @@ runs/
 logs/
 
 # Datasets and HF cache
-datasets/
+datasets
 .cache/
 
 # Legacy archive payloads (only the README/pointer belongs in the tree)

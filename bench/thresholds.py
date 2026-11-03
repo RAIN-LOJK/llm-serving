@@ -104,6 +104,14 @@ _MECHANISM_KEYS = (
     "attn_decode",
 )
 
+# Scenario arms (W3): a throughput ratio is only a scheduling statement if both arms ran
+# the same arrivals on the same pool width. ``policy`` is deliberately absent -- it is the
+# variable under test.
+_SCENARIO_KEYS = (
+    "trace_sha256",
+    "max_batch",
+)
+
 
 def _protocol_mismatches(
     summary: Mapping[str, Any], baseline: Mapping[str, Any], *, mechanism: bool = False
@@ -120,6 +128,28 @@ def _protocol_mismatches(
     problems = []
     for key in keys:
         if ours.get(key) != theirs.get(key):
+            problems.append(f"{key}: {ours.get(key)!r} vs baseline {theirs.get(key)!r}")
+    return problems
+
+
+def _scenario_mismatches(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> list[str]:
+    """Extra pairing check for two scenario arms: same trace, same pool width (D5).
+
+    A key missing from either arm is itself a mismatch: comparability is unproven, so the
+    pair must be refused rather than read as a ratio.
+    """
+    ours = summary.get("protocol") or {}
+    theirs = baseline.get("protocol") or {}
+    problems = []
+    for key in _SCENARIO_KEYS:
+        if ours.get(key) is None or theirs.get(key) is None:
+            problems.append(
+                f"{key}: missing from an arm "
+                f"({ours.get(key)!r} vs baseline {theirs.get(key)!r})"
+            )
+        elif ours.get(key) != theirs.get(key):
             problems.append(f"{key}: {ours.get(key)!r} vs baseline {theirs.get(key)!r}")
     return problems
 
@@ -286,6 +316,65 @@ def evaluate(
                         "target": float(limit),
                         "n_prompts": n,
                         "reason": "median per-prompt baseline TPOT / ours",
+                    }
+                )
+        elif name == "throughput_speedup_min":
+            # Scenario arms: tok/s on the wall-clock window (D5). The pair must share a
+            # trace and a pool width, otherwise the ratio is a workload difference.
+            if not baseline:
+                entry.update({"status": "pending", "reason": "no paired baseline summary"})
+            else:
+                problems = _protocol_mismatches(summary, baseline, mechanism=True)
+                problems += _scenario_mismatches(summary, baseline)
+                ours_bps = summary.get("throughput") or {}
+                theirs_bps = baseline.get("throughput") or {}
+                if problems:
+                    entry.update(
+                        {
+                            "status": "invalid",
+                            "problems": problems[:6],
+                            "reason": "arms are not comparable; fix the pair before reading a ratio",
+                        }
+                    )
+                elif not ours_bps.get("saturated") or not theirs_bps.get("saturated"):
+                    entry.update(
+                        {
+                            "status": "invalid",
+                            "reason": "both arms must be saturated "
+                            "(queue_depth_at_last_arrival > 0: queued when the last request arrived); "
+                            "a non-saturated pair cannot "
+                            "show a throughput speedup",
+                        }
+                    )
+                else:
+                    mine = (ours_bps.get("tok_s") or {}).get("median")
+                    reference = (theirs_bps.get("tok_s") or {}).get("median")
+                    if not mine or not reference:
+                        entry.update({"status": "pending", "reason": "tok_s missing from a summary"})
+                    else:
+                        speedup = float(mine) / float(reference)
+                        entry.update(
+                            {
+                                "status": "pass" if speedup >= float(limit) else "fail",
+                                "value": round(speedup, 3),
+                                "target": float(limit),
+                                "ours_tok_s": round(float(mine), 3),
+                                "baseline_tok_s": round(float(reference), 3),
+                                "reason": "continuous tok/s / static tok/s on the same trace",
+                            }
+                        )
+        elif name == "ttft_p99_decomposed":
+            latency = summary.get("latency") or {}
+            decomposed = latency.get("decomposed")
+            if decomposed is None:
+                entry.update({"status": "pending", "reason": "summary has no latency.decomposed"})
+            else:
+                entry.update(
+                    {
+                        "status": "pass" if bool(decomposed) == bool(limit) else "fail",
+                        "value": bool(decomposed),
+                        "target": bool(limit),
+                        "reason": "ttft == queue + prefill within 1 ms on >= 99% of requests",
                     }
                 )
         elif name == "max_concurrency_speedup_min":

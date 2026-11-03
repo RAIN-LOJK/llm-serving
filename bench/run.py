@@ -36,6 +36,7 @@ from bench import metrics as metricsmod
 from bench import thresholds as thresholdmod
 from bench.index import find_summary
 from bench.engines import build_engine
+from bench import loadgen
 from bench.loadgen import PromptSet, synthetic_ids
 
 SCHEMA_VERSION = 1
@@ -143,8 +144,61 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append(f"[workload].prompts not found: {prompts}")
     if workload.get("arrival", "closed") not in {"closed", "poisson"}:
         errors.append("[workload].arrival must be 'closed' or 'poisson'")
+
+    # ---- W3 scenario contract (docs/decisions.md D5, w3-plan §4) ----------------
+    policy = str((cfg.get("scheduler") or {}).get("policy", "")) if "scheduler" in cfg else ""
+    scenario = workload.get("arrival") == "poisson" or engine.get("impl") == "continuous"
+    if "scheduler" in cfg and not isinstance(cfg.get("scheduler"), dict):
+        errors.append("[scheduler] must be a table")
+    if "scheduler" in cfg and engine.get("impl") != "continuous":
+        # A knob that changes nothing is worse than no knob: it would be recorded in the
+        # manifest as if it had steered the run.
+        errors.append("[scheduler] is only valid with [engine].impl='continuous'")
+    if engine.get("impl") == "continuous" and policy not in {"static", "continuous"}:
+        errors.append("[scheduler].policy must be 'static' or 'continuous'")
     if workload.get("arrival") == "poisson":
-        errors.append("arrival='poisson' is not implemented until W3; use 'closed' for now")
+        if wk_type := cfg.get("exp", {}).get("type"):
+            if wk_type != "scenario":
+                errors.append("[workload].arrival='poisson' requires [exp].type='scenario'")
+        rate = workload.get("rate")
+        if not isinstance(rate, (int, float)) or float(rate) <= 0:
+            errors.append("[workload].rate is required and must be > 0 when arrival='poisson'")
+        burstiness = float(workload.get("burstiness", 1.0))
+        if burstiness <= 0:
+            errors.append("[workload].burstiness must be > 0")
+    # `requests` is only mandatory on the scenario path. Historical closed configs (all of
+    # W0/W2) do not write it and must keep validating byte for byte (P-28).
+    requests = workload.get("requests")
+    if scenario:
+        if not isinstance(requests, int) or requests < 1:
+            errors.append("[workload].requests must be >= 1 on the scenario path (poisson or impl='continuous')")
+        elif engine.get("impl") == "continuous" and workload.get("arrival") == "closed":
+            # One request per seat is the E1 shape (a batch probe, not a queue), but a closed
+            # trace longer than the pool is a legitimate *capacity* probe: every request is
+            # already waiting at t=0, so the seats stay full until the trace drains and
+            # ``req_s`` measures sustained throughput rather than one wave's tail. Fewer
+            # requests than seats would leave the pool partly idle and measure neither.
+            if int(requests) < int(engine.get("max_batch", 1)):
+                errors.append(
+                    "[workload].requests must be >= [engine].max_batch for a closed batch "
+                    "(fewer requests than seats leaves the pool partly idle)"
+                )
+    if requests is not None and (not isinstance(requests, int) or requests < 1):
+        errors.append("[workload].requests must be >= 1")
+    if scenario and [int(b) for b in workload.get("batch_sizes", [1])] != [1]:
+        errors.append(
+            "[workload].batch_sizes must be [1] on the scenario path: concurrency is "
+            "[engine].max_batch, not a row label (P-20)"
+        )
+    budgets = workload.get("budgets")
+    if budgets is not None:
+        if not isinstance(budgets, list) or not budgets:
+            errors.append("[workload].budgets must be a non-empty list of positive ints")
+        else:
+            max_new = int(workload.get("max_new_tokens", 0))
+            for b in budgets:
+                if not isinstance(b, int) or b < 1 or b > max_new:
+                    errors.append(f"[workload].budgets entries must satisfy 1 <= b <= max_new_tokens, got {b!r}")
 
     measure = cfg.get("measure") or {}
     if int(measure.get("warmup", -1)) < 0:
@@ -386,6 +440,203 @@ def _cases_for_model(
                     }
 
 
+def _scenario_execute(
+    cfg: dict[str, Any],
+    run_dir: Path,
+    manifest: dict[str, Any],
+    snapshot: dict[str, Any],
+    engine_override: str | None,
+    device_override: str | None,
+    limit: int | None,
+) -> list[dict[str, Any]]:
+    """W3 execution path: one scheduler over a trace per repeat (D5).
+
+    Rows are appended in the same ``metrics.jsonl`` stream as the per-request path, but
+    they carry ``row_kind`` so old consumers (``overall``/``groups``/``stability``) can go
+    on reading only ``row_kind="request"``.
+    """
+    workload = cfg.get("workload") or {}
+    prompt_set = PromptSet.load(workload["prompts"]) if workload.get("kind") == "prompts" else None
+    max_new = int(workload.get("max_new_tokens", 0))
+    warmup = _warmup_count(cfg)
+    repeats = _repeat_count(cfg)
+    requests = int(workload["requests"])
+    budgets = tuple(int(b) for b in (workload.get("budgets") or [max_new]))
+    rows: list[dict[str, Any]] = []
+    metrics_path = run_dir / "metrics.jsonl"
+    trace_summaries: list[dict[str, Any]] = []
+    trace_meta: dict[str, Any] = {}
+
+    with metrics_path.open("w", encoding="utf-8") as metrics_file:
+        for model_cfg in cfg.get("models", []):
+            engine_cfg = dict(cfg.get("engine") or {})
+            if engine_override:
+                engine_cfg["impl"] = engine_override
+            if device_override:
+                engine_cfg["device"] = device_override
+            if "scheduler" in cfg:
+                engine_cfg["_policy"] = str((cfg.get("scheduler") or {}).get("policy", "continuous"))
+
+            engine = build_engine(model_cfg, engine_cfg)
+            engine.load()
+            manifest["device_class"] = _device_class_for(engine.device, snapshot)
+            manifest["engine"]["resolved_device"] = engine.device
+            manifest["engine"]["vocab_size"] = int(getattr(engine, "vocab_size", 0))
+            manifest["engine"]["dtype"] = model_cfg.get("dtype")
+            attn_backends = getattr(engine, "attn_backends", None)
+            if callable(attn_backends):
+                manifest["engine"]["attn"] = dict(attn_backends())
+
+            try:
+                trace = _build_trace(cfg, engine, prompt_set, requests, budgets, max_new)
+                trace_meta = {
+                    "arrival": workload.get("arrival", "closed"),
+                    "rate": trace.rate,
+                    "burstiness": trace.burstiness,
+                    "requests": requests,
+                    "budgets": list(budgets),
+                    "seed": int((cfg.get("exp") or {}).get("seed", 0)),
+                    "sha256": trace.sha256,
+                    "shuffle": trace.shuffle,
+                }
+                manifest["scheduler"] = {
+                    "policy": engine.policy,
+                    "max_batch": int(engine.max_batch),
+                    "seats": "one_kvslab_one_row_each",
+                    "prefill": "per_sequence",
+                    "free_rows": "masked_in_forward",
+                }
+                manifest["trace"] = trace_meta
+
+                for _ in range(warmup):
+                    engine.run_trace(trace, repeat=-1)
+                for repeat in range(repeats):
+                    metricsmod.reset_peak()
+                    try:
+                        result = engine.run_trace(trace, repeat=repeat)
+                        # Read the peak *after* the trace, before the next reset: it is the
+                        # repeat's whole-run maximum, the same quantity the per-request arm
+                        # writes on each row (bench/thresholds.py::_memory_ratio).
+                        request_rows, step_rows = _flatten_scenario(
+                            result,
+                            model_cfg,
+                            manifest,
+                            weights_mb=engine.weights_mb,
+                            peak_mem_mb=metricsmod.peak_memory_mb(),
+                            driver_mem_mb=metricsmod.driver_memory_mb(),
+                        )
+                        trace_summaries.append(result.summary)
+                    except Exception as exc:  # keep a failed repeat as rows, not a lost run
+                        trace_meta.setdefault("errors", []).append(f"{type(exc).__name__}: {exc}")
+                        request_rows = [
+                            {
+                                "row_kind": "trace",
+                                "repeat": repeat,
+                                "ok": False,
+                                "error": f"{type(exc).__name__}: {exc}",
+                                "tok_s": None,
+                                "saturated": False,
+                                "queue_depth_at_last_arrival": 0,
+                            }
+                        ]
+                        step_rows = []
+                    for row in request_rows + step_rows:
+                        metrics_file.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+                    metrics_file.flush()
+                    rows.extend(request_rows + step_rows)
+            finally:
+                engine.close()
+
+    manifest["trace"] = trace_meta
+    manifest["_scenario_summaries"] = trace_summaries
+    return rows
+
+
+def _build_trace(
+    cfg: dict[str, Any],
+    engine: Any,
+    prompt_set: PromptSet | None,
+    requests: int,
+    budgets: tuple[int, ...],
+    max_new: int,
+):
+    """Tokenize the workload once, then hand already-tokenized entries to ``loadgen``."""
+    workload = cfg.get("workload") or {}
+    seed = int((cfg.get("exp") or {}).get("seed", 0))
+    arrival = workload.get("arrival", "closed")
+
+    if workload.get("kind") == "synthetic":
+        prompt_ids_by_ctx = {
+            int(ctx): synthetic_ids(int(ctx), engine.vocab_size, seed + int(ctx) * 1000)
+            for ctx in workload.get("context_lengths", [])
+        }
+        entries = [(f"ctx{ctx}", ids) for ctx, ids in prompt_ids_by_ctx.items()]
+        if not entries:
+            raise ConfigError("[workload].context_lengths is empty")
+        prompt_sha = None
+    else:
+        if prompt_set is None:
+            raise ConfigError("prompt workload requires a loaded prompt set")
+        entries = [(prompt.id, engine.encode(prompt.text)) for prompt in prompt_set.prompts]
+        prompt_sha = prompt_set.sha256
+
+    if arrival == "poisson":
+        return loadgen.poisson_trace(
+            entries,
+            rate=float(workload["rate"]),
+            n=requests,
+            budgets=budgets,
+            seed=seed,
+            shuffle=bool(workload.get("shuffle", False)),
+            burstiness=float(workload.get("burstiness", 1.0)),
+        )
+    return loadgen.closed_trace(
+        entries,
+        n=requests,
+        budgets=budgets,
+        seed=seed,
+        shuffle=bool(workload.get("shuffle", False)),
+    )
+
+
+def _flatten_scenario(
+    result: Any,
+    model_cfg: dict[str, Any],
+    manifest: dict[str, Any],
+    *,
+    weights_mb: float | None,
+    peak_mem_mb: float | None,
+    driver_mem_mb: float | None,
+) -> tuple[list[dict], list[dict]]:
+    """Stamp run/model provenance onto the arm's rows so one metrics file stays queryable."""
+    common = {
+        "run_id": manifest["run_id"],
+        "model": str(model_cfg.get("name", "—")),
+        "impl": "continuous",
+        "device": manifest["engine"].get("resolved_device"),
+        "device_class": manifest["device_class"],
+        "dtype": model_cfg.get("dtype"),
+        "policy": str(manifest.get("scheduler", {}).get("policy")),
+        "max_batch": int(manifest.get("scheduler", {}).get("max_batch", 1)),
+    }
+    # Memory fields belong to measured request outcomes only: the memory account in
+    # bench/thresholds.py groups on request rows, and a step row's lifetime is not a run
+    # peak (the per-request arm likewise writes these on its measured row alone).
+    memory = {
+        "weights_mb": weights_mb,
+        "peak_mem_mb": peak_mem_mb,
+        "driver_mem_mb": driver_mem_mb,
+    }
+    # Merged in one mapping so a row that ever grows its own memory field wins instead of
+    # raising "multiple values for keyword argument".
+    request_rows = [dict(common, **{**memory, **row}) for row in result.request_rows]
+    # Step rows are instrumentation, not outcomes: they are "ok" by construction (a
+    # failing step aborts the repeat and is recorded on the trace row instead).
+    step_rows = [dict(common, ok=True, **row) for row in result.step_rows]
+    trace_rows = [dict(common, **result.trace_row)]
+    return request_rows + trace_rows, step_rows
+
+
 def _execute(
     cfg: dict[str, Any],
     run_dir: Path,
@@ -396,8 +647,13 @@ def _execute(
     limit: int | None,
 ) -> list[dict[str, Any]]:
     workload = cfg.get("workload") or {}
+    engine_impl = str((cfg.get("engine") or {}).get("impl") or "")
+    if workload.get("arrival") == "poisson" or (engine_override or engine_impl) == "continuous":
+        return _scenario_execute(
+            cfg, run_dir, manifest, snapshot, engine_override, device_override, limit
+        )
     if workload.get("arrival", "closed") != "closed":
-        raise NotImplementedError("open-loop arrival is a W3 feature; use arrival='closed'")
+        raise NotImplementedError(f"arrival={workload.get('arrival')!r} is not implemented")
 
     prompt_set = PromptSet.load(workload["prompts"]) if workload.get("kind") == "prompts" else None
     max_new_tokens = int(workload.get("max_new_tokens", 0))
@@ -413,6 +669,11 @@ def _execute(
                 engine_cfg["impl"] = engine_override
             if device_override:
                 engine_cfg["device"] = device_override
+            # `[scheduler]` is its own table (it is not an engine property), so hand the
+            # one field the engine factory needs through a private key rather than
+            # flattening a second config section into `[engine]`.
+            if "scheduler" in cfg:
+                engine_cfg["_policy"] = str((cfg.get("scheduler") or {}).get("policy", "continuous"))
 
             engine = build_engine(model_cfg, engine_cfg)
             engine.load()
@@ -554,30 +815,44 @@ def _summary(
         "cache_prefill_mb",
         "mem_delta_mb",
     )
-    overall = {name: metricsmod.summarize([r.get(name) for r in rows]) for name in metric_names}
-    stability = metricsmod.repeat_stability(rows, ("ttft_ms", "tpot_ms", "e2e_ms"))
-    by_prompt = metricsmod.per_prompt_summary(rows, ("ttft_ms", "tpot_ms", "out_tokens"))
+    # Scenario runs write three row kinds into one stream. `overall`/`groups`/`stability`
+    # keep the W2 meaning exactly by reading request rows only; the trace-level numbers go
+    # into their own blocks (w3-plan §6.2), and step rows feed `steps.by_active`.
+    request_rows = [r for r in rows if r.get("row_kind", "request") == "request"]
+    trace_rows = [r for r in rows if r.get("row_kind") == "trace"]
+    step_rows = [r for r in rows if r.get("row_kind") == "step"]
+    rows_for_stats = request_rows or rows
 
+    overall = {name: metricsmod.summarize([r.get(name) for r in rows_for_stats]) for name in metric_names}
+    stability = metricsmod.repeat_stability(rows_for_stats, ("ttft_ms", "tpot_ms", "e2e_ms"))
+    by_prompt = metricsmod.per_prompt_summary(rows_for_stats, ("ttft_ms", "tpot_ms", "out_tokens"))
+
+    grouped = request_rows or [r for r in rows if r.get("row_kind") is None]
     group_keys = sorted(
-        {(r["model"], int(r["context"]), int(r["batch"])) for r in rows},
-        key=lambda key: (key[0], key[1], key[2]),
+        {(r.get("model"), int(r.get("context") or 0), int(r.get("batch") or 1)) for r in grouped},
+        key=lambda key: (str(key[0]), key[1], key[2]),
     )
     groups = []
     for model, context, batch in group_keys:
-        subset = [r for r in rows if (r["model"], int(r["context"]), int(r["batch"])) == (model, context, batch)]
+        subset = [
+            r
+            for r in grouped
+            if (r.get("model"), int(r.get("context") or 0), int(r.get("batch") or 1))
+            == (model, context, batch)
+        ]
         groups.append(
             {
                 "model": model,
                 "context": context,
                 "batch": batch,
                 "n": len(subset),
-                "n_errors": sum(1 for r in subset if not r["ok"]),
+                "n_errors": sum(1 for r in subset if not r.get("ok", True)),
                 **{name: metricsmod.summarize([r.get(name) for r in subset]) for name in metric_names},
             }
         )
 
     warnings: list[str] = []
-    errors = [r for r in rows if not r["ok"]]
+    errors = [r for r in rows if not r.get("ok", True)]
     if errors:
         warnings.append(f"{len(errors)}/{len(rows)} rows failed (see metrics.jsonl)")
     for bucket, entry in stability.items():
@@ -612,6 +887,9 @@ def _summary(
         "attn_prefill": attn.get("prefill"),
         "attn_decode": attn.get("decode"),
     }
+    scenario_blocks = _scenario_blocks(rows, manifest, trace_rows, request_rows, step_rows)
+    if scenario_blocks is not None:
+        protocol.update(scenario_blocks["protocol"])
 
     accept = cfg.get("accept") or {}
     baseline_id = str((cfg.get("baseline") or {}).get("run_id") or "")
@@ -623,21 +901,31 @@ def _summary(
     if accept.get("mode", "record_only") == "record_only":
         acceptance = [{"name": "record_only", "status": "recorded"}]
     else:
+        evaluated = {
+            "overall": overall,
+            "groups": groups,
+            "stability": stability,
+            "by_prompt": by_prompt,
+            "protocol": protocol,
+        }
+        if scenario_blocks is not None:
+            evaluated.update(
+                {
+                    "throughput": scenario_blocks["throughput"],
+                    "latency": scenario_blocks["latency"],
+                    "steps": scenario_blocks["steps"],
+                    "consistency": scenario_blocks["consistency"],
+                }
+            )
         acceptance = thresholdmod.evaluate(
             accept.get("criteria", []),
-            {
-                "overall": overall,
-                "groups": groups,
-                "stability": stability,
-                "by_prompt": by_prompt,
-                "protocol": protocol,
-            },
+            evaluated,
             thresholdmod.load(cfg.get("thresholds")),
             baseline=baseline_summary,
         )
 
     key_name, key_value = metricsmod.key_metric({"overall": overall})
-    return {
+    result = {
         "schema_version": SCHEMA_VERSION,
         "run_id": manifest["run_id"],
         "generated_at": _utc_now(),
@@ -655,6 +943,56 @@ def _summary(
         "key_metric": {"name": key_name, "value": key_value},
         "protocol": protocol,
     }
+    if scenario_blocks is not None:
+        # §6.2 blocks, plus the tok/s key metric a scenario index row should show.
+        result.update(
+            {
+                "throughput": scenario_blocks["throughput"],
+                "latency": scenario_blocks["latency"],
+                "steps": scenario_blocks["steps"],
+                "consistency": scenario_blocks["consistency"],
+            }
+        )
+        tok_s = (scenario_blocks["throughput"].get("tok_s") or {}).get("median")
+        if tok_s is not None:
+            result["key_metric"] = {"name": "tok_s", "value": float(tok_s)}
+    return result
+
+
+def _scenario_blocks(
+    rows: list[dict[str, Any]],
+    manifest: dict[str, Any],
+    trace_rows: list[dict[str, Any]],
+    request_rows: list[dict[str, Any]],
+    step_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Aggregate the three row kinds with ``bench.scenario``; ``None`` for W2-style runs."""
+    if not trace_rows:
+        return None
+    from bench import scenario as scenariomod
+
+    trace_meta = manifest.get("trace") or {}
+    blocks = scenariomod.aggregate(
+        request_rows,
+        step_rows,
+        trace_rows,
+        budgets=trace_meta.get("budgets"),
+        max_batch=int((manifest.get("scheduler") or {}).get("max_batch", 1)),
+    )
+    # The first trace's hash is what a paired arm must match (D5): repeats of one run
+    # build the same trace, so a spread here would mean the run itself was inconsistent.
+    hashes = sorted({str(r.get("trace_sha256")) for r in trace_rows if r.get("trace_sha256")})
+    blocks["protocol"] = {
+        "trace_sha256": hashes[0] if len(hashes) == 1 else None,
+        "max_batch": int((manifest.get("scheduler") or {}).get("max_batch", 1)),
+    }
+    blocks["consistency"].update(
+        {
+            "trace_sha256_consistent": len(hashes) <= 1,
+            "n_trace_hashes": len(hashes),
+        }
+    )
+    return blocks
 
 
 # ---------------------------------------------------------------------------
@@ -748,11 +1086,11 @@ def run_config(
         write_json(run_dir / "summary.json", summary)
 
         duration = metricsmod.elapsed_ms(started) / 1000.0
-        manifest["status"] = "completed" if rows and any(r["ok"] for r in rows) else "failed"
+        manifest["status"] = "completed" if rows and any(r.get("ok", True) for r in rows) else "failed"
         manifest["finished_at"] = _utc_now()
         manifest["duration_s"] = round(duration, 3)
         manifest["n_rows"] = len(rows)
-        manifest["n_errors"] = sum(1 for r in rows if not r["ok"])
+        manifest["n_errors"] = sum(1 for r in rows if not r.get("ok", True))
         manifest["summary"] = "summary.json"
         write_json(run_dir / "manifest.json", manifest)
 

@@ -71,8 +71,17 @@ class MiniLLM(PreTrainedModel):
             past_len = 0 if past_keys_values is None else past_keys_values.past_len(0)
             cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
         else:
+            if B != slab.batch:
+                raise ValueError(
+                    f"the KvSlab path is one whole-block forward: tokens batch {B} must equal "
+                    f"slab.batch {slab.batch} (the pool is forwarded as a block, including its "
+                    "idle seats); slice/select rows instead of forwarding a subset"
+                )
             if T != 1:
-                raise ValueError("the KvSlab path is decode-only; prefill via KVcache then fill_from()")
+                raise ValueError(
+                    "the KvSlab path is decode-only (D4: T == 1); prefill via KVcache then "
+                    "fill_from(), never pad a prefill into (B, T_max)"
+                )
             # The mask must already allow the column this step writes, and it is rebuilt
             # in place so a captured graph only reads it.
             slab.build_mask(next_token=True)

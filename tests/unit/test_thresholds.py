@@ -237,3 +237,96 @@ def test_decode_ratio_rejects_different_output_lengths(table):
     result = thresholds.evaluate(["decode_speed_vs_hf_min"], summary, table, baseline=baseline)
     assert result[0]["status"] == "invalid"
     assert any("out_tokens" in problem for problem in result[0]["problems"])
+
+
+# ---------------------------------------------------------------- W3 scenario criteria
+SCENARIO_PROTOCOL = dict(
+    PROTOCOL,
+    attn_prefill="sdpa",
+    attn_decode="hand_baddbmm",
+    trace_sha256="trace-abc",
+    max_batch=8,
+)
+
+
+def scenario_summary(tok_s=200.0, saturated=True, queue_at_last_arrival=5, decomposed=True):
+    return {
+        "protocol": dict(SCENARIO_PROTOCOL),
+        "throughput": {
+            "tok_s": {"median": tok_s},
+            "saturated": saturated,
+            "queue_depth_at_last_arrival": {"median": queue_at_last_arrival},
+        },
+        "latency": {"decomposed": decomposed},
+    }
+
+
+def _evaluate(name, ours, baseline):
+    table = {"W3": {"continuous": {name: 1.30 if name == "throughput_speedup_min" else True}}}
+    return thresholds.evaluate([name], ours, table, baseline=baseline)[0]
+
+
+def test_throughput_speedup_passes_above_target():
+    ours = scenario_summary(tok_s=280.0)
+    base = scenario_summary(tok_s=200.0)
+    entry = _evaluate("throughput_speedup_min", ours, base)
+    assert entry["status"] == "pass", entry
+    assert entry["value"] == pytest.approx(1.4, abs=1e-3)
+
+
+def test_throughput_speedup_fails_below_target():
+    entry = _evaluate("throughput_speedup_min", scenario_summary(tok_s=210.0), scenario_summary(tok_s=200.0))
+    assert entry["status"] == "fail", entry
+
+
+def test_throughput_speedup_pending_without_baseline():
+    entry = _evaluate("throughput_speedup_min", scenario_summary(), None)
+    assert entry["status"] == "pending", entry
+
+
+def test_throughput_speedup_invalid_on_a_different_trace():
+    ours = scenario_summary()
+    base = scenario_summary()
+    base["protocol"]["trace_sha256"] = "trace-other"
+    entry = _evaluate("throughput_speedup_min", ours, base)
+    assert entry["status"] == "invalid", entry
+    assert any("trace_sha256" in problem for problem in entry["problems"])
+
+
+def test_throughput_speedup_invalid_when_a_protocol_key_is_missing():
+    """A dropped key is not a pass: comparability is unproven, so no ratio (D5)."""
+    base = scenario_summary()
+    del base["protocol"]["trace_sha256"]
+    entry = _evaluate("throughput_speedup_min", scenario_summary(), base)
+    assert entry["status"] == "invalid", entry
+    assert any("trace_sha256" in problem and "missing" in problem for problem in entry["problems"])
+
+
+def test_throughput_speedup_invalid_on_a_different_pool_width():
+    base = scenario_summary()
+    base["protocol"]["max_batch"] = 32
+    entry = _evaluate("throughput_speedup_min", scenario_summary(), base)
+    assert entry["status"] == "invalid", entry
+    assert any("max_batch" in problem for problem in entry["problems"])
+
+
+def test_throughput_speedup_invalid_when_either_arm_is_not_saturated():
+    """P-29: a non-saturated pair cannot show a scheduling speedup, whatever the ratio."""
+    entry = _evaluate(
+        "throughput_speedup_min",
+        scenario_summary(saturated=False),
+        scenario_summary(saturated=True),
+    )
+    assert entry["status"] == "invalid", entry
+
+
+def test_ttft_decomposed_reads_the_structural_flag():
+    passing = _evaluate("ttft_p99_decomposed", scenario_summary(decomposed=True), None)
+    failing = _evaluate("ttft_p99_decomposed", scenario_summary(decomposed=False), None)
+    assert passing["status"] == "pass", passing
+    assert failing["status"] == "fail", failing
+
+
+def test_ttft_decomposed_is_pending_without_the_block():
+    entry = _evaluate("ttft_p99_decomposed", {"protocol": dict(SCENARIO_PROTOCOL)}, None)
+    assert entry["status"] == "pending", entry

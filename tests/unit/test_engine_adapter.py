@@ -16,8 +16,24 @@ def test_factory_wires_minillm():
 
 
 def test_factory_keeps_unknown_impls_loud():
-    with pytest.raises(NotImplementedError, match="W3"):
-        build_engine({"name": "x"}, {"impl": "continuous"})
+    # `continuous` is wired now (W3); the arms that are still unwired must keep failing
+    # with the stage that owns them rather than silently degrading.
+    with pytest.raises(NotImplementedError, match="W4"):
+        build_engine({"name": "x"}, {"impl": "paged"})
+    with pytest.raises(NotImplementedError, match="W7"):
+        build_engine({"name": "x"}, {"impl": "hybrid"})
+
+
+def test_factory_wires_continuous():
+    """The scenario arm exists and reports its own impl; it refuses per-request generate."""
+    from bench.engines.continuous import ContinuousEngine
+
+    engine = build_engine({"name": "dummy"}, {"impl": "continuous", "max_batch": 4})
+    assert isinstance(engine, ContinuousEngine)
+    assert engine.impl == "continuous"
+    assert engine.max_batch == 4
+    with pytest.raises(NotImplementedError, match="run_trace"):
+        engine.generate([1, 2, 3], 4)
 
 
 def test_missing_checkpoint_fails_loudly():

@@ -101,7 +101,8 @@
   - W7 的线性注意力状态本来就逐请求，逐序列不是妥协而是架构要求；
   - W8 的 B=32 列，逐序列 launch 估算占比 20–30%，届时用 CUDA graph（整步捕获）
     而不是换 varlen kernel。
-- **复盘点**：W3 结束时用实测占比校验 < 15%；W4 结束后看 gather 是否引入新热点；
+- **复盘点**：W3 结束时用实测占比校验 < 15%（**该判据已随本决策 rejected 一并作废，见下方驳回**）；
+  W4 结束后看 gather 是否引入新热点；
   torch 升级导致 SDPA 后端支持表变化时重新确认。
 
 ### 驳回（2026-10-31）
@@ -160,7 +161,68 @@
   - `hand_baddbmm` 的 `baddbmm` 形状就是 W4 paged decode 的原型（块表 gather 插在 `k`/`v` 读取处）。
 - **复盘点**：`W2-0007` 的 V1/V2/V5；W4 结束后看分页是否让 slab 的桶粒度失去意义；
   torch 升级导致 SDPA 后端支持表变化时重新确认「无 mask 才走 flash」。
-- **清单**：[w2-rework.md](w2-rework.md)。
+
+---
+
+## D5 · W3 负载与调度口径（trace / 席位 / 饱和 / 判据）
+
+- **日期**：2026-11-01
+- **状态**：proposed（W3 开工时立，判定后改 accepted/rejected）
+- **取代/关系**：**D4 仍然有效且不被本决策修改**：D4 定注意力路径（prefill=T>1 逐序列 SDPA /
+  decode=T==1 `hand_baddbmm`+`KvSlab`），本决策只定 W3 的负载与指标口径。本决策不碰 D4 的任何一条
+  （prefill 形状、decode kernel、旋钮删除、graph 不进 W3 数字都原样保留）。
+- **背景**：W3 的配对判据要求两臂在**同一份 trace、同一个 max_batch** 上跑，而「batch」在当前的
+  runner 里只是行标签（P-20：`batch_sizes=[B]` 会把同一条 prompt 重复 B 条 case 再逐条串行
+  `generate`，不是并发度）。不先冻结口径，C1 的比值就会把「机制收益」与「trace 不同 / 并发度不同 /
+  吞吐怎么算」混在一起，得到无法归因、也无法复现的数。因此 W3 先立本决策，再动实现。
+- **判据**（引用 `configs/thresholds.toml` 的 `[W3.continuous]`，本决策**不复制数值、只引用**）：
+  - C1 吞吐：`throughput_speedup_min ≥ 1.30`（连续批 / 静态批，同 trace 同 B 的配对 run）；
+    **< 1.20 记负结果**并按 ROADMAP §8「不硬调」收口；
+  - C2 TTFT 可分解：`ttft_p99_decomposed` —— `queue_ms` / `prefill_ms` / `ttft_ms` 三者的 p99 都存在
+    且逐请求 `ttft ≈ queue + prefill`（误差 < 1 ms）；
+  - C3 到达顺序不变性：单测（两种到达顺序逐 id 相同）+ 配对 run 的 `token_sha256` 交叉核对；
+  - C5 批处理摊薄 host（Q1，非机制判据）：记录 `tok/s(B)` 曲线，`record_only`，不设阈值键。
+- **决定**（逐行搬自 [w3-plan.md](w3-plan.md) §2.1，跑之前定死）：
+
+  | 项 | 定义 |
+  |---|---|
+  | **trace** | `n` 条请求的 `(arrival_ts, prompt_id, budget)` 序列，由 `(seed, rate, n, budgets, prompt_sha256, burstiness, shuffle)` 完全确定；`trace_sha256` 记录在 manifest/summary 里，**配对比较的第一道校验** |
+  | **席位（W3 的并发单位）** | **一块 `KvSlab`，`batch = max_batch`，每行一个席位**（不是 B 块单行 slab，也不是 `list[KVcache]`）。`pos`/`valid`/`mask` 本来就逐行独立，行与行处在不同位置、走同一套 `hand_baddbmm`（D4）。**准入 = prefill 写穿到该行（`prefill_into_seat(row, prompt_ids)`：SDPA prefill 逐层把 K/V 写进 `slab.keys/values[layer][row, :, :L]`），不建 `KVcache`、不 `fill_from` 拷贝；成功后置 `pos[row]=valid[row]=L` 并解冻游标；退出 = 冻结游标（不再 advance）+ mask 屏蔽该行，席位不回收**（P-26；席位回收是 W4 块池的事）。**同一轮 `model(...)` 永远覆盖全部 `max_batch` 行**，空闲行也在，只是被 mask 挡住 |
+  | **空转行** | 空闲席位每步仍在 forward 里，token 是占位、输出被丢弃（冻结行 `valid=0`，全 mask → softmax 无可用 key 的行 bias 被清零，输出是确定值不是 NaN）。这是定长 shape 的代价，也是 D4 选择的结果；**不做**「按 active 行重排 KV」，**不做**逐行 forward |
+  | **静态批** | 同一份 trace、同一个 `max_batch`，准入策略 `static`：**一波跑完再收下一波**（波内所有请求解码到各自 budget）；波次开始前需凑满 `max_batch`，**trace 已发完则以现有请求开波**（否则末波永远等不满） |
+  | **连续批** | 同 trace、同 `max_batch`，准入策略 `continuous`：任一席位释放后**下一步立即**补入（下一轮 forward 就该行已写穿 prefill 并解冻） |
+  | **两臂共用代码** | 同一个 `Scheduler` 类、同一个 `decode_batch`；差异只有 `policy` 一个字段（构造上保证同 kernel 同数值路径，P-23） |
+  | **吞吐（双口径，两个都报）** | ① `tok_s = Σ out_tokens / makespan`，`makespan = t_last_finish − t_first_arrival`（**含收尾 drain**）；② `tok_s_active = Σ out_tokens / (t_last_finish − t_first_token_global)`（**活跃窗口**，去掉首批 prefill 之前的空转）。**C1 判据用 ①**；② 只作口径说明，避免「drain 段怎么算」的争议。同时报 `req_s`、`offered_rate`、`achieved_rate`、`queue_depth_max`（已到达、仍在排队的最大数；未到达的不算，见 step row 的 `pending`）、`queue_depth_at_last_arrival` |
+  | **TTFT 分解** | `t_admitted` = 准入决定（分到席位）；`t_prefill_start` = **该请求自己的** prefill 真正开始（打点即在此）；`prefill_ms = t_first_token − t_prefill_start`；`queue_ms = t_prefill_start − t_arrival`。**`ttft = queue_ms + prefill_ms` 按构造恒等**（C2 要的就是这个），另记 `admit_wait_ms = t_prefill_start − t_admitted` 作诊断，**不进分解**。串行 prefill 期间别的请求在队列里等的时间算**排队**——这正是连续批要压缩的尾部 |
+  | **TPOT** | `(t_finish − t_first_token)/(out_tokens − 1)`，不含 prefill，不含排队 |
+  | **budgets** | 每条请求的生成上限（`≤ max_new_tokens`），由 trace 按 seed 抽样；`budgets=[128]` 即协议默认（与 W2 同口径）；**一个 run 内只用一种分布**，记录进 manifest。缺省或空列表在 `validate_config` 里**先归一化成 `[max_new_tokens]` 再校验非空** |
+  | **计时** | 墙钟用 `perf_counter`（含排队，本来就是墙钟）；单步 GPU 时间用 `torch.cuda.Event`；step row = `active / queued / admitted / retired / step_ms / prefill_ms / decode_event_ms / host_gap_ms`（`host_gap_ms = step_ms − decode_event_ms − prefill_ms`，即 **decode event 窗口之外的 host 开销**，不是 `cat`。CUDA event 覆盖整个 decode 时间线，host 饥饿造成的 GPU 空转落在 `decode_event_ms` **里面**，所以它**不是**「slab 读写之外的 host 开销」） |
+  | **饱和判据（每臂各自判，不用共享常量）** | `queue_depth_at_last_arrival` = 最后一条请求到达时刻仍在排队（已到达、未开始 prefill）的请求数（即 `max(0, backlog − in_flight)`，再扣掉当时仍空着的席位；见 `bench/engines/continuous.py`）；`saturated ⇔ queue_depth_at_last_arrival > 0`：trace 已经发完、仍有请求在等容量 = 过载。**不能取 run 结束时最后一条 step row 的 `queued`**——run 结束必然排空，那样 `saturated` 按构造恒为 False，C1 每对都 `invalid`。**不看** `capacity_estimate_req_s` 是否达标——两臂 capacity 本来就不同，用同一个 capacity 会把弱臂按构造判成 `not_saturated`，C1 直接变 `invalid`。`capacity_estimate_req_s` 只在冒烟里量一次、只用于挑 λ 的初值，**不进判据**；若连续臂在 2× 估计值下队列仍会排空 → 该对记 `not_saturated`，λ 加倍**新开 run**（不挑点） |
+  | **λ 与 B 的关系** | λ 只在**同一 B** 的一对（static/continuous）内必须相同（`trace_sha256` 可比的前提）。B=8 对与 B=32 对**各自**用该 B 的冒烟 capacity 定 λ（`λ = 2 × capacity(B)` 取整），并写进 manifest；跨 B 不比较绝对吞吐，只比较**同一 B 内的比值** |
+
+- **后果**：
+  1. **两臂必须同 trace**：`trace_sha256` 是第一道配对校验，不同就直接 `invalid`、不给比值；
+     `max_batch` 同为机制键，`policy` 只记录不判等。
+  2. **空闲席位在每步 forward 里**：定长 shape 是 D4 decode 路径的直接代价，`B` 越大空转越贵
+     （`budgets` 混合时中段席位会稀疏），这部分成本计入 `step_ms`，不做任何「按 active 行压缩」的补救。
+  3. **`memory_match_ratio` 的口径要跟着改**：池化之后分子是**所有席位预留之和**
+     （`2·n_layer·max_batch·n_kv_head·max_len·head_dim·itemsize`），仍是「本请求份额」就会重演
+     W2-0004 的账外席位（P-30）。
+  4. **席位回收不在 W3**：冻结即退出，回收与按需分配留给 W4 块池；W3 的内存图因此是「池的定长预留」，
+     不承诺与负载相关。
+  5. **p99 只作标注**：640 个 request row（`requests=128 × repeats=5`）下报 p95 与 CV，合法 p99
+     由可选的单臂 `requests ≥ 1024` run 产出，且不进比值判据表。
+  6. C1 的比值只在**过载 + 混合长度**的一对上判；均匀长度的那一对期望 ≈1.00×，按设计进负结果专章，
+     不进 `acceptance`（否则一份 `fail` 会污染判据表）。
+  7. **C4 已随 D3 rejected 删除**：W3 不再由 profiler 集成测试断言注意力占比。注意力占比的实测留在
+     `model/attention/hand_baddbmm.py` 的模块文档里（B=8/L=512 ≈0.7 ms/step），属于 D4 的证据，
+     不是 W3 判据；`[W3.continuous].attn_share_max` 随之删除。
+  8. **输出长度口径**：Qwen3-0.6B 是 base 权重、无 chat template、不吐 EOS，所以 `out_tokens` 恒等于
+     `budget`（`W2-0007` 实测 160/160 条 measured row 都是 `out_tokens=128`）。因此 C1 只证明
+     「合成异质长度负载下调度开销足够小」，**不是真实负载吞吐声明**；P4 预注册的 1.8–2.2× 由 `budgets`
+     分布直接决定，是**构造性推论而非独立预测**。
+- **复盘点**：W3 结束时用 E1/E2 的实测回填本节（判据结果、`tok/s(B)` 曲线与 p99 的实际样本量）；
+  若 C1 判负，按 ROADMAP §8「< 1.2× 不硬调」收口，不改判据、不挑点。
 
 ---
 
