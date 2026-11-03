@@ -1,0 +1,691 @@
+{
+  "schema_version": 1,
+  "run_id": "W3-0003",
+  "stage": "W3",
+  "type": "microbench",
+  "slug": "batch-b1-ctx512",
+  "title": "E1 批处理摊薄 host：ctx512 / B=1 参照",
+  "hypothesis": [
+    "host_side_cost_is_amortized_by_batching"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-11-03T06:38:00+00:00",
+  "finished_at": "2026-11-03T06:38:13+00:00",
+  "duration_s": 12.709,
+  "operator": "root",
+  "git": {
+    "commit": "ecc9b14542ef79cc8de727015bb227b2d270425a",
+    "branch": "main",
+    "dirty": false,
+    "describe": "ecc9b14"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W3/0003-batch-b1-ctx512.toml",
+  "config_sha256": "0e26852de5a86ce92499593abfa5556aa4c7bc0950518d1427008688d30450ec",
+  "prompt": null,
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "continuous",
+    "device": "cuda",
+    "max_batch": 1,
+    "resolved_device": "cuda",
+    "vocab_size": 151936,
+    "dtype": "bfloat16",
+    "attn": {
+      "prefill": "sdpa",
+      "decode": "hand_baddbmm"
+    }
+  },
+  "workload": {
+    "kind": "synthetic",
+    "context_lengths": [
+      512
+    ],
+    "max_new_tokens": 128,
+    "batch_sizes": [
+      1
+    ],
+    "arrival": "closed",
+    "requests": 1,
+    "budgets": [
+      128
+    ]
+  },
+  "measure": {
+    "warmup": 3,
+    "repeats": 5,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "record_only",
+    "criteria": []
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W3/0003-batch-b1-ctx512.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "scheduler": {
+    "policy": "continuous",
+    "max_batch": 1,
+    "seats": "one_kvslab_one_row_each",
+    "prefill": "per_sequence",
+    "free_rows": "masked_in_forward"
+  },
+  "trace": {
+    "arrival": "closed",
+    "rate": null,
+    "burstiness": 1.0,
+    "requests": 1,
+    "budgets": [
+      128
+    ],
+    "seed": 0,
+    "sha256": "82faaf3106b485da92752c71cbf3cdf54291092996d0be1c9721a1c433b75d3b",
+    "shuffle": false
+  },
+  "_scenario_summaries": [
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 47.87015277668468,
+          "p95": 47.87015277668468,
+          "min": 47.87015277668468,
+          "max": 47.87015277668468,
+          "mean": 47.87015277668468,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 70.64382817921688,
+          "p95": 70.64382817921688,
+          "min": 70.64382817921688,
+          "max": 70.64382817921688,
+          "mean": 70.64382817921688,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 71.03542978231607,
+          "p95": 71.03542978231607,
+          "min": 71.03542978231607,
+          "max": 71.03542978231607,
+          "mean": 71.03542978231607,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 15.956717592228227,
+          "p95": 15.956717592228227,
+          "min": 15.956717592228227,
+          "max": 15.956717592228227,
+          "mean": 15.956717592228227,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 0.06267,
+          "p95": 0.06267,
+          "min": 0.06267,
+          "max": 0.06267,
+          "mean": 0.06267,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 15.956717592228227,
+          "p95": 15.956717592228227,
+          "min": 15.956717592228227,
+          "max": 15.956717592228227,
+          "mean": 15.956717592228227,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 20.20297572016716,
+          "p95": 20.20297572016716,
+          "p99": 20.20297572016716
+        },
+        "queue_ms": {
+          "p50": 0.017447397112846375,
+          "p95": 0.017447397112846375,
+          "p99": 0.017447397112846375
+        },
+        "prefill_ms": {
+          "p50": 20.185528323054314,
+          "p95": 20.185528323054314,
+          "p99": 20.185528323054314
+        },
+        "queue_share_p99": 0.0008636053101538853,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 21.29635401070118,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.119327545166016,
+            "host_gap_ms": 0.17702646553516388
+          },
+          {
+            "active": 1,
+            "n": 1,
+            "step_ms": 41.4237380027771,
+            "prefill_ms": 20.185528323054314,
+            "decode_event_ms": 21.11311912536621,
+            "host_gap_ms": 0.125090554356575
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 47.938381243258064,
+          "p95": 47.938381243258064,
+          "min": 47.938381243258064,
+          "max": 47.938381243258064,
+          "mean": 47.938381243258064,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 70.81003676192738,
+          "p95": 70.81003676192738,
+          "min": 70.81003676192738,
+          "max": 70.81003676192738,
+          "mean": 70.81003676192738,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 71.20072686248211,
+          "p95": 71.20072686248211,
+          "min": 71.20072686248211,
+          "max": 71.20072686248211,
+          "mean": 71.20072686248211,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 15.979460414419355,
+          "p95": 15.979460414419355,
+          "min": 15.979460414419355,
+          "max": 15.979460414419355,
+          "mean": 15.979460414419355,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 0.06258,
+          "p95": 0.06258,
+          "min": 0.06258,
+          "max": 0.06258,
+          "mean": 0.06258,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 15.979460414419355,
+          "p95": 15.979460414419355,
+          "min": 15.979460414419355,
+          "max": 15.979460414419355,
+          "mean": 15.979460414419355,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 20.21346054971218,
+          "p95": 20.21346054971218,
+          "p99": 20.21346054971218
+        },
+        "queue_ms": {
+          "p50": 0.01911260187625885,
+          "p95": 0.01911260187625885,
+          "p99": 0.01911260187625885
+        },
+        "prefill_ms": {
+          "p50": 20.194347947835922,
+          "p95": 20.194347947835922,
+          "p99": 20.194347947835922
+        },
+        "queue_share_p99": 0.000945538337151824,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 21.265286952257156,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.10793685913086,
+            "host_gap_ms": 0.157350093126297
+          },
+          {
+            "active": 1,
+            "n": 1,
+            "step_ms": 41.347140446305275,
+            "prefill_ms": 20.194347947835922,
+            "decode_event_ms": 21.026464462280273,
+            "host_gap_ms": 0.12632803618907928
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 47.8987635251748,
+          "p95": 47.8987635251748,
+          "min": 47.8987635251748,
+          "max": 47.8987635251748,
+          "mean": 47.8987635251748,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 70.75210820374443,
+          "p95": 70.75210820374443,
+          "min": 70.75210820374443,
+          "max": 70.75210820374443,
+          "mean": 70.75210820374443,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 71.18618707437626,
+          "p95": 71.18618707437626,
+          "min": 71.18618707437626,
+          "max": 71.18618707437626,
+          "mean": 71.18618707437626,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 15.9662545083916,
+          "p95": 15.9662545083916,
+          "min": 15.9662545083916,
+          "max": 15.9662545083916,
+          "mean": 15.9662545083916,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 0.062632,
+          "p95": 0.062632,
+          "min": 0.062632,
+          "max": 0.062632,
+          "mean": 0.062632,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 15.9662545083916,
+          "p95": 15.9662545083916,
+          "min": 15.9662545083916,
+          "max": 15.9662545083916,
+          "mean": 15.9662545083916,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 20.230533555150032,
+          "p95": 20.230533555150032,
+          "p99": 20.230533555150032
+        },
+        "queue_ms": {
+          "p50": 0.01848675310611725,
+          "p95": 0.01848675310611725,
+          "p99": 0.01848675310611725
+        },
+        "prefill_ms": {
+          "p50": 20.212046802043915,
+          "p95": 20.212046802043915,
+          "p99": 20.212046802043915
+        },
+        "queue_share_p99": 0.0009138045250126943,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 21.25908061861992,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.081024169921875,
+            "host_gap_ms": 0.17805644869804382
+          },
+          {
+            "active": 1,
+            "n": 1,
+            "step_ms": 41.409462690353394,
+            "prefill_ms": 20.212046802043915,
+            "decode_event_ms": 21.061983108520508,
+            "host_gap_ms": 0.13543277978897095
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 47.835780286705905,
+          "p95": 47.835780286705905,
+          "min": 47.835780286705905,
+          "max": 47.835780286705905,
+          "mean": 47.835780286705905,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 70.62530685655103,
+          "p95": 70.62530685655103,
+          "min": 70.62530685655103,
+          "max": 70.62530685655103,
+          "mean": 70.62530685655103,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 71.02789135721741,
+          "p95": 71.02789135721741,
+          "min": 71.02789135721741,
+          "max": 71.02789135721741,
+          "mean": 71.02789135721741,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 15.945260095568635,
+          "p95": 15.945260095568635,
+          "min": 15.945260095568635,
+          "max": 15.945260095568635,
+          "mean": 15.945260095568635,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 0.062715,
+          "p95": 0.062715,
+          "min": 0.062715,
+          "max": 0.062715,
+          "mean": 0.062715,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 15.945260095568635,
+          "p95": 15.945260095568635,
+          "min": 15.945260095568635,
+          "max": 15.945260095568635,
+          "mean": 15.945260095568635,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 20.236870273947716,
+          "p95": 20.236870273947716,
+          "p99": 20.236870273947716
+        },
+        "queue_ms": {
+          "p50": 0.01780688762664795,
+          "p95": 0.01780688762664795,
+          "p99": 0.01780688762664795
+        },
+        "prefill_ms": {
+          "p50": 20.219063386321068,
+          "p95": 20.219063386321068,
+          "p99": 20.219063386321068
+        },
+        "queue_share_p99": 0.0008799230012148644,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 21.285664290189743,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.118656158447266,
+            "host_gap_ms": 0.16700813174247742
+          },
+          {
+            "active": 1,
+            "n": 1,
+            "step_ms": 41.46045446395874,
+            "prefill_ms": 20.219063386321068,
+            "decode_event_ms": 21.11827278137207,
+            "host_gap_ms": 0.12311829626560211
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 47.67157980578469,
+          "p95": 47.67157980578469,
+          "min": 47.67157980578469,
+          "max": 47.67157980578469,
+          "mean": 47.67157980578469,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 70.61508541306254,
+          "p95": 70.61508541306254,
+          "min": 70.61508541306254,
+          "max": 70.61508541306254,
+          "mean": 70.61508541306254,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 71.01949832148308,
+          "p95": 71.01949832148308,
+          "min": 71.01949832148308,
+          "max": 71.01949832148308,
+          "mean": 71.01949832148308,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 15.89052660192823,
+          "p95": 15.89052660192823,
+          "min": 15.89052660192823,
+          "max": 15.89052660192823,
+          "mean": 15.89052660192823,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 0.062931,
+          "p95": 0.062931,
+          "min": 0.062931,
+          "max": 0.062931,
+          "mean": 0.062931,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 15.89052660192823,
+          "p95": 15.89052660192823,
+          "min": 15.89052660192823,
+          "max": 15.89052660192823,
+          "mean": 15.89052660192823,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 20.446736365556717,
+          "p95": 20.446736365556717,
+          "p99": 20.446736365556717
+        },
+        "queue_ms": {
+          "p50": 0.018404796719551086,
+          "p95": 0.018404796719551086,
+          "p99": 0.018404796719551086
+        },
+        "prefill_ms": {
+          "p50": 20.428331568837166,
+          "p95": 20.428331568837166,
+          "p99": 20.428331568837166
+        },
+        "queue_share_p99": 0.0009001337128087907,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 21.33866585791111,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.17206382751465,
+            "host_gap_ms": 0.1666020303964615
+          },
+          {
+            "active": 1,
+            "n": 1,
+            "step_ms": 41.62298142910004,
+            "prefill_ms": 20.428331568837166,
+            "decode_event_ms": 21.069856643676758,
+            "host_gap_ms": 0.12479321658611298
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      }
+    }
+  ],
+  "n_rows": 20,
+  "n_errors": 0,
+  "summary": "summary.json"
+}
