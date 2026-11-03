@@ -17,6 +17,7 @@ W3-0007,W3,microbench,E1 长上下文 batch 收益：ctx2048 / B=8,Qwen/Qwen3-0.
 W3-0008,W3,scenario,E2 调度收益：static / B=8 / uniform,Qwen/Qwen3-0.6B,continuous,tok_s 341,unreviewed,completed,2026-11-03,15e9c2c,results/W3/0008-static-b8-uniform
 W3-0009,W3,scenario,E2 调度收益：continuous / B=8 / uniform,Qwen/Qwen3-0.6B,continuous,tok_s 349,unreviewed,completed,2026-11-03,ed9378b,results/W3/0009-continuous-b8-uniform
 W3-0010,W3,scenario,E2 调度收益：static / B=8 / mixed,Qwen/Qwen3-0.6B,continuous,tok_s 155,unreviewed,completed,2026-11-03,19971ad,results/W3/0010-static-b8-mixed
+W3-0011,W3,scenario,E2 调度收益：continuous / B=8 / mixed,Qwen/Qwen3-0.6B,continuous,tok_s 311,unreviewed,completed,2026-11-03,632f395,results/W3/0011-continuous-b8-mixed
 W3-0017,W3,microbench,E1 批处理摊薄 host：ctx511 / B=1 参照（ctx512 EOS 后的替代）,Qwen/Qwen3-0.6B,continuous,tok_s 47.8,unreviewed,completed,2026-11-03,295a8df,results/W3/0017-batch-b1-ctx511
 W3-0018,W3,microbench,E1 批处理摊薄 host：ctx511 / B=8（P1，ctx512 EOS 后的替代）,Qwen/Qwen3-0.6B,continuous,tok_s 361,unreviewed,completed,2026-11-03,d9e505a,results/W3/0018-batch-b8-ctx511
 W3-0019,W3,microbench,E1 批处理摊薄 host：ctx511 / B=32（P2，ctx512 EOS 后的替代）,Qwen/Qwen3-0.6B,continuous,tok_s 1.18e+03,unreviewed,completed,2026-11-03,7a70e19,results/W3/0019-batch-b32-ctx511

@@ -23,6 +23,7 @@
 | W3-0008 | W3 | scenario | E2 调度收益：static / B=8 / uniform | Qwen/Qwen3-0.6B | continuous | tok_s 341 | unreviewed | completed | 2026-11-03 | 15e9c2c |
 | W3-0009 | W3 | scenario | E2 调度收益：continuous / B=8 / uniform | Qwen/Qwen3-0.6B | continuous | tok_s 349 | unreviewed | completed | 2026-11-03 | ed9378b |
 | W3-0010 | W3 | scenario | E2 调度收益：static / B=8 / mixed | Qwen/Qwen3-0.6B | continuous | tok_s 155 | unreviewed | completed | 2026-11-03 | 19971ad |
+| W3-0011 | W3 | scenario | E2 调度收益：continuous / B=8 / mixed | Qwen/Qwen3-0.6B | continuous | tok_s 311 | unreviewed | completed | 2026-11-03 | 632f395 |
 | W3-0017 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=1 参照（ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 47.8 | unreviewed | completed | 2026-11-03 | 295a8df |
 | W3-0018 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=8（P1，ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 361 | unreviewed | completed | 2026-11-03 | d9e505a |
 | W3-0019 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=32（P2，ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 1.18e+03 | unreviewed | completed | 2026-11-03 | 7a70e19 |

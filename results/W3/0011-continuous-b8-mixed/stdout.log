@@ -1,0 +1,5 @@
+run_id: W3-0011
+status: completed
+device_class: measure-cuda
+rows: 5150 (errors: 0)
+summary: results/W3/0011-continuous-b8-mixed/summary.json
