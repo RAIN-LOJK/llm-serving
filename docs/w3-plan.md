@@ -320,11 +320,16 @@ step k:
 
 | run | ctx | B | 用途 |
 |---|---|---|---|
-| W3-0003 | 512 | 1 | 单请求参照（E1 自身基线） |
-| W3-0004 | 512 | 8 | P1 |
-| W3-0005 | 512 | 32 | P2 |
-| W3-0006 | 2048 | 1 | 长上下文参照（**与 W3-0003 比的是 slab 读取量随 ctx 的增长**） |
+| W3-0017 | 511 | 1 | 单请求参照（E1 自身基线；ctx512 因 EOS 上移 1 token，见下） |
+| W3-0018 | 511 | 8 | P1 |
+| W3-0019 | 511 | 32 | P2 |
+| W3-0006 | 2048 | 1 | 长上下文参照（**与 W3-0017 比的是 slab 读取量随 ctx 的增长**） |
 | W3-0007 | 2048 | 8 | 长上下文 batch 收益 |
+
+> **ctx512 → 511 的替代（2026-11-03）**：ctx512 的 synthetic prompt 让 Qwen3-0.6B 在第 3 个 token 吐 EOS，
+> `W3-0003/0004/0005` 实际只解码 3 token，已判 invalid；`W3-0017/0018/0019` 用最近的 ctx511 重跑
+> （512 的 -1 token，0.2%，远小于 trace 间 CV）。**E1 每个 run 必须先查 `out_tokens` 中位数 == `budget`**，
+> 不等就不进图/结论（PITFALLS P-31）。
 
 口径：E1 同时报三个数——
 - `tok_s`：含 prefill 的墙钟口径（`Σout / makespan`）；
@@ -348,10 +353,10 @@ B=8/ctx2048 时 prefill 约占 7%，不扣掉会把曲线压低；但**要同时
 
 ### E2 · 调度在什么条件下回本（Q2，6 runs，scenario，配对）
 
-> **输出长度口径**：Qwen3-0.6B 是 base 权重、无 chat template、不吐 EOS，`out_tokens` 恒等于 `budget`
-> （`W2-0007` 实测 160/160 条 measured row 都是 `out_tokens=128`）。所以 E2 的比值只证明「合成异质长度
-> 负载下调度开销足够小」，**不是真实负载吞吐声明**；P4 的 1.8–2.2× 由 `budgets` 分布直接决定，
-> 属构造性推论（与 D5 一致）。
+> **输出长度口径**：Qwen3-0.6B 在固定 32 条自然 prompt 上不吐 EOS，`out_tokens` 恒等于 `budget`
+> （`W2-0007` 实测 160/160 条 measured row 都是 `out_tokens=128`）；**合成 prompt 不保证**（P-31）。
+> 所以 E2 的比值只证明「合成异质长度负载下调度开销足够小」，**不是真实负载吞吐声明**；P4 的 1.8–2.2× 由
+> `budgets` 分布直接决定，属构造性推论（与 D5 一致）。
 
 工作负载：`kind="prompts"`（32 条固定集）、`arrival="poisson"`、`requests=128`、`max_new_tokens=128`、
 **每种长度分布一对，每对独立定 λ**：`rate = 2 × capacity(B)`（capacity 由该 B 的冒烟测得，取整）。
@@ -639,8 +644,8 @@ python -m bench.run --config configs/experiments/W3/9001-scheduler-smoke.toml \
 # 正式 run（干净树；模型 revision 已 pin）
 python -m bench.run --config configs/experiments/W3/0001-single-request-recheck.toml   # E0a
 python -m bench.run --config configs/experiments/W3/0002-slab-pool-recheck.toml        # E0b
-python -m bench.run --config configs/experiments/W3/0003-batch-b1-ctx512.toml          # E1
-# … 0004 … 0007（E1 矩阵）、0008 … 0013（E2 矩阵）
+python -m bench.run --config configs/experiments/W3/0017-batch-b1-ctx511.toml         # E1
+# … 0018 … 0019（ctx511）、0006 … 0007（ctx2048）、0008 … 0013（E2 矩阵）
 python scripts/exp_index.py
 
 # 出图
@@ -657,12 +662,12 @@ python scripts/plot_w3_amortization.py
   `test_loadgen_trace.py`、`test_scenario_summary.py`，加扩展的 `test_thresholds.py` /
   `test_run_contract.py`；不含已删除的 profiler 集成测试，也不新增 `test_scheduler_equivalence.py`
   ——C3 由既有测试传递推出，见 §5.3），快速门禁全绿
-- run：`W3-0001`（E0a）+ `W3-0002`（E0b）+ E1 ×5（`W3-0003…0007`）+ E2 ×6（`W3-0008…0013`，+2 可选）
+- run：`W3-0001`（E0a）+ `W3-0002`（E0b）+ E1 ×5（`W3-0017…0019` 的 ctx511 + `W3-0006/0007` 的 ctx2048；`W3-0003…0005` 因 EOS 判 invalid）+ E2 ×6（`W3-0008…0013`，+2 可选）
 - `docs/fig_w3_amortization.png`（E1）、`results/W3/*/notes.md` 草稿 + `verdict.json`（unreviewed）
 - `docs/decisions.md` **D5**（W3 负载与口径预注册 + 实测结论）；**D4 保持原样**
 - `configs/thresholds.toml` `[W3.continuous]` → `calibrated` + `basis_run`
 - `ROADMAP.md` §12 回填 W3 证据 run、§13 一条修订；`AGENTS.md` / `serve/README.md` 的模块状态更新
-- `PITFALLS.md` P-20…P-23、P-28…P-30 登记并挂回归测试
+- `PITFALLS.md` P-20…P-23、P-28…P-31 登记并挂回归测试
 
 ---
 

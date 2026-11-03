@@ -2,8 +2,10 @@
 """Plot W3 E1: batching amortizes the per-step host cost across context lengths.
 
 Reads **only** each E1 run's ``summary.json`` (never ``metrics.jsonl``) from
-``results/W3/0003-...`` through ``results/W3/0007-...`` and writes
-``docs/fig_w3_amortization.png``.
+``results/W3/0017-...`` through ``results/W3/0019-...`` plus ``W3-0006`` /
+``W3-0007`` and writes ``docs/fig_w3_amortization.png``. The original ctx512
+cells (``0003-0005``) emitted EOS after 3 tokens and are superseded by
+``0017-0019`` at ctx511 (see PITFALLS P-31); 511 is 1 token below 512.
 
 What is drawn (three panels, shared discrete x axis = batch size B):
 
@@ -77,8 +79,8 @@ INK_2 = "#52514e"        # secondary text / direct labels
 MUTED = "#898781"        # tick labels
 GRID = "#e1e0d9"         # hairline grid
 AXIS = "#c3c2b7"         # baseline / spine
-CTX_COLORS = {512: "#2a78d6", 2048: "#eb6834"}
-CTX_ORDER = (512, 2048)  # fixed assignment: 512 -> slot 1, 2048 -> slot 2
+CTX_COLORS = {511: "#2a78d6", 2048: "#eb6834"}
+CTX_ORDER = (511, 2048)  # fixed assignment: 511 -> slot 1, 2048 -> slot 2
 B_VALUES = (1, 8, 32)    # discrete x positions, not a log axis
 B_X = {batch: index for index, batch in enumerate(B_VALUES)}
 LINE_WIDTH = 2.0
@@ -108,10 +110,13 @@ XLIM = (-0.35, 2.02)     # the plot area stops just right of the B=32 tick
 
 # E1 matrix (docs/w3-plan.md §3). B is re-read from protocol.max_batch when
 # present; these values are the fallback and define what "complete" means.
+# W3-0003..0005 are the invalid ctx512 cells (EOS after 3 tokens); they stay in
+# results/ as evidence but are not plotted. W3-0017..0019 rerun the same B
+# matrix at 511, the nearest context whose synthetic prompt reaches 128 tokens.
 E1_RUNS: dict[str, tuple[int, int]] = {
-    "W3-0003": (512, 1),
-    "W3-0004": (512, 8),
-    "W3-0005": (512, 32),
+    "W3-0017": (511, 1),
+    "W3-0018": (511, 8),
+    "W3-0019": (511, 32),
     "W3-0006": (2048, 1),
     "W3-0007": (2048, 8),
 }

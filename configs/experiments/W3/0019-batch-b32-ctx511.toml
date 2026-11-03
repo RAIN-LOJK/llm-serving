@@ -1,0 +1,56 @@
+# W3-0019 · E1 批处理摊薄 host：ctx511 / B=32（P2，ctx512 的替代）
+# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# 运行：python -m bench.run --config configs/experiments/W3/0019-batch-b32-ctx511.toml
+#
+# 为什么不是 ctx512：ctx512 的 synthetic prompt 让 Qwen3-0.6B 在第 3 个 token
+# 就吐 EOS，W3-0003/0004/0005 实际只解码 3 token（见 PITFALLS P-31）。
+# 一次性探针确认 ctx511 的同一条 synthetic prompt 生成 128 token；511 是 512
+# 的 -1 token 替代（0.2%），远小于 E1 的 trace 间 CV，不影响 P1/P2 判读。
+# 旧 run 保留为 invalid 证据，本 run supersedes W3-0005。
+
+# P2：B=8→32 每 token 再降，但 step 时间开始被 slab 读取抬高。
+
+schema = 1
+
+[exp]
+id = "W3-0019"
+stage = "W3"
+type = "microbench"
+slug = "batch-b32-ctx511"
+title = "E1 批处理摊薄 host：ctx511 / B=32（P2，ctx512 EOS 后的替代）"
+hypothesis = ["host_side_cost_is_amortized_by_batching"]
+seed = 0
+supersedes = "W3-0005"
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [511]
+max_new_tokens = 128
+batch_sizes = [1]          # 并发度是 [engine].max_batch（P-20）
+arrival = "closed"
+requests = 32
+budgets = [128]
+
+[scheduler]
+policy = "continuous"      # n == B 时两 policy 等价：这一组只测批，不测调度
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 32
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

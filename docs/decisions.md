@@ -217,10 +217,19 @@
   7. **C4 已随 D3 rejected 删除**：W3 不再由 profiler 集成测试断言注意力占比。注意力占比的实测留在
      `model/attention/hand_baddbmm.py` 的模块文档里（B=8/L=512 ≈0.7 ms/step），属于 D4 的证据，
      不是 W3 判据；`[W3.continuous].attn_share_max` 随之删除。
-  8. **输出长度口径**：Qwen3-0.6B 是 base 权重、无 chat template、不吐 EOS，所以 `out_tokens` 恒等于
-     `budget`（`W2-0007` 实测 160/160 条 measured row 都是 `out_tokens=128`）。因此 C1 只证明
-     「合成异质长度负载下调度开销足够小」，**不是真实负载吞吐声明**；P4 预注册的 1.8–2.2× 由 `budgets`
-     分布直接决定，是**构造性推论而非独立预测**。
+  8. **输出长度口径**：Qwen3-0.6B 在固定 32 条自然 prompt 上不吐 EOS，所以 `out_tokens` 恒等于
+     `budget`（`W2-0007` 实测 160/160 条 measured row 都是 `out_tokens=128`）；**合成 prompt 不保证**
+     （见第 9 条）。因此 C1 只证明「合成异质长度负载下调度开销足够小」，**不是真实负载吞吐声明**；
+     P4 预注册的 1.8–2.2× 由 `budgets` 分布直接决定，是**构造性推论而非独立预测**。
+  9. **E1 的 synthetic prompt 可能 EOS（2026-11-03）**：`synthetic_ids` 的随机前缀对 base 模型是 OOD；
+     ctx512 的 E1 三格（`W3-0003/0004/0005`）实际只解码 3 token，已判 invalid。E1 的短上下文改用
+     最近的 ctx511（`W3-0017/0018/0019`）；1 token ≈0.2%，远小于 trace 间 CV。**E1 每个 run 必须先查
+     `out_tokens` 中位数 == `budget`**，不等就不进图/结论（PITFALLS P-31）；根治的 `ignore_eos`
+     workload 控制留到 W7 再评估。
+  10. **R1 的 `step_ms` 含 admission/prefill 步**：`active==B` 的第一行是 prefill 步；ctx512 的 3-token
+     数据使该行 prefill 占 88%，字面 4.46× 是假阳性。判读 R1 用稳态 decode 步（排除 prefill 行）或
+     `decode_event_ms`；ctx2048 的 24.19/22.02 = 1.10× 是有效对照。`decode_only_tok_s` 同理不能把
+     `active=0` 空转步算进分母（128 token 时 ≈0.8%，3 token 时 ≈50%）。
 - **复盘点**：W3 结束时用 E1/E2 的实测回填本节（判据结果、`tok/s(B)` 曲线与 p99 的实际样本量）；
   若 C1 判负，按 ROADMAP §8「< 1.2× 不硬调」收口，不改判据、不挑点。
 
