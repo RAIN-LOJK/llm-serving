@@ -1,0 +1,5 @@
+run_id: W3-0010
+status: completed
+device_class: measure-cuda
+rows: 10165 (errors: 0)
+summary: results/W3/0010-static-b8-mixed/summary.json
