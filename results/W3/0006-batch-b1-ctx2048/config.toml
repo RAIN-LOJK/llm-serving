@@ -1,0 +1,49 @@
+# W3-0006 · E1 长上下文参照：ctx2048 / B=1
+# W3 矩阵见 docs/w3-plan.md §3；口径见 docs/decisions.md D5。
+# 运行：python -m bench.run --config configs/experiments/W3/0006-batch-b1-ctx2048.toml
+
+# 与 W3-0003 比的是 slab 读取量随 ctx 的增长（这里没有 cat）。
+
+schema = 1
+
+[exp]
+id = "W3-0006"
+stage = "W3"
+type = "microbench"
+slug = "batch-b1-ctx2048"
+title = "E1 长上下文参照：ctx2048 / B=1"
+hypothesis = ["host_side_cost_is_amortized_by_batching"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [2048]
+max_new_tokens = 128
+batch_sizes = [1]          # 并发度是 [engine].max_batch（P-20）
+arrival = "closed"
+requests = 1
+budgets = [128]
+
+[scheduler]
+policy = "continuous"      # n == B 时两 policy 等价：这一组只测批，不测调度
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 1
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

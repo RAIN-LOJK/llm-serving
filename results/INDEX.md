@@ -18,5 +18,6 @@
 | W3-0003 | W3 | microbench | E1 批处理摊薄 host：ctx512 / B=1 参照 | Qwen/Qwen3-0.6B | continuous | tok_s 47.9 | unreviewed | completed | 2026-11-03 | ecc9b14 |
 | W3-0004 | W3 | microbench | E1 批处理摊薄 host：ctx512 / B=8（P1） | Qwen/Qwen3-0.6B | continuous | tok_s 116 | unreviewed | completed | 2026-11-03 | e7553e9 |
 | W3-0005 | W3 | microbench | E1 批处理摊薄 host：ctx512 / B=32（P2） | Qwen/Qwen3-0.6B | continuous | tok_s 137 | unreviewed | completed | 2026-11-03 | a69c475 |
+| W3-0006 | W3 | microbench | E1 长上下文参照：ctx2048 / B=1 | Qwen/Qwen3-0.6B | continuous | tok_s 45.3 | unreviewed | completed | 2026-11-03 | 36ced60 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
