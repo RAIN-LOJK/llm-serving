@@ -1,0 +1,5 @@
+run_id: W3-0008
+status: completed
+device_class: measure-cuda
+rows: 10805 (errors: 0)
+summary: results/W3/0008-static-b8-uniform/summary.json
