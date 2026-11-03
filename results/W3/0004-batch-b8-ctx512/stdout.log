@@ -1,0 +1,5 @@
+run_id: W3-0004
+status: completed
+device_class: measure-cuda
+rows: 55 (errors: 0)
+summary: results/W3/0004-batch-b8-ctx512/summary.json
