@@ -1,8 +1,8 @@
 {
   "run_id": "W3-0010",
-  "verdict": "unreviewed",
-  "reviewer": null,
-  "reviewed_at": null,
-  "decision_id": null,
-  "notes": ""
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-03",
+  "decision_id": "D5",
+  "notes": "E2 mixed B=8 static 基线：tok_s 154.94、req_s 2.889、qd_last 86、saturated=true；C1 的分母臂。"
 }
