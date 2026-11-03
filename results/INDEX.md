@@ -21,5 +21,6 @@
 | W3-0006 | W3 | microbench | E1 长上下文参照：ctx2048 / B=1 | Qwen/Qwen3-0.6B | continuous | tok_s 45.3 | unreviewed | completed | 2026-11-03 | 36ced60 |
 | W3-0007 | W3 | microbench | E1 长上下文 batch 收益：ctx2048 / B=8 | Qwen/Qwen3-0.6B | continuous | tok_s 338 | unreviewed | completed | 2026-11-03 | 95c95a9 |
 | W3-0017 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=1 参照（ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 47.8 | unreviewed | completed | 2026-11-03 | 295a8df |
+| W3-0018 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=8（P1，ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 361 | unreviewed | completed | 2026-11-03 | d9e505a |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
