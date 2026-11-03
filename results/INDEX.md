@@ -14,5 +14,6 @@
 | W2-0006 | W2 | microbench | 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（本机配对） | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.2 | pass | completed | 2026-11-01 | 50e3623 |
 | W2-0007 | W2 | microbench | 固定注意力路径：prefill=sdpa / decode=hand_baddbmm+slab（逐层分配、随请求释放） | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.8 | pass | completed | 2026-11-01 | 50e0dcd |
 | W3-0001 | W3 | microbench | E0a 重构无害性：席位 API 落地后单请求路径不动数字 | Qwen/Qwen3-0.6B | minillm | ttft_ms 21.2 | unreviewed | completed | 2026-11-03 | 552c72e |
+| W3-0002 | W3 | microbench | E0b slab 池化后单请求复核：kv_mb 记池的总预留 | Qwen/Qwen3-0.6B | continuous | tok_s 47.1 | unreviewed | completed | 2026-11-03 | 9ca5ffe |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
