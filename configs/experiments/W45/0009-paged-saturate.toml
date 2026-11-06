@@ -60,5 +60,7 @@ timer = "auto"
 memory = ["torch_peak", "driver"]
 
 [accept]
-mode = "threshold"
-criteria = ["paged_vs_seat_token_match_min"]
+# E4 的跨调度器 token 一致率只作诊断：两臂 packed group 组成不同，bf16 near-tie
+# 会翻转 greedy id；D7 把精确一致性门禁限定在 E0 golden 与 E2 同组对照。
+mode = "record_only"
+criteria = []
