@@ -1,0 +1,5 @@
+run_id: W45-0012
+status: completed
+device_class: measure-cuda
+rows: 685 (errors: 0)
+summary: results/W45/0012-paged-b8-cost-fixed/summary.json

@@ -43,5 +43,6 @@
 | W45-0003 | W45 | fill | E1 容量（paged）：W3-like / fill-only / 800 块 / serial | Qwen/Qwen3-0.6B | paged | peak_concurrency 28 | unreviewed | completed | 2026-11-06 | 5a9b4e1 |
 | W45-0004 | W45 | scenario | E2 decode 基线（seat）：8 条最长 / B=8 / budget 128 | Qwen/Qwen3-0.6B | continuous | tok_s 340 | unreviewed | completed | 2026-11-06 | 3fcca5e |
 | W45-0005 | W45 | scenario | E2 decode 内核（paged）：Triton block-table / 8 条最长 / B=8 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 285 | unreviewed | completed | 2026-11-06 | c19a5f3 |
+| W45-0012 | W45 | scenario | E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 329 | unreviewed | completed | 2026-11-06 | f333483 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
