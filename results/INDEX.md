@@ -35,6 +35,5 @@
 | W4-0004 | W4 | scenario | E2 代价基线（seat）：8 条最长 / B=8 / budget 128 | Qwen/Qwen3-0.6B | continuous | tok_s 356 | unreviewed | completed | 2026-11-06 | 1a97b6f |
 | W4-0005 | W4 | scenario | E2 代价（paged）：8 条最长 / B=8 / budget 128 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 201 | unreviewed | completed | 2026-11-06 | 956ff85 |
 | W4-0006 | W4 | scenario | E3 同预算系统吞吐（seat，可选）：frozen 32 / poisson / B=9 | Qwen/Qwen3-0.6B | continuous | tok_s 333 | unreviewed | completed | 2026-11-06 | adffb81 |
-| W4-0007 | W4 | scenario | E3 同预算系统吞吐（paged，可选）：frozen 32 / poisson / B=64 / 820 块 | Qwen/Qwen3-0.6B | paged | — | unreviewed | aborted | 2026-11-06 | c8cbe53 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
