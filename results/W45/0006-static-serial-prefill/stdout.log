@@ -1,0 +1,5 @@
+run_id: W45-0006
+status: completed
+device_class: measure-cuda
+rows: 30 (errors: 0)
+summary: results/W45/0006-static-serial-prefill/summary.json

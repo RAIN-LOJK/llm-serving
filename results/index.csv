@@ -37,4 +37,5 @@ W45-0002,W45,fill,E1 容量（seat）：W3-like / fill-only / B=9 / serial,Qwen/
 W45-0003,W45,fill,E1 容量（paged）：W3-like / fill-only / 800 块 / serial,Qwen/Qwen3-0.6B,paged,peak_concurrency 28,unreviewed,completed,2026-11-06,5a9b4e1,results/W45/0003-paged-fill
 W45-0004,W45,scenario,E2 decode 基线（seat）：8 条最长 / B=8 / budget 128,Qwen/Qwen3-0.6B,continuous,tok_s 340,unreviewed,completed,2026-11-06,3fcca5e,results/W45/0004-seat-b8-cost
 W45-0005,W45,scenario,E2 decode 内核（paged）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 285,unreviewed,completed,2026-11-06,c19a5f3,results/W45/0005-paged-b8-cost
+W45-0006,W45,scenario,E3 prefill A/B（serial）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 39.1,unreviewed,completed,2026-11-06,7021e02,results/W45/0006-static-serial-prefill
 W45-0012,W45,scenario,E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 329,unreviewed,completed,2026-11-06,f333483,results/W45/0012-paged-b8-cost-fixed
