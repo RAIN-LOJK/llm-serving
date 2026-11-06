@@ -237,7 +237,7 @@
   ≥2400 后 paged 撞到请求数或 `max_batch`，不再是显存受限），所以**报告主图是容量曲线**，C1 只是 1640 那条竖线。
 - E1 实机门禁：`sim_paged_capacity.py --trace <本 run 的 metrics.jsonl> --paged-blocks 800 --expect-concurrency <实机数>`，
   期望 28 ±1（预算反解的 29 不是配置块数下的答案）；实测 **28（delta 0）**。
-- **W4 实测（2026-11-06，代码 commit `9dc5211`）**：
+- **W4 实测（2026-11-06，核心代码 commit `9dc5211`；post-fix 0009 在 `b8fa5c1`）**：
   - **C1 pass · 3.111×**：`W4-0002` seat **9** 行 vs `W4-0003` paged **28** 条
     （同 trace `2c0471…`、同预算上限、800 块 bs16）；paged `kv_total = 1601.97 MiB ≤ 1640`
     （其中 workspace 201.97 MiB 是 fill 的公式估算，不是实测）；同 trace 模拟门禁 `28±0`。
