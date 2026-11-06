@@ -1,0 +1,1563 @@
+{
+  "schema_version": 1,
+  "run_id": "W45-0009",
+  "stage": "W45",
+  "type": "scenario",
+  "slug": "paged-saturate",
+  "title": "E4 端到端（paged）：W4 trace / packed prefill + Triton decode / 800 块",
+  "hypothesis": [
+    "packed_prefill_and_triton_decode_beat_seat_at_equal_budget"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-11-06T15:01:11+00:00",
+  "finished_at": "2026-11-06T15:02:05+00:00",
+  "duration_s": 53.952,
+  "operator": "root",
+  "git": {
+    "commit": "bb30f0ddf246a1ad9e86fde41dfe78915ff047d4",
+    "branch": "w4-paged-kv",
+    "dirty": false,
+    "describe": "bb30f0d"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W45/0009-paged-saturate.toml",
+  "config_sha256": "774337fff5d21ef145daf01a18e8ede73b9ba4d84e092cc801ee5e03086e91ef",
+  "prompt": {
+    "path": "bench/prompts.json",
+    "version": "v0-2026-10",
+    "sha256": "7548f3a6c7e6f601b8100e0798e9c8bc60b33a0db9c251537692395f1ce3a663",
+    "n_prompts": 32
+  },
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "paged",
+    "device": "cuda",
+    "max_batch": 64,
+    "block_size": 16,
+    "kv_blocks": 800,
+    "prefill": "packed",
+    "max_prefill_tokens": 8192,
+    "decode": "triton",
+    "resolved_device": "cuda",
+    "vocab_size": 151936,
+    "dtype": "bfloat16",
+    "attn": {
+      "prefill": "flash-attn-varlen",
+      "decode": "paged-triton"
+    }
+  },
+  "workload": {
+    "kind": "prompts",
+    "prompts": "bench/prompts.json",
+    "max_new_tokens": 128,
+    "arrival": "poisson",
+    "rate": 30.0,
+    "requests": 128,
+    "budgets": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "shuffle": false
+  },
+  "measure": {
+    "warmup": 1,
+    "repeats": 3,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "record_only",
+    "criteria": []
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W45/0009-paged-saturate.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "scheduler": {
+    "policy": "continuous",
+    "max_batch": 64,
+    "prefill": "packed",
+    "max_prefill_tokens": 8192,
+    "seats": "paged_blocks",
+    "block_size": 16,
+    "kv_blocks": 800,
+    "free_rows": "not_applicable",
+    "decode": "triton"
+  },
+  "trace": {
+    "arrival": "poisson",
+    "rate": 30.0,
+    "burstiness": 1.0,
+    "requests": 128,
+    "budgets": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "seed": 0,
+    "sha256": "d6391043e5fa927079e91c1244d76af8e5c00112ecd9e284d84a406d38b5c51a",
+    "shuffle": false
+  },
+  "_scenario_summaries": [
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 678.5889934885448,
+          "p95": 678.5889934885448,
+          "min": 678.5889934885448,
+          "max": 678.5889934885448,
+          "mean": 678.5889934885448,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 680.4275134459259,
+          "p95": 680.4275134459259,
+          "min": 680.4275134459259,
+          "max": 680.4275134459259,
+          "mean": 680.4275134459259,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 835.4293582329491,
+          "p95": 835.4293582329491,
+          "min": 835.4293582329491,
+          "max": 835.4293582329491,
+          "mean": 835.4293582329491,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 12.654340204914588,
+          "p95": 12.654340204914588,
+          "min": 12.654340204914588,
+          "max": 12.654340204914588,
+          "mean": 12.654340204914588,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 10.115107,
+          "p95": 10.115107,
+          "min": 10.115107,
+          "max": 10.115107,
+          "mean": 10.115107,
+          "cv": 0.0
+        },
+        "offered_rate": 30.0,
+        "achieved_rate": {
+          "n": 1,
+          "median": 12.654340204914588,
+          "p95": 12.654340204914588,
+          "min": 12.654340204914588,
+          "max": 12.654340204914588,
+          "mean": 12.654340204914588,
+          "cv": 0.0
+        },
+        "saturated": true,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 16.0,
+          "p95": 16.0,
+          "min": 16.0,
+          "max": 16.0,
+          "mean": 16.0,
+          "cv": 0.0
+        },
+        "peak_concurrency": 34.0,
+        "analytic_straggler_ratio": 2.1333333225699307
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 2019.9536152941216,
+          "p95": 3047.719106246878,
+          "p99": 3678.6502754441663
+        },
+        "queue_ms": {
+          "p50": 1985.9605294478167,
+          "p95": 3022.0607371825467,
+          "p99": 3647.5136211267873
+        },
+        "prefill_ms": {
+          "p50": 28.337687253952026,
+          "p95": 36.180924624204636,
+          "p99": 41.27193056046963
+        },
+        "pack_wait_ms": {
+          "p50": 0.018708407878875732,
+          "p95": 0.06620772182941437,
+          "p99": 0.08994713425636292
+        },
+        "prefill_shared_ms": {
+          "p50": 28.337687253952026,
+          "p95": 36.180924624204636,
+          "p99": 41.27193056046963
+        },
+        "queue_share_p99": 0.9915358482089958,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 23.054348304867744,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.370304107666016,
+            "host_gap_ms": 0.6840441972017288,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 1,
+            "n": 3,
+            "step_ms": 31.746933236718178,
+            "prefill_ms": 9.007314220070839,
+            "decode_event_ms": 22.294869740804035,
+            "host_gap_ms": 0.4447492758433024,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.001426786184310913
+          },
+          {
+            "active": 2,
+            "n": 13,
+            "step_ms": 24.981124326586723,
+            "prefill_ms": 1.9976718781086116,
+            "decode_event_ms": 22.62914730952336,
+            "host_gap_ms": 0.35430513895474947,
+            "prefill_groups": 0.07692307692307693,
+            "pack_wait_ms": 0.00036937686113210826
+          },
+          {
+            "active": 3,
+            "n": 6,
+            "step_ms": 22.914834941426914,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.568106651306152,
+            "host_gap_ms": 0.3467282901207606,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 4,
+            "n": 2,
+            "step_ms": 23.290363140404224,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.71385669708252,
+            "host_gap_ms": 0.5765064433217049,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 5,
+            "n": 12,
+            "step_ms": 25.162132767339546,
+            "prefill_ms": 2.3614739378293357,
+            "decode_event_ms": 22.443933486938477,
+            "host_gap_ms": 0.3567253425717354,
+            "prefill_groups": 0.08333333333333333,
+            "pack_wait_ms": 0.0022112702329953513
+          },
+          {
+            "active": 6,
+            "n": 18,
+            "step_ms": 22.903333004150127,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.558156331380207,
+            "host_gap_ms": 0.34517667276991737,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 7,
+            "n": 15,
+            "step_ms": 25.142819061875343,
+            "prefill_ms": 1.8147125840187073,
+            "decode_event_ms": 22.955617904663086,
+            "host_gap_ms": 0.3724885731935501,
+            "prefill_groups": 0.06666666666666667,
+            "pack_wait_ms": 0.0008313606182734171
+          },
+          {
+            "active": 8,
+            "n": 12,
+            "step_ms": 26.607679203152657,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 26.163626670837402,
+            "host_gap_ms": 0.4440525323152542,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 9,
+            "n": 1,
+            "step_ms": 50.63501372933388,
+            "prefill_ms": 26.940355077385902,
+            "decode_event_ms": 22.92019271850586,
+            "host_gap_ms": 0.7744659334421158,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.013170763850212097
+          },
+          {
+            "active": 11,
+            "n": 1,
+            "step_ms": 51.38459987938404,
+            "prefill_ms": 27.267592027783394,
+            "decode_event_ms": 23.251968383789062,
+            "host_gap_ms": 0.8650394678115845,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.011993572115898132
+          },
+          {
+            "active": 12,
+            "n": 2,
+            "step_ms": 36.693441681563854,
+            "prefill_ms": 12.730241753160954,
+            "decode_event_ms": 22.947327613830566,
+            "host_gap_ms": 1.0158723145723343,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.00169314444065094
+          },
+          {
+            "active": 13,
+            "n": 1,
+            "step_ms": 22.17894047498703,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 21.8603515625,
+            "host_gap_ms": 0.31858891248703003,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 14,
+            "n": 7,
+            "step_ms": 26.836149394512177,
+            "prefill_ms": 3.9458165743521283,
+            "decode_event_ms": 22.341773986816406,
+            "host_gap_ms": 0.5485588333436421,
+            "prefill_groups": 0.14285714285714285,
+            "pack_wait_ms": 0.0022844012294496807
+          },
+          {
+            "active": 15,
+            "n": 9,
+            "step_ms": 25.93123209145334,
+            "prefill_ms": 2.987000056438976,
+            "decode_event_ms": 22.36027039421929,
+            "host_gap_ms": 0.583961640795072,
+            "prefill_groups": 0.1111111111111111,
+            "pack_wait_ms": 0.004106304711765713
+          },
+          {
+            "active": 16,
+            "n": 22,
+            "step_ms": 28.916220350021664,
+            "prefill_ms": 5.083683116192168,
+            "decode_event_ms": 23.192298195578836,
+            "host_gap_ms": 0.6402390382506631,
+            "prefill_groups": 0.18181818181818182,
+            "pack_wait_ms": 0.006429427726702256
+          },
+          {
+            "active": 17,
+            "n": 13,
+            "step_ms": 32.916839162890724,
+            "prefill_ms": 8.617102383421017,
+            "decode_event_ms": 23.64265119112455,
+            "host_gap_ms": 0.6570855883451608,
+            "prefill_groups": 0.3076923076923077,
+            "pack_wait_ms": 0.008487214262668904
+          },
+          {
+            "active": 18,
+            "n": 8,
+            "step_ms": 34.656091360375285,
+            "prefill_ms": 10.312387952581048,
+            "decode_event_ms": 23.656563758850098,
+            "host_gap_ms": 0.6871396489441395,
+            "prefill_groups": 0.375,
+            "pack_wait_ms": 0.016191042959690094
+          },
+          {
+            "active": 19,
+            "n": 15,
+            "step_ms": 29.658789932727814,
+            "prefill_ms": 5.503671492139499,
+            "decode_event_ms": 23.645924250284832,
+            "host_gap_ms": 0.5091941903034846,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.006135925650596619
+          },
+          {
+            "active": 20,
+            "n": 8,
+            "step_ms": 34.14968401193619,
+            "prefill_ms": 9.510206989943981,
+            "decode_event_ms": 23.838848114013672,
+            "host_gap_ms": 0.8006289079785347,
+            "prefill_groups": 0.375,
+            "pack_wait_ms": 0.0075446441769599915
+          },
+          {
+            "active": 21,
+            "n": 23,
+            "step_ms": 27.828109653099723,
+            "prefill_ms": 3.387338036428327,
+            "decode_event_ms": 23.861740609873895,
+            "host_gap_ms": 0.5790310067975003,
+            "prefill_groups": 0.13043478260869565,
+            "pack_wait_ms": 0.0017016478206800377
+          },
+          {
+            "active": 22,
+            "n": 18,
+            "step_ms": 25.341813556022114,
+            "prefill_ms": 1.4879714904559984,
+            "decode_event_ms": 23.313747511969673,
+            "host_gap_ms": 0.5400945535964436,
+            "prefill_groups": 0.05555555555555555,
+            "pack_wait_ms": 0.0008980019225014581
+          },
+          {
+            "active": 23,
+            "n": 5,
+            "step_ms": 29.83194924890995,
+            "prefill_ms": 5.074798688292503,
+            "decode_event_ms": 23.818444442749023,
+            "host_gap_ms": 0.9387061178684235,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.0007934868335723877
+          },
+          {
+            "active": 24,
+            "n": 20,
+            "step_ms": 29.839126858860254,
+            "prefill_ms": 5.845461133867502,
+            "decode_event_ms": 23.40946216583252,
+            "host_gap_ms": 0.5842035591602326,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.023210979998111725
+          },
+          {
+            "active": 25,
+            "n": 24,
+            "step_ms": 28.532285320882995,
+            "prefill_ms": 4.422764061018825,
+            "decode_event_ms": 23.477502663930256,
+            "host_gap_ms": 0.6320185959339142,
+            "prefill_groups": 0.16666666666666666,
+            "pack_wait_ms": 0.003592499221364657
+          },
+          {
+            "active": 26,
+            "n": 12,
+            "step_ms": 32.51430547485749,
+            "prefill_ms": 7.884900240848462,
+            "decode_event_ms": 23.653459072113037,
+            "host_gap_ms": 0.9759461618959904,
+            "prefill_groups": 0.25,
+            "pack_wait_ms": 0.00846510132153829
+          },
+          {
+            "active": 27,
+            "n": 17,
+            "step_ms": 28.955991325132988,
+            "prefill_ms": 4.719115245868178,
+            "decode_event_ms": 23.47609037511489,
+            "host_gap_ms": 0.7607857041499194,
+            "prefill_groups": 0.17647058823529413,
+            "pack_wait_ms": 0.008291290963397306
+          },
+          {
+            "active": 28,
+            "n": 19,
+            "step_ms": 30.918735030450318,
+            "prefill_ms": 6.375048407598546,
+            "decode_event_ms": 23.797435158177425,
+            "host_gap_ms": 0.7462514646743473,
+            "prefill_groups": 0.21052631578947367,
+            "pack_wait_ms": 0.04362716878715314
+          },
+          {
+            "active": 29,
+            "n": 11,
+            "step_ms": 32.012757421894506,
+            "prefill_ms": 7.587016644802961,
+            "decode_event_ms": 23.533838618885387,
+            "host_gap_ms": 0.8919021582061594,
+            "prefill_groups": 0.2727272727272727,
+            "pack_wait_ms": 0.012720681049607017
+          },
+          {
+            "active": 30,
+            "n": 11,
+            "step_ms": 26.419783688404344,
+            "prefill_ms": 2.4772139096801933,
+            "decode_event_ms": 23.351662375710227,
+            "host_gap_ms": 0.590907403013923,
+            "prefill_groups": 0.09090909090909091,
+            "pack_wait_ms": 0.00565888529474085
+          },
+          {
+            "active": 31,
+            "n": 9,
+            "step_ms": 31.685096108251148,
+            "prefill_ms": 6.636741053726938,
+            "decode_event_ms": 24.282570309109158,
+            "host_gap_ms": 0.7657847454150518,
+            "prefill_groups": 0.2222222222222222,
+            "pack_wait_ms": 0.022413829962412517
+          },
+          {
+            "active": 32,
+            "n": 6,
+            "step_ms": 32.98741579055786,
+            "prefill_ms": 8.608936021725336,
+            "decode_event_ms": 23.61138661702474,
+            "host_gap_ms": 0.767093151807785,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.004745088517665863
+          },
+          {
+            "active": 33,
+            "n": 3,
+            "step_ms": 33.34913092354933,
+            "prefill_ms": 8.356218536694845,
+            "decode_event_ms": 23.434560139973957,
+            "host_gap_ms": 1.5583522468805313,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.0039208680391311646
+          },
+          {
+            "active": 34,
+            "n": 4,
+            "step_ms": 40.94579257071018,
+            "prefill_ms": 16.454189084470272,
+            "decode_event_ms": 23.460591793060303,
+            "host_gap_ms": 1.0310116931796074,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.11368794366717339
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 2.842170943040401e-14
+      },
+      "memory": {
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "seat_unused_mb": null,
+        "frag_internal": 0.015823952123252272,
+        "reservation_slack": 0.004687499999999956,
+        "seat_row_slack": null,
+        "capacity_per_gib": 24.86857142857143,
+        "bytes_per_active_request": 43176658.823529415
+      },
+      "capacity": {
+        "peak_concurrency": 34,
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "block_size": 16,
+        "kv_blocks": 800,
+        "max_batch": 64,
+        "frag_internal": 0.015823952123252272,
+        "reservation_slack": 0.004687499999999956,
+        "seat_unused_mb": null,
+        "capacity_per_gib": 24.86857142857143,
+        "workload_sha256": "d6391043e5fa927079e91c1244d76af8e5c00112ecd9e284d84a406d38b5c51a",
+        "workspace_estimated": false
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 672.7538718405078,
+          "p95": 672.7538718405078,
+          "min": 672.7538718405078,
+          "max": 672.7538718405078,
+          "mean": 672.7538718405078,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 674.5343169774541,
+          "p95": 674.5343169774541,
+          "min": 674.5343169774541,
+          "max": 674.5343169774541,
+          "mean": 674.5343169774541,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 826.0653781044257,
+          "p95": 826.0653781044257,
+          "min": 826.0653781044257,
+          "max": 826.0653781044257,
+          "mean": 826.0653781044257,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 12.545526747608537,
+          "p95": 12.545526747608537,
+          "min": 12.545526747608537,
+          "max": 12.545526747608537,
+          "mean": 12.545526747608537,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 10.20284,
+          "p95": 10.20284,
+          "min": 10.20284,
+          "max": 10.20284,
+          "mean": 10.20284,
+          "cv": 0.0
+        },
+        "offered_rate": 30.0,
+        "achieved_rate": {
+          "n": 1,
+          "median": 12.545526747608537,
+          "p95": 12.545526747608537,
+          "min": 12.545526747608537,
+          "max": 12.545526747608537,
+          "mean": 12.545526747608537,
+          "cv": 0.0
+        },
+        "saturated": true,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 16.0,
+          "p95": 16.0,
+          "min": 16.0,
+          "max": 16.0,
+          "mean": 16.0,
+          "cv": 0.0
+        },
+        "peak_concurrency": 34.0,
+        "analytic_straggler_ratio": 2.1333333225699307
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 2021.1677947989112,
+          "p95": 3091.893697326232,
+          "p99": 3743.4564946345254
+        },
+        "queue_ms": {
+          "p50": 1993.5878707072145,
+          "p95": 3066.116066818286,
+          "p99": 3711.2471690527364
+        },
+        "prefill_ms": {
+          "p50": 28.86047773063183,
+          "p95": 35.23313254117966,
+          "p99": 41.5189303457737
+        },
+        "pack_wait_ms": {
+          "p50": 0.018535181879997253,
+          "p95": 0.0636521726846695,
+          "p99": 0.08137524127960205
+        },
+        "prefill_shared_ms": {
+          "p50": 28.86047773063183,
+          "p95": 35.23313254117966,
+          "p99": 41.5189303457737
+        },
+        "queue_share_p99": 0.9913958328010611,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 22.996461018919945,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.376447677612305,
+            "host_gap_ms": 0.6200133413076401,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 1,
+            "n": 3,
+            "step_ms": 31.39586995045344,
+            "prefill_ms": 8.783903593818346,
+            "decode_event_ms": 22.178815841674805,
+            "host_gap_ms": 0.433150514960289,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.0011815379063288371
+          },
+          {
+            "active": 2,
+            "n": 13,
+            "step_ms": 24.92608316242695,
+            "prefill_ms": 1.9773507060912938,
+            "decode_event_ms": 22.613541089571438,
+            "host_gap_ms": 0.33519136676421535,
+            "prefill_groups": 0.07692307692307693,
+            "pack_wait_ms": 0.00032123464804429276
+          },
+          {
+            "active": 3,
+            "n": 6,
+            "step_ms": 23.20414346953233,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.762155214945476,
+            "host_gap_ms": 0.4419882545868556,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 4,
+            "n": 1,
+            "step_ms": 23.134566843509674,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.581247329711914,
+            "host_gap_ms": 0.55331951379776,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 5,
+            "n": 13,
+            "step_ms": 25.100596822225132,
+            "prefill_ms": 2.1801418983019314,
+            "decode_event_ms": 22.5420231452355,
+            "host_gap_ms": 0.3784317786876972,
+            "prefill_groups": 0.07692307692307693,
+            "pack_wait_ms": 0.002174996412717379
+          },
+          {
+            "active": 6,
+            "n": 18,
+            "step_ms": 22.86132476809952,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.53227212693956,
+            "host_gap_ms": 0.3290526411599583,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 7,
+            "n": 15,
+            "step_ms": 24.7441661854585,
+            "prefill_ms": 1.79434468348821,
+            "decode_event_ms": 22.561243947347005,
+            "host_gap_ms": 0.3885775546232859,
+            "prefill_groups": 0.06666666666666667,
+            "pack_wait_ms": 0.0008416672547658285
+          },
+          {
+            "active": 8,
+            "n": 12,
+            "step_ms": 27.286133884141844,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 26.816603024800617,
+            "host_gap_ms": 0.469530859341224,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 9,
+            "n": 1,
+            "step_ms": 50.20396411418915,
+            "prefill_ms": 26.62639133632183,
+            "decode_event_ms": 22.786048889160156,
+            "host_gap_ms": 0.791523888707161,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.011952593922615051
+          },
+          {
+            "active": 11,
+            "n": 1,
+            "step_ms": 51.181403920054436,
+            "prefill_ms": 26.93563885986805,
+            "decode_event_ms": 23.28883171081543,
+            "host_gap_ms": 0.9569333493709564,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.012563541531562805
+          },
+          {
+            "active": 12,
+            "n": 2,
+            "step_ms": 38.573228754103184,
+            "prefill_ms": 12.93281465768814,
+            "decode_event_ms": 24.52070426940918,
+            "host_gap_ms": 1.1197098270058632,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.0019408762454986572
+          },
+          {
+            "active": 13,
+            "n": 1,
+            "step_ms": 22.55251258611679,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.18182373046875,
+            "host_gap_ms": 0.37068885564804077,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 14,
+            "n": 8,
+            "step_ms": 27.154539013281465,
+            "prefill_ms": 3.457852639257908,
+            "decode_event_ms": 23.138676404953003,
+            "host_gap_ms": 0.5580099690705538,
+            "prefill_groups": 0.125,
+            "pack_wait_ms": 0.0020992010831832886
+          },
+          {
+            "active": 15,
+            "n": 8,
+            "step_ms": 30.190295539796352,
+            "prefill_ms": 3.405722789466381,
+            "decode_event_ms": 26.038511753082275,
+            "host_gap_ms": 0.7460609972476959,
+            "prefill_groups": 0.125,
+            "pack_wait_ms": 0.004302710294723511
+          },
+          {
+            "active": 16,
+            "n": 22,
+            "step_ms": 28.567239896140315,
+            "prefill_ms": 5.0899873233654285,
+            "decode_event_ms": 22.83594460920854,
+            "host_gap_ms": 0.6413079635663466,
+            "prefill_groups": 0.18181818181818182,
+            "pack_wait_ms": 0.0042880631305954675
+          },
+          {
+            "active": 17,
+            "n": 14,
+            "step_ms": 32.69820886531046,
+            "prefill_ms": 7.997021611247744,
+            "decode_event_ms": 23.957650320870535,
+            "host_gap_ms": 0.743536933192185,
+            "prefill_groups": 0.2857142857142857,
+            "pack_wait_ms": 0.007079382027898516
+          },
+          {
+            "active": 18,
+            "n": 6,
+            "step_ms": 33.585876847306885,
+            "prefill_ms": 9.396155054370562,
+            "decode_event_ms": 23.51086966196696,
+            "host_gap_ms": 0.6788521309693655,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.02028575787941615
+          },
+          {
+            "active": 19,
+            "n": 16,
+            "step_ms": 30.026808031834662,
+            "prefill_ms": 5.365423043258488,
+            "decode_event_ms": 24.026229977607727,
+            "host_gap_ms": 0.6351550109684467,
+            "prefill_groups": 0.1875,
+            "pack_wait_ms": 0.004867906682193279
+          },
+          {
+            "active": 20,
+            "n": 9,
+            "step_ms": 33.13984183801545,
+            "prefill_ms": 8.536181930038664,
+            "decode_event_ms": 23.78365156385634,
+            "host_gap_ms": 0.8200083441204495,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.00445089406437344
+          },
+          {
+            "active": 21,
+            "n": 23,
+            "step_ms": 27.722694465647574,
+            "prefill_ms": 3.4226657741743587,
+            "decode_event_ms": 23.694651893947434,
+            "host_gap_ms": 0.6053767975257791,
+            "prefill_groups": 0.13043478260869565,
+            "pack_wait_ms": 0.002261008257451265
+          },
+          {
+            "active": 22,
+            "n": 17,
+            "step_ms": 25.681523606181145,
+            "prefill_ms": 1.4881581506308388,
+            "decode_event_ms": 23.664941226734836,
+            "host_gap_ms": 0.5284242288154715,
+            "prefill_groups": 0.058823529411764705,
+            "pack_wait_ms": 0.00022516092833350687
+          },
+          {
+            "active": 23,
+            "n": 5,
+            "step_ms": 29.922189563512802,
+            "prefill_ms": 5.110045149922371,
+            "decode_event_ms": 23.80840950012207,
+            "host_gap_ms": 1.0037349134683609,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.0007174909114837646
+          },
+          {
+            "active": 24,
+            "n": 20,
+            "step_ms": 31.97675636038184,
+            "prefill_ms": 6.083806976675987,
+            "decode_event_ms": 25.173753452301025,
+            "host_gap_ms": 0.7191959314048291,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.031035766005516052
+          },
+          {
+            "active": 25,
+            "n": 25,
+            "step_ms": 28.38851474225521,
+            "prefill_ms": 4.238584637641907,
+            "decode_event_ms": 23.507106857299803,
+            "host_gap_ms": 0.6428232473134995,
+            "prefill_groups": 0.16,
+            "pack_wait_ms": 0.0035196542739868164
+          },
+          {
+            "active": 26,
+            "n": 10,
+            "step_ms": 34.735897555947304,
+            "prefill_ms": 9.7990483045578,
+            "decode_event_ms": 23.85172805786133,
+            "host_gap_ms": 1.0851211935281753,
+            "prefill_groups": 0.3,
+            "pack_wait_ms": 0.01073349267244339
+          },
+          {
+            "active": 27,
+            "n": 18,
+            "step_ms": 29.247379137410057,
+            "prefill_ms": 4.498300659987661,
+            "decode_event_ms": 23.8983858956231,
+            "host_gap_ms": 0.8506925817992952,
+            "prefill_groups": 0.16666666666666666,
+            "pack_wait_ms": 0.007890889214144813
+          },
+          {
+            "active": 28,
+            "n": 19,
+            "step_ms": 30.632185406590764,
+            "prefill_ms": 6.25458251880972,
+            "decode_event_ms": 23.552804946899414,
+            "host_gap_ms": 0.8247979408816287,
+            "prefill_groups": 0.21052631578947367,
+            "pack_wait_ms": 0.037360936403274536
+          },
+          {
+            "active": 29,
+            "n": 10,
+            "step_ms": 33.187747932970524,
+            "prefill_ms": 8.294719830155373,
+            "decode_event_ms": 24.01637420654297,
+            "host_gap_ms": 0.8766538962721825,
+            "prefill_groups": 0.3,
+            "pack_wait_ms": 0.013304315507411957
+          },
+          {
+            "active": 30,
+            "n": 12,
+            "step_ms": 26.51660144329071,
+            "prefill_ms": 2.295604751755794,
+            "decode_event_ms": 23.690661271413166,
+            "host_gap_ms": 0.5303354201217493,
+            "prefill_groups": 0.08333333333333333,
+            "pack_wait_ms": 0.005328872551520665
+          },
+          {
+            "active": 31,
+            "n": 8,
+            "step_ms": 31.74492041580379,
+            "prefill_ms": 7.1951961144804955,
+            "decode_event_ms": 23.67193603515625,
+            "host_gap_ms": 0.8777882661670446,
+            "prefill_groups": 0.25,
+            "pack_wait_ms": 0.02542068250477314
+          },
+          {
+            "active": 32,
+            "n": 7,
+            "step_ms": 31.796075935874665,
+            "prefill_ms": 7.369627377816609,
+            "decode_event_ms": 23.652790887015207,
+            "host_gap_ms": 0.773657671042851,
+            "prefill_groups": 0.2857142857142857,
+            "pack_wait_ms": 0.003974352564130511
+          },
+          {
+            "active": 33,
+            "n": 3,
+            "step_ms": 33.953761061032615,
+            "prefill_ms": 8.485314125816027,
+            "decode_event_ms": 23.836671829223633,
+            "host_gap_ms": 1.631775105992953,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.003954395651817322
+          },
+          {
+            "active": 34,
+            "n": 4,
+            "step_ms": 41.25948483124375,
+            "prefill_ms": 16.20015734806657,
+            "decode_event_ms": 23.939047813415527,
+            "host_gap_ms": 1.1202796697616577,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.11508259922266006
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 2.842170943040401e-14
+      },
+      "memory": {
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "seat_unused_mb": null,
+        "frag_internal": 0.01580306306149526,
+        "reservation_slack": 0.004687499999999956,
+        "seat_row_slack": null,
+        "capacity_per_gib": 24.86857142857143,
+        "bytes_per_active_request": 43176658.823529415
+      },
+      "capacity": {
+        "peak_concurrency": 34,
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "block_size": 16,
+        "kv_blocks": 800,
+        "max_batch": 64,
+        "frag_internal": 0.01580306306149526,
+        "reservation_slack": 0.004687499999999956,
+        "seat_unused_mb": null,
+        "capacity_per_gib": 24.86857142857143,
+        "workload_sha256": "d6391043e5fa927079e91c1244d76af8e5c00112ecd9e284d84a406d38b5c51a",
+        "workspace_estimated": false
+      }
+    },
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 680.7373878339772,
+          "p95": 680.7373878339772,
+          "min": 680.7373878339772,
+          "max": 680.7373878339772,
+          "mean": 680.7373878339772,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 682.5808908183128,
+          "p95": 682.5808908183128,
+          "min": 682.5808908183128,
+          "max": 682.5808908183128,
+          "mean": 682.5808908183128,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 834.1863788746115,
+          "p95": 834.1863788746115,
+          "min": 834.1863788746115,
+          "max": 834.1863788746115,
+          "mean": 834.1863788746115,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 12.69440350273151,
+          "p95": 12.69440350273151,
+          "min": 12.69440350273151,
+          "max": 12.69440350273151,
+          "mean": 12.69440350273151,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 10.083184,
+          "p95": 10.083184,
+          "min": 10.083184,
+          "max": 10.083184,
+          "mean": 10.083184,
+          "cv": 0.0
+        },
+        "offered_rate": 30.0,
+        "achieved_rate": {
+          "n": 1,
+          "median": 12.69440350273151,
+          "p95": 12.69440350273151,
+          "min": 12.69440350273151,
+          "max": 12.69440350273151,
+          "mean": 12.69440350273151,
+          "cv": 0.0
+        },
+        "saturated": true,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 16.0,
+          "p95": 16.0,
+          "min": 16.0,
+          "max": 16.0,
+          "mean": 16.0,
+          "cv": 0.0
+        },
+        "peak_concurrency": 34.0,
+        "analytic_straggler_ratio": 2.1333333225699307
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 2001.6164435885387,
+          "p95": 3027.2191280323755,
+          "p99": 3704.243513395564
+        },
+        "queue_ms": {
+          "p50": 1961.5028468868143,
+          "p95": 3001.2953767377626,
+          "p99": 3673.111051892416
+        },
+        "prefill_ms": {
+          "p50": 29.373545199632645,
+          "p95": 47.55343496799469,
+          "p99": 56.035950779914856
+        },
+        "pack_wait_ms": {
+          "p50": 0.0185500830411911,
+          "p95": 0.08366629481315613,
+          "p99": 0.11250562965869904
+        },
+        "prefill_shared_ms": {
+          "p50": 29.373545199632645,
+          "p95": 47.55343496799469,
+          "p99": 56.035950779914856
+        },
+        "queue_share_p99": 0.9915954603441797,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 22.716280072927475,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.076416015625,
+            "host_gap_ms": 0.639864057302475,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 1,
+            "n": 3,
+            "step_ms": 31.740987673401833,
+            "prefill_ms": 8.849360048770905,
+            "decode_event_ms": 22.447444915771484,
+            "host_gap_ms": 0.44418270885944366,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.0011368344227472942
+          },
+          {
+            "active": 2,
+            "n": 14,
+            "step_ms": 24.7143738503967,
+            "prefill_ms": 1.8526110798120499,
+            "decode_event_ms": 22.518852506365096,
+            "host_gap_ms": 0.34291026421955656,
+            "prefill_groups": 0.07142857142857142,
+            "pack_wait_ms": 0.00028032809495925903
+          },
+          {
+            "active": 3,
+            "n": 5,
+            "step_ms": 22.84669503569603,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.477004623413087,
+            "host_gap_ms": 0.36969041228294375,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 4,
+            "n": 2,
+            "step_ms": 23.413555696606636,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.781951904296875,
+            "host_gap_ms": 0.631603792309761,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 5,
+            "n": 12,
+            "step_ms": 25.077781019111473,
+            "prefill_ms": 2.3494591005146503,
+            "decode_event_ms": 22.359466711680096,
+            "host_gap_ms": 0.3688552069167296,
+            "prefill_groups": 0.08333333333333333,
+            "pack_wait_ms": 0.0023844962318738303
+          },
+          {
+            "active": 6,
+            "n": 18,
+            "step_ms": 23.20621069520712,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.86284245385064,
+            "host_gap_ms": 0.3433682413564788,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 7,
+            "n": 15,
+            "step_ms": 24.917898575464886,
+            "prefill_ms": 1.8413446843624115,
+            "decode_event_ms": 22.697985967000324,
+            "host_gap_ms": 0.3785679241021474,
+            "prefill_groups": 0.06666666666666667,
+            "pack_wait_ms": 0.0008924553791681925
+          },
+          {
+            "active": 8,
+            "n": 13,
+            "step_ms": 23.16658112865228,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.754461728609524,
+            "host_gap_ms": 0.41211940004275394,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 9,
+            "n": 1,
+            "step_ms": 51.49728059768677,
+            "prefill_ms": 27.199747040867805,
+            "decode_event_ms": 23.397375106811523,
+            "host_gap_ms": 0.9001584500074387,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.012602657079696655
+          },
+          {
+            "active": 11,
+            "n": 1,
+            "step_ms": 51.635436713695526,
+            "prefill_ms": 27.201121672987938,
+            "decode_event_ms": 23.432191848754883,
+            "host_gap_ms": 1.0021231919527054,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.013055279850959778
+          },
+          {
+            "active": 12,
+            "n": 1,
+            "step_ms": 49.86979626119137,
+            "prefill_ms": 25.935640558600426,
+            "decode_event_ms": 22.989824295043945,
+            "host_gap_ms": 0.9443314075469971,
+            "prefill_groups": 1.0,
+            "pack_wait_ms": 0.004259869456291199
+          },
+          {
+            "active": 13,
+            "n": 2,
+            "step_ms": 22.739275358617306,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 22.328783988952637,
+            "host_gap_ms": 0.41049136966466904,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 14,
+            "n": 6,
+            "step_ms": 27.85671316087246,
+            "prefill_ms": 4.524587653577328,
+            "decode_event_ms": 22.700202306111652,
+            "host_gap_ms": 0.631923201183478,
+            "prefill_groups": 0.16666666666666666,
+            "pack_wait_ms": 0.0027352944016456604
+          },
+          {
+            "active": 15,
+            "n": 12,
+            "step_ms": 25.66344120229284,
+            "prefill_ms": 2.2767783763508,
+            "decode_event_ms": 22.749517281850178,
+            "host_gap_ms": 0.6371455440918604,
+            "prefill_groups": 0.08333333333333333,
+            "pack_wait_ms": 0.0029381675024827323
+          },
+          {
+            "active": 16,
+            "n": 19,
+            "step_ms": 29.695196273295505,
+            "prefill_ms": 6.231168088944335,
+            "decode_event_ms": 22.825071334838867,
+            "host_gap_ms": 0.638956849512301,
+            "prefill_groups": 0.21052631578947367,
+            "pack_wait_ms": 0.006848554077901338
+          },
+          {
+            "active": 17,
+            "n": 15,
+            "step_ms": 31.85594640672207,
+            "prefill_ms": 7.409342750906944,
+            "decode_event_ms": 23.76683718363444,
+            "host_gap_ms": 0.6797664721806844,
+            "prefill_groups": 0.26666666666666666,
+            "pack_wait_ms": 0.012413909037907919
+          },
+          {
+            "active": 18,
+            "n": 9,
+            "step_ms": 33.40512803859181,
+            "prefill_ms": 8.63265163368649,
+            "decode_event_ms": 24.073329501681858,
+            "host_gap_ms": 0.6991469032234616,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.003945082426071167
+          },
+          {
+            "active": 19,
+            "n": 13,
+            "step_ms": 28.544288415175217,
+            "prefill_ms": 4.410930407735018,
+            "decode_event_ms": 23.61130611713116,
+            "host_gap_ms": 0.5220518903090403,
+            "prefill_groups": 0.15384615384615385,
+            "pack_wait_ms": 0.004656899433869582
+          },
+          {
+            "active": 20,
+            "n": 10,
+            "step_ms": 35.07027067244053,
+            "prefill_ms": 10.366707108914852,
+            "decode_event_ms": 23.831753730773926,
+            "host_gap_ms": 0.871809832751751,
+            "prefill_groups": 0.4,
+            "pack_wait_ms": 0.00452771782875061
+          },
+          {
+            "active": 21,
+            "n": 23,
+            "step_ms": 26.40841164342735,
+            "prefill_ms": 2.2247708200112633,
+            "decode_event_ms": 23.598529235176418,
+            "host_gap_ms": 0.5851115882396698,
+            "prefill_groups": 0.08695652173913043,
+            "pack_wait_ms": 0.001545833504718283
+          },
+          {
+            "active": 22,
+            "n": 17,
+            "step_ms": 25.707843658678673,
+            "prefill_ms": 1.5654907945324392,
+            "decode_event_ms": 23.58807148652918,
+            "host_gap_ms": 0.5542813776170507,
+            "prefill_groups": 0.058823529411764705,
+            "pack_wait_ms": 0.0009254059370826272
+          },
+          {
+            "active": 23,
+            "n": 6,
+            "step_ms": 33.554766327142715,
+            "prefill_ms": 8.795133791863918,
+            "decode_event_ms": 23.707797050476074,
+            "host_gap_ms": 1.051835484802723,
+            "prefill_groups": 0.3333333333333333,
+            "pack_wait_ms": 0.004173566897710164
+          },
+          {
+            "active": 24,
+            "n": 19,
+            "step_ms": 27.829645593699656,
+            "prefill_ms": 3.033019014095005,
+            "decode_event_ms": 24.243196788587067,
+            "host_gap_ms": 0.5534297910175825,
+            "prefill_groups": 0.10526315789473684,
+            "pack_wait_ms": 0.009323029141677054
+          },
+          {
+            "active": 25,
+            "n": 22,
+            "step_ms": 28.00889118489894,
+            "prefill_ms": 3.6891638724641367,
+            "decode_event_ms": 23.682983225042168,
+            "host_gap_ms": 0.6367440873926337,
+            "prefill_groups": 0.13636363636363635,
+            "pack_wait_ms": 0.0052272596142508765
+          },
+          {
+            "active": 26,
+            "n": 11,
+            "step_ms": 29.36879155988043,
+            "prefill_ms": 4.822422326965765,
+            "decode_event_ms": 23.646106373180043,
+            "host_gap_ms": 0.900262859734622,
+            "prefill_groups": 0.18181818181818182,
+            "pack_wait_ms": 0.004118647087704052
+          },
+          {
+            "active": 27,
+            "n": 19,
+            "step_ms": 35.680096792547324,
+            "prefill_ms": 10.928147913593994,
+            "decode_event_ms": 23.841258099204616,
+            "host_gap_ms": 0.9106907797487158,
+            "prefill_groups": 0.3157894736842105,
+            "pack_wait_ms": 0.05421591432471024
+          },
+          {
+            "active": 28,
+            "n": 18,
+            "step_ms": 31.27679352958997,
+            "prefill_ms": 6.683382412625684,
+            "decode_event_ms": 23.767607159084744,
+            "host_gap_ms": 0.8258039578795433,
+            "prefill_groups": 0.2222222222222222,
+            "pack_wait_ms": 0.03968158529864417
+          },
+          {
+            "active": 29,
+            "n": 11,
+            "step_ms": 27.152262797409836,
+            "prefill_ms": 2.6431085372512992,
+            "decode_event_ms": 23.68344445662065,
+            "host_gap_ms": 0.8257098035378889,
+            "prefill_groups": 0.09090909090909091,
+            "pack_wait_ms": 0.004825097593394193
+          },
+          {
+            "active": 30,
+            "n": 11,
+            "step_ms": 26.611077345230363,
+            "prefill_ms": 2.5110637599771675,
+            "decode_event_ms": 23.492232582785867,
+            "host_gap_ms": 0.6077810024673288,
+            "prefill_groups": 0.09090909090909091,
+            "pack_wait_ms": 0.005511905659328808
+          },
+          {
+            "active": 31,
+            "n": 10,
+            "step_ms": 30.091466568410397,
+            "prefill_ms": 5.7845789939165115,
+            "decode_event_ms": 23.63340492248535,
+            "host_gap_ms": 0.6734826520085335,
+            "prefill_groups": 0.2,
+            "pack_wait_ms": 0.021076016128063202
+          },
+          {
+            "active": 32,
+            "n": 7,
+            "step_ms": 31.956057995557785,
+            "prefill_ms": 7.364857941865921,
+            "decode_event_ms": 23.823652267456055,
+            "host_gap_ms": 0.7675477862358093,
+            "prefill_groups": 0.2857142857142857,
+            "pack_wait_ms": 0.0038833490439823697
+          },
+          {
+            "active": 33,
+            "n": 4,
+            "step_ms": 39.56779604777694,
+            "prefill_ms": 14.233714900910854,
+            "decode_event_ms": 23.923200130462646,
+            "host_gap_ms": 1.4108810164034367,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.04568742588162422
+          },
+          {
+            "active": 34,
+            "n": 2,
+            "step_ms": 41.5786849334836,
+            "prefill_ms": 16.739018261432648,
+            "decode_event_ms": 23.77881622314453,
+            "host_gap_ms": 1.0608504489064217,
+            "prefill_groups": 0.5,
+            "pack_wait_ms": 0.1391582190990448
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      },
+      "memory": {
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "seat_unused_mb": null,
+        "frag_internal": 0.01584577436949197,
+        "reservation_slack": 0.004687499999999956,
+        "seat_row_slack": null,
+        "capacity_per_gib": 24.86857142857143,
+        "bytes_per_active_request": 43176658.823529415
+      },
+      "capacity": {
+        "peak_concurrency": 34,
+        "kv_mb": 1400.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 1400.0,
+        "block_size": 16,
+        "kv_blocks": 800,
+        "max_batch": 64,
+        "frag_internal": 0.01584577436949197,
+        "reservation_slack": 0.004687499999999956,
+        "seat_unused_mb": null,
+        "capacity_per_gib": 24.86857142857143,
+        "workload_sha256": "d6391043e5fa927079e91c1244d76af8e5c00112ecd9e284d84a406d38b5c51a",
+        "workspace_estimated": false
+      }
+    }
+  ],
+  "n_rows": 1441,
+  "n_errors": 0,
+  "summary": "summary.json"
+}
