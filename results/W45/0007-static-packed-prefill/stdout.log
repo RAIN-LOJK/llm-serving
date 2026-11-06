@@ -1,0 +1,5 @@
+run_id: W45-0007
+status: completed
+device_class: measure-cuda
+rows: 30 (errors: 0)
+summary: results/W45/0007-static-packed-prefill/summary.json
