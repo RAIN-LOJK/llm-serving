@@ -141,6 +141,13 @@ class PagedPool:
         # same tables) -- the layer axis of ``gather`` never rebuilds it.
         self._index_key: tuple | None = None
         self._index_flat: torch.Tensor | None = None
+        # Same idea for the prefill slot map: ONE cached 1-D slot tensor per
+        # (block table, start, length), so the ``n_layer`` ``write_prefill`` calls of one
+        # prompt reuse it instead of rebuilding it per layer. The key contains the table,
+        # so a new request (or a reused pool) rebuilds it on the first layer and can never
+        # read a stale mapping; the cache is one entry, not one per table.
+        self._prefill_key: tuple | None = None
+        self._prefill_slots: torch.Tensor | None = None
 
         # Per-step gather accumulators (plan §5 / appendix C). ``begin_step`` clears them;
         # ``gather`` adds one host-clock sample and one byte count per layer.
@@ -196,14 +203,49 @@ class PagedPool:
                 f"block table has {len(block_ids)} blocks, needs {needed} to address this write"
             )
 
+    def _slot_ids(self, block_table, start: int, length: int) -> torch.Tensor:
+        """1-D ``(length,)`` flat slot ids for logical tokens ``[start, start + length)``.
+
+        Token ``t`` lives at physical slot ``block_table[t // block_size] * block_size +
+        (t % block_size)`` -- the row of the pool's flattened
+        ``(n_blocks * block_size, n_kv_head, head_dim)`` view. Built with tensor ops (one
+        small table tensor plus a gather, no per-token Python loop) and cached per
+        ``(block table, start, length)``, so the layer loop of one prefill builds it once.
+        """
+        key = (tuple(block_table), start, length)
+        if key == self._prefill_key and self._prefill_slots is not None:
+            return self._prefill_slots
+        table = torch.tensor(list(block_table), dtype=torch.long, device=self.device)
+        positions = torch.arange(start, start + length, dtype=torch.long, device=self.device)
+        block_index = positions // self.block_size
+        slots = table[block_index] * self.block_size + (positions % self.block_size)
+        self._prefill_key = key
+        self._prefill_slots = slots
+        return slots
+
     def write_prefill(
         self, layer: int, block_table, start: int, k: torch.Tensor, v: torch.Tensor
     ) -> None:
         """Write ``L`` logical tokens ``[start, start + L)`` through ``block_table``.
 
-        ``k``/``v`` are ``(L, n_kv_head, head_dim)``. The write is segmented per physical
-        block (one copy per block, not one per token), so a prefill wipe costs ``ceil(L/bs)``
-        copies. ``start`` is the logical index of the first token (0 for a fresh request).
+        ``k``/``v`` are ``(L, n_kv_head, head_dim)`` and token ``t`` maps to physical slot
+        ``block_table[t // block_size] * block_size + (t % block_size)`` (see
+        :meth:`_slot_ids`). The pool tensors are contiguous
+        ``(n_blocks, block_size, n_kv_head, head_dim)``, so one advanced-index write per
+        layer per K/V places every token::
+
+            flat = self.keys[layer].view(-1, self.n_kv_head, self.head_dim)
+            flat[slot_ids] = k.to(self.dtype)
+
+        That replaces the previous per-block slice loop (``ceil(L/bs)`` slice copies per
+        layer per tensor -- ~95 blocks x 28 layers x 2 for a 1500-token prompt, thousands
+        of small CUDA copies). The slot ids are shared by every layer of one prefill, and
+        the write is a pure copy, so the bytes are identical to the per-block version.
+
+        ``start`` is the logical index of the first token (0 for a fresh request; ``> 0``
+        appends a chunk after bytes already written through the same table). All tokens
+        must map to *distinct* physical blocks: with a table that repeats a block id the
+        advanced-index winner is undefined (the allocator never issues duplicates).
         """
         layer = self._check_layer(layer)
         if k.dim() != 3 or v.dim() != 3:
@@ -228,15 +270,12 @@ class PagedPool:
 
         k = k.to(self.dtype)
         v = v.to(self.dtype)
-        written = 0
-        while written < length:
-            assert_pos = start + written
-            block_id = block_table[assert_pos // self.block_size]
-            offset = assert_pos % self.block_size
-            n = min(self.block_size - offset, length - written)
-            self.keys[layer][block_id, offset : offset + n] = k[written : written + n]
-            self.values[layer][block_id, offset : offset + n] = v[written : written + n]
-            written += n
+        slot_ids = self._slot_ids(block_table, start, length)
+        # ``view`` (not ``reshape``) is safe: the pool is contiguous and never replaced.
+        keys = self.keys[layer].view(-1, self.n_kv_head, self.head_dim)
+        keys[slot_ids] = k
+        values = self.values[layer].view(-1, self.n_kv_head, self.head_dim)
+        values[slot_ids] = v
 
     def write_token(
         self,
@@ -452,12 +491,14 @@ class PagedPool:
         return max(self._workspace_peak_bytes, self._workspace_bytes()) / 2**20
 
     def reset_workspace(self) -> None:
-        """Drop the cached workspace/index; the next gather allocates afresh."""
+        """Drop the cached workspace/index/slot map; the next gather/write rebuilds it."""
         self._workspace.clear()
         self._current_lpad = None
         self._rows_cap = 0
         self._index_key = None
         self._index_flat = None
+        self._prefill_key = None
+        self._prefill_slots = None
 
 
 class PagedKV:

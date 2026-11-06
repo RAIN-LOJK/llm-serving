@@ -55,6 +55,35 @@ def _split(gathered: torch.Tensor, length: int, rows: int = 1) -> torch.Tensor:
     return gathered[:, :, :length, :].permute(0, 2, 1, 3)
 
 
+def _reference_prefill(pool: PagedPool, layer: int, block_table, start: int,
+                       k: torch.Tensor, v: torch.Tensor) -> None:
+    """The pre-slot-map implementation, verbatim: one slice copy per physical block.
+
+    Test oracle for ``write_prefill``: same mapping (``block_table[t // bs]``, column
+    ``t % bs``), but per block instead of one advanced-index write, so comparing the whole
+    pools pins the bytes, not just the gathered view.
+    """
+    k, v = k.to(pool.dtype), v.to(pool.dtype)
+    written, length = 0, k.shape[0]
+    while written < length:
+        position = start + written
+        block_id = block_table[position // pool.block_size]
+        offset = position % pool.block_size
+        n = min(pool.block_size - offset, length - written)
+        pool.keys[layer][block_id, offset : offset + n] = k[written : written + n]
+        pool.values[layer][block_id, offset : offset + n] = v[written : written + n]
+        written += n
+
+
+def _kv_engine_layout(length: int, seed: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(length, H, D)`` non-contiguous views, the layout ``PagedWriteSink`` hands in."""
+    gen = torch.Generator().manual_seed(seed)
+    k = torch.randn(1, N_KV_HEAD, length, HEAD_DIM, generator=gen)[0].permute(1, 0, 2)
+    v = torch.randn(1, N_KV_HEAD, length, HEAD_DIM, generator=gen)[0].permute(1, 0, 2)
+    assert not k.is_contiguous() and not v.is_contiguous()
+    return k, v
+
+
 def _config() -> MiniLLMConfig:
     return MiniLLMConfig(vocab_size=64, max_position_embeddings=128, n_embd=32, n_head=N_HEAD,
                          n_kv_head=N_KV_HEAD, n_layer=N_LAYER, dropout=0.0, bias=False)
@@ -114,6 +143,92 @@ def test_token_offsets_cross_the_block_boundary():
         assert torch.equal(pool.values[layer][2, 15], v[0])
         assert torch.equal(pool.values[layer][6, 0], v[1])
         assert torch.equal(pool.values[layer][6, 1], v[2])
+
+
+def test_prefill_slot_mapping_matches_per_block_reference():
+    """One advanced-index write per layer == the per-block loop, including shuffled tables."""
+    pool = _pool(n_blocks=8, block_size=BS16)
+    reference = _pool(n_blocks=8, block_size=BS16)
+    block_table = [7, 0, 5, 3]  # shuffled and non-contiguous: spelling order is not block order
+    length = BS16 + 5  # crosses a block boundary and leaves a partial second block
+    k, v = _kv_engine_layout(length, seed=71)
+
+    for layer in range(N_LAYER):
+        pool.write_prefill(layer, block_table, 0, k, v)
+        _reference_prefill(reference, layer, block_table, 0, k, v)
+
+    for layer in range(N_LAYER):
+        assert torch.equal(pool.keys[layer], reference.keys[layer])
+        assert torch.equal(pool.values[layer], reference.values[layer])
+
+    # The formula itself, independent of the oracle: token 15 -> (7, 15), 16 -> (0, 0),
+    # 20 -> (0, 4). Blocks 5 and 3 are allocated but never reached by these 21 tokens.
+    assert torch.equal(pool.keys[0][7, 15], k[15])
+    assert torch.equal(pool.keys[0][0, 0], k[16])
+    assert torch.equal(pool.keys[0][0, 4], k[20])
+    assert torch.equal(pool.values[0][7, 15], v[15])
+    assert torch.equal(pool.values[0][0, 0], v[16])
+    assert torch.equal(pool.values[0][0, 4], v[20])
+    assert not bool(pool.keys[0][5].any()) and not bool(pool.keys[0][3].any())
+
+
+def test_prefill_with_a_nonzero_start_appends_after_the_first_chunk():
+    """Chunk 2 starts mid-block and crosses a boundary: the combined sequence is intact."""
+    pool = _pool(n_blocks=8, block_size=BS16)
+    reference = _pool(n_blocks=8, block_size=BS16)
+    block_table = [6, 2, 4]
+    first, second = 21, 14  # 21 ends at block 1, column 4; chunk 2 crosses into block 4
+    k1, v1 = _kv(first, seed=72)
+    k2, v2 = _kv(second, seed=73)
+
+    for layer in range(N_LAYER):
+        pool.write_prefill(layer, block_table, 0, k1, v1)
+        pool.write_prefill(layer, block_table, first, k2, v2)
+        _reference_prefill(reference, layer, block_table, 0, k1, v1)
+        _reference_prefill(reference, layer, block_table, first, k2, v2)
+
+    total = first + second
+    combined_k, combined_v = torch.cat([k1, k2]), torch.cat([v1, v2])
+    for layer in range(N_LAYER):
+        got_k, got_v = pool.gather(layer, [block_table], [total], 64)
+        assert torch.equal(_split(got_k, total), combined_k.unsqueeze(0))
+        assert torch.equal(_split(got_v, total), combined_v.unsqueeze(0))
+        assert torch.equal(pool.keys[layer], reference.keys[layer])
+        assert torch.equal(pool.values[layer], reference.values[layer])
+
+
+def test_prefill_slot_cache_is_reused_per_prefill_and_invalidated_between():
+    """One-entry cache: shared by every layer, rebuilt when the slot-map key changes."""
+    pool = _pool(n_blocks=8, block_size=BS16)
+    length = BS16 + 2
+    k_a, v_a = _kv(length, seed=74)
+    k_b, v_b = _kv(length, seed=75)
+    table_a, table_b = [5, 1], [2, 6]
+
+    pool.write_prefill(0, table_a, 0, k_a, v_a)
+    slots_a = pool._prefill_slots
+    pool.write_prefill(1, table_a, 0, k_a, v_a)
+    assert pool._prefill_slots is slots_a, "a second layer rebuilt the same slot map"
+
+    pool.write_prefill(0, table_b, 0, k_b, v_b)
+    assert pool._prefill_slots is not slots_a, "a new block table reused the old slot ids"
+    slots_b = pool._prefill_slots
+    pool.write_prefill(1, table_b, 0, k_b, v_b)
+    assert pool._prefill_slots is slots_b
+
+    for layer in range(N_LAYER):
+        assert torch.equal(pool.keys[layer][5, :BS16], k_a[:BS16])
+        assert torch.equal(pool.keys[layer][1, :2], k_a[BS16:])
+        assert torch.equal(pool.values[layer][5, :BS16], v_a[:BS16])
+        assert torch.equal(pool.values[layer][1, :2], v_a[BS16:])
+        assert torch.equal(pool.keys[layer][2, :BS16], k_b[:BS16])
+        assert torch.equal(pool.keys[layer][6, :2], k_b[BS16:])
+        assert torch.equal(pool.values[layer][2, :BS16], v_b[:BS16])
+        assert torch.equal(pool.values[layer][6, :2], v_b[BS16:])
+        # No block from the previous key was touched by the new write (or vice versa).
+        for block_id in (0, 3, 4, 7):
+            assert not bool(pool.keys[layer][block_id].any())
+            assert not bool(pool.values[layer][block_id].any())
 
 
 # ------------------------------------------------------------------ stale blocks, zero block

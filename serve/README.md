@@ -1,9 +1,9 @@
 # serve/ · 推理引擎
 
 > 状态：`engine.py` / `scheduler.py` 已完成 W3（连续批 C1 **2.01×**，C2/C3 pass）；
-> W4 的 paged 池已跑完 5 个正式 run（C1 **3.111×**、C2 **0.55%**、C3 全等；
-> C4 **1.671×** 负结果，撤回吞吐），口径见 `docs/decisions.md` **D6**；
-> `state_pool.py`(W7) 待实现。本文件只固定模块边界，避免把调度/缓存逻辑塞回 `llm_utils/`。
+> W4 的 paged 池已跑完 5 个核心 run + E3 record-only（C1 **3.111×**、C2 **0.55%**、
+> C3 全等；C4 **1.671×** 负结果，撤回吞吐；E3 **0.975×**，不改变结论），
+> 口径见 `docs/decisions.md` **D6**；`state_pool.py`(W7) 待实现。本文件只固定模块边界，避免把调度/缓存逻辑塞回 `llm_utils/`。
 
 | 模块 | 职责 | 阶段 |
 |---|---|---|
@@ -40,8 +40,11 @@ W4 分页路径（`docs/decisions.md` D6）
 - **两套名字不共用**：W3 席位退出用 `freeze_seat`（冻结游标、保留预留，P-26 原语义），
   W4 请求退出用 `release_request`（归还块、幂等）。不要互相复用。
 
-**W4 实测（`W4-0001…0005`）**：同 1640 MiB 总预算、W3-like trace，seat **9** vs paged **28**
-（**3.111×**）；uniform-2048 负对照 1.00×（模拟）；internal frag **0.55%**；paged vs seat
-40/40 request `token_ids` 全等；B=8 decode step **21.32 → 35.63 ms（1.671× > 1.5×）**，
-因此**不报吞吐**，E3 未跑。同并发多付 workspace 52.42 MiB（+3.6%）。详见
-`ROADMAP.md` §5 W4、`results/W4/`、`docs/fig_w4_{capacity,memory,step}.png`。
+**W4 实测（`W4-0001…0006/0008`；0007 over-budget）**：同 1640 MiB 总预算、W3-like trace，
+seat **9** vs paged **28**（**3.111×**）；uniform-2048 负对照 1.00×（模拟）；internal frag
+**0.55%**；paged vs seat 40/40 request `token_ids` 全等；B=8 decode step
+**21.32 → 35.63 ms（1.671× > 1.5×）**，因此**不报吞吐**。E3 后按用户指示补跑、仅
+record-only：seat **333.44 tok/s** vs paged 800 **325.19 = 0.975×**（both saturated；
+0007 820 块峰值超预算，只作 R5 记录）；decode-only 1.103×，但 prefill 3.39× 把整体拉回略负。
+同并发多付 workspace 52.42 MiB（+3.6%）。详见 `ROADMAP.md` §5 W4、`results/W4/`、
+`docs/fig_w4_{capacity,memory,step}.png`。
