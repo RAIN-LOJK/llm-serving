@@ -1,0 +1,65 @@
+# W4-0008 · E3 系统吞吐（paged 臂，800 块；0007 的 R5 修正）：frozen 32 / poisson / B=64
+# W4 口径见 docs/decisions.md D6。
+# 运行：python -m bench.run --config configs/experiments/W4/0008-paged-saturate-800.toml
+#
+# 0007 用 820 块，动态峰值 36 活跃时 kv_total=1661.8 MiB > 1640（R5）；
+# 本 run 降到 800 块（1400 MiB KV），峰值 workspace 实测 226.8 → 1626.8，保持同预算。
+# 0007 保留为 over-budget record，不作为 E3 的同预算证据。
+#
+# 用途：plan §4.3/§4.4 的 E3 paged 臂（record-only）。800 块 = 1400 MiB；
+# 实测峰值 36 活跃 × lpad 1600 的 workspace 226.8 MiB → 合计 1626.8 MiB ≤ 1640。
+# 同 trace 跑 poisson，必须 saturated=true，否则 λ 加倍、两臂一起重跑。
+# 门禁：只记系统吞吐（同总预算，不是 D5 的调度器机制对比）；record-only。
+#
+# **0008 与 0006 必须是同一份 workload**：同 seed / rate / requests / budgets / prompts
+# （trace_sha256 必须相同）；两臂只差 [engine]。λ=30 是预注册初值，见 0006 文件头。
+
+schema = 1
+
+[exp]
+id = "W4-0008"
+stage = "W4"
+type = "scenario"
+slug = "paged-saturate-800"
+title = "E3 同预算系统吞吐（paged，800 块）：frozen 32 / poisson / B=64"
+hypothesis = ["paged_system_throughput_at_equal_budget_beats_seat"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "poisson"
+rate = 30.0                      # 与 0006 完全一致
+requests = 128
+budgets = [16, 32, 64, 128]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cuda"
+max_batch = 64                   # 调度上限，不是显存上限（D6）
+block_size = 16
+kv_blocks = 800                  # 800×1.75 = 1400 MiB；36 活跃 × lpad 1600 的 workspace ≈ 227 MiB → 1627 MiB ≤ 1640
+
+[baseline]
+run_id = "W4-0006"
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []
