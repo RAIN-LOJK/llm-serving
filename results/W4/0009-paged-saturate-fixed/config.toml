@@ -1,0 +1,67 @@
+# W4-0009 · E3′ 系统吞吐（paged，prefill slot-mapping 修复后，800 块）：frozen 32 / poisson / B=64
+# W4 口径见 docs/decisions.md D6。
+# 运行：python -m bench.run --config configs/experiments/W4/0009-paged-saturate-fixed.toml
+#
+# 背景：0008 是 pre-fix paged 记录（prefill 551.8 ms），0007 820 块峰值超预算（R5）。
+# 修复只改 `PagedPool.write_prefill`（slot mapping），seat 路径 KvSlab/SlabWriteSink 未变，
+# 所以直接对 0006 比较，不重跑 seat。探索性 E2 微基准：paged prefill 551.8 → 176.8 ms
+#（seat 163.0 ms，1.08×），40/40 token 与 0005 全等；该微基准是 dirty 的，不作为正式证据。
+#
+# 用途：plan §4.3/§4.4 的 E3 paged 臂（record-only）。800 块 = 1400 MiB；
+# 实测峰值 36 活跃 × lpad 1600 的 workspace 226.8 MiB → 合计 1626.8 MiB ≤ 1640。
+# 同 trace 跑 poisson，必须 saturated=true，否则 λ 加倍、两臂一起重跑。
+# 门禁：只记系统吞吐（同总预算，不是 D5 的调度器机制对比）；record-only。
+#
+# **0009 与 0006 必须是同一份 workload**：同 seed / rate / requests / budgets / prompts
+# （trace_sha256 必须相同）；两臂只差 [engine]。λ=30 是预注册初值，见 0006 文件头。
+
+schema = 1
+
+[exp]
+id = "W4-0009"
+stage = "W4"
+type = "scenario"
+slug = "paged-saturate-fixed"
+title = "E3′ 同预算系统吞吐（paged，prefill 修复后，800 块）：frozen 32 / poisson / B=64"
+hypothesis = ["paged_system_throughput_at_equal_budget_beats_seat"]
+supersedes = "W4-0008"
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "poisson"
+rate = 30.0                      # 与 0006 完全一致
+requests = 128
+budgets = [16, 32, 64, 128]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cuda"
+max_batch = 64                   # 调度上限，不是显存上限（D6）
+block_size = 16
+kv_blocks = 800                  # 800×1.75 = 1400 MiB；36 活跃 × lpad 1600 的 workspace ≈ 227 MiB → 1627 MiB ≤ 1640
+
+[baseline]
+run_id = "W4-0006"
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

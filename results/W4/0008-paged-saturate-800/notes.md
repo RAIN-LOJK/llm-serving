@@ -1,4 +1,4 @@
-# W4-0008 · E3 同预算系统吞吐（paged，800 块）：frozen 32 / poisson / B=64
+# W4-0008 · E3 同预算系统吞吐（paged，800 块，pre-fix；已被 0009 supersede）
 
 - 状态：`unreviewed`
 - 配置：`config.toml`（运行目录 `results/W4/0008-paged-saturate-800`）
@@ -8,10 +8,12 @@
 ## 假设与判据
 
 - `paged_system_throughput_at_equal_budget_beats_seat`
-- E3 的有效 paged 臂：`kv_blocks=800`（1400 MiB KV）、`max_batch=64`、与 `W4-0006`
-  同 trace / λ=30 / 128 请求；两臂都必须 `saturated=true`。
+- E3 的 **pre-fix** paged 臂：`kv_blocks=800`（1400 MiB KV）、`max_batch=64`、与
+  `W4-0006` 同 trace / λ=30 / 128 请求；两臂都必须 `saturated=true`。
 - 同预算门禁：峰值 `kv_total = kv_mb + workspace_mb ≤ 1640`（D6/R5）。
 - E3 是 **post-hoc record-only**（C4 失败后按用户指示补跑）；不改变 W4 的 C4 结论。
+- **prefill slot-mapping 修复后，本 run 由 `W4-0009` 取代**（0009 的 `supersedes` 指向本 run）；
+  0008 保留为“修复前”的对照记录，不再作为 post-fix 吞吐证据。
 
 ## 观察
 
@@ -30,7 +32,10 @@
 
 ## 结论（含“什么时候不划算”）
 
-- **E3 没有显示系统吞吐提升**：同预算、同 trace、两臂都饱和，paged **0.975×** seat。
+- **pre-fix E3 没有显示系统吞吐提升**：同预算、同 trace、两臂都饱和，paged **0.975×** seat。
+  这是 prefill per-block 拷贝（551.8 ms vs 163.0 ms）拖累的结果。
+- **post-fix `W4-0009` 是 1.074×**（358.18 vs 333.44 tok/s；prefill 修复到 23.0 ms/request）。
+  所以 0008 的 0.975× 是“修复前”的 before record，不是最终结论；最终 post-fix 结论看 0009。
 - decode-only 是 **1.103×**，说明 3.11× 容量确实在纯 decode 阶段兑现了一部分；
   但 prefill（`551.8 ms` vs `163.0 ms`，**3.39×**）和调度/排队把整体 `tok_s` 拉回到
   略低于 seat。**容量收益被 prefill + gather 成本吃掉。**

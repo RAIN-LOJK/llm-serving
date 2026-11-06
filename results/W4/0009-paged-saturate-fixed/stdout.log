@@ -1,0 +1,5 @@
+run_id: W4-0009
+status: completed
+device_class: measure-cuda
+rows: 1434 (errors: 0)
+summary: results/W4/0009-paged-saturate-fixed/summary.json
