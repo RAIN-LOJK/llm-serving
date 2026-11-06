@@ -1,0 +1,59 @@
+# W4-0006 · E3 吞吐基线（seat 臂，可选）：frozen 32 / poisson / B=9
+# W4 口径见 docs/decisions.md D6（plan 已在 W4 收口时删除）。
+# 运行：python -m bench.run --config configs/experiments/W4/0006-seat-saturate.toml
+#
+# 用途：plan §4.3/§4.4 的 E3 seat 臂（可选，record-only）。9 行 × 1664 = 1638 MiB；
+# 同 trace 下跑 poisson，两个臂都必须 saturated=true，否则 λ 加倍、两臂一起重跑。
+# 门禁：只记 tok_s（record-only）；W4 的结论不依赖它，时间紧可整对删掉。
+#
+# **0006 与 0007 必须是同一份 workload**：同 seed / rate / requests / budgets / prompts
+# （trace_sha256 必须相同）；两臂只差 [engine]（impl / max_batch）。trace_sha256 不含
+# max_batch，所以 9 vs 64 不影响配对哈希（D5）。
+# λ=30 是按 plan §4.3 的「1.25–1.5× paged capacity」取的**预注册初值**（预测 paged 约
+# 20–23 并发）；E1 出来后若不满 1.25×，两臂一起改 rate 并重跑，不能只改一臂。
+# 注：不复用 W3-0011 作基线（plan R8）。
+
+schema = 1
+
+[exp]
+id = "W4-0006"
+stage = "W4"
+type = "scenario"
+slug = "seat-saturate"
+title = "E3 同预算系统吞吐（seat，可选）：frozen 32 / poisson / B=9"
+hypothesis = ["paged_system_throughput_at_equal_budget_beats_seat"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "poisson"
+rate = 30.0                      # 预注册初值：由 E1/E2 的 paged capacity 复核
+requests = 128                   # 与 0007 完全一致
+budgets = [16, 32, 64, 128]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 9                    # 9 × 1664 = 1638 MiB（plan §4.3）
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []
