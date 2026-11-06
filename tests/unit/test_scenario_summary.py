@@ -176,6 +176,52 @@ def test_decomposed_is_false_when_a_component_is_missing():
     assert summary["consistency"]["decomposed_rate"] == 0.0
 
 
+def test_decomposition_uses_pack_wait_when_present():
+    """W4.5: ``ttft == queue + pack_wait + prefill`` on the packed arm.
+
+    The same row without ``pack_wait_ms`` must decompose by the W3 identity
+    ``ttft == queue + prefill``; the serial arm is the special case ``pack_wait = 0``.
+    """
+    packed = [
+        {
+            "row_kind": "request",
+            "ttft_ms": 30.0,
+            "queue_ms": 20.0,
+            "pack_wait_ms": 5.0,
+            "prefill_ms": 5.0,
+            "prefill_shared_ms": 5.0,
+            "prefill_group": 7,
+        }
+    ]
+    summary = aggregate(packed, [], [])
+    assert summary["latency"]["decomposed"] is True
+    assert summary["consistency"]["decomposed_rate"] == 1.0
+    assert summary["consistency"]["ttft_minus_queue_prefill_max_ms"] == 0.0
+    assert summary["latency"]["pack_wait_ms"]["p99"] == 5.0
+    assert summary["latency"]["prefill_shared_ms"]["p99"] == 5.0
+
+    # Without the field, the very same timestamps mean a serial row: the wait is 0.
+    serial = [dict(packed[0])]
+    serial[0].pop("pack_wait_ms")
+    serial[0].pop("prefill_shared_ms")
+    serial[0].pop("prefill_group")
+    serial[0]["ttft_ms"] = 25.0  # queue 20 + prefill 5
+    summary = aggregate(serial, [], [])
+    assert summary["latency"]["decomposed"] is True
+    assert summary["latency"]["pack_wait_ms"] == {"p50": 0.0, "p95": 0.0, "p99": 0.0}
+    assert summary["latency"]["prefill_shared_ms"] == {
+        "p50": None, "p95": None, "p99": None,
+    }
+
+
+def test_pack_wait_is_required_to_explain_a_packed_ttft():
+    """A 5 ms gap that is really pack_wait must not be judged against queue + prefill."""
+    rows = [{"row_kind": "request", "ttft_ms": 30.0, "queue_ms": 20.0, "prefill_ms": 5.0}]
+    summary = aggregate(rows, [], [])
+    assert summary["latency"]["decomposed"] is False
+    assert summary["consistency"]["ttft_minus_queue_prefill_max_ms"] == pytest.approx(5.0)
+
+
 def test_decomposed_boundary_is_exactly_99_percent():
     # 100 clean requests and one off by 5 ms: the rate is exactly 0.99, which still counts.
     clean = [
@@ -197,10 +243,29 @@ def test_steps_group_by_active_and_average():
     by_active = _summary()["steps"]["by_active"]
     assert [entry["active"] for entry in by_active] == [2, 4]
     two, four = by_active
+    # W4.5 fields are additive: these rows predate the packed-prefill scheduler, so both
+    # means stay None rather than reading as an invented zero.
     assert two == {"active": 2, "n": 2, "step_ms": 40.0, "prefill_ms": 10.0,
-                   "decode_event_ms": 30.0, "host_gap_ms": 0.0}
+                   "decode_event_ms": 30.0, "host_gap_ms": 0.0,
+                   "prefill_groups": None, "pack_wait_ms": None}
     assert four == {"active": 4, "n": 2, "step_ms": 52.5, "prefill_ms": 5.0,
-                    "decode_event_ms": 30.0, "host_gap_ms": 17.5}
+                    "decode_event_ms": 30.0, "host_gap_ms": 17.5,
+                    "prefill_groups": None, "pack_wait_ms": None}
+
+
+def test_steps_report_packed_group_means_when_present():
+    """W4.5 step fields are averaged per active bucket, not summed over the run."""
+    step_rows = [
+        {"row_kind": "step", "active": 8, "step_ms": 10.0, "prefill_ms": 4.0,
+         "decode_event_ms": 5.0, "host_gap_ms": 1.0,
+         "prefill_groups": 2, "pack_wait_ms": 3.0},
+        {"row_kind": "step", "active": 8, "step_ms": 12.0, "prefill_ms": 6.0,
+         "decode_event_ms": 5.0, "host_gap_ms": 1.0,
+         "prefill_groups": 4, "pack_wait_ms": 5.0},
+    ]
+    entry = aggregate([], step_rows, [])["steps"]["by_active"][0]
+    assert entry["prefill_groups"] == 3.0
+    assert entry["pack_wait_ms"] == 4.0
 
 
 def test_host_gap_is_derived_only_when_all_terms_exist():
@@ -369,7 +434,8 @@ def test_aggregate_returns_the_four_spec_blocks():
         "analytic_straggler_ratio", "peak_concurrency",
     }
     assert set(summary["latency"]) == {
-        "ttft_ms", "queue_ms", "prefill_ms", "queue_share_p99", "decomposed",
+        "ttft_ms", "queue_ms", "prefill_ms", "pack_wait_ms", "prefill_shared_ms",
+        "queue_share_p99", "decomposed",
     }
     assert set(summary["consistency"]) == {
         "decomposed_rate", "ttft_minus_queue_prefill_max_ms",

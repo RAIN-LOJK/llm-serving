@@ -56,21 +56,72 @@ def bucket_tokens(tokens: int) -> int:
     return -(-max(int(tokens), 1) // ROW_GRANULARITY) * ROW_GRANULARITY
 
 
+def _prefill_timings(
+    admitted: list[Request], step_groups: Any = None
+) -> tuple[float, int, float, float]:
+    """``(prefill_ms, groups, pack_wait_ms, prefill_shared_ms)`` for one admission pass.
+
+    A packed group pays its shared prefill **once**; summing per request would multiply
+    that time by the group size. When the base scheduler already kept a per-group ledger
+    (``_step_groups``: one entry per forward, including a failed one), that ledger is the
+    authoritative accounting. Otherwise each distinct ``prefill_group`` is counted once
+    from its ``(t_prefill_start, t_first)``. A serial admission pass carries no packed
+    group (every value is ``None``), so it is one group: ``prefill_groups`` is 0 or 1
+    there, while a packed step reports one per forward.
+
+    ``pack_wait_ms`` is per request (each request that waited for the shared prefill
+    contributes its own wait), matching the base scheduler's step row; only the shared
+    prefill is a group-level cost and is counted once.
+    """
+    groups = [
+        group
+        for group in (step_groups or [])
+        if isinstance(group, dict)
+        and group.get("start") is not None
+        and group.get("end") is not None
+    ]
+    if groups:
+        prefill_ms = sum(
+            (float(group["end"]) - float(group["start"])) * 1000.0 for group in groups
+        )
+        group_count = len(groups)
+    else:
+        grouped: dict[Any, list[Request]] = {}
+        for request in admitted:
+            grouped.setdefault(getattr(request, "prefill_group", None), []).append(request)
+
+        prefill_ms = 0.0
+        for members in grouped.values():
+            starts = [m.t_prefill_start for m in members if m.t_prefill_start is not None]
+            ends = [
+                (m.t_first if m.t_first is not None else m.t_finish) for m in members
+            ]
+            ends = [end for end in ends if end is not None]
+            if starts and ends:
+                prefill_ms += (max(ends) - min(starts)) * 1000.0
+        group_count = len(grouped)
+
+    pack_wait_ms = sum(
+        (m.t_prefill_start - m.t_admitted) * 1000.0
+        for m in admitted
+        if m.t_prefill_start is not None and m.t_admitted is not None
+    )
+    return prefill_ms, group_count, pack_wait_ms, prefill_ms
+
+
 class FillScheduler(Scheduler):
     """Admission + reservation only; no decode, no KV growth after prefill."""
 
     def step(self) -> dict:
         self._admitted_this_step = 0
         self._retired_this_step = 0
+        self._step_groups = []
         self._step_origin = self.now()
 
         admitted = self._admit()
-        prefill_ms = 0.0
-        for req in admitted:
-            started = req.t_prefill_start
-            ended = req.t_first if req.t_first is not None else req.t_finish
-            if started is not None and ended is not None:
-                prefill_ms += (ended - started) * 1000.0
+        prefill_ms, prefill_groups, pack_wait_ms, prefill_shared_ms = _prefill_timings(
+            admitted, getattr(self, "_step_groups", None)
+        )
 
         # The resident set is the capacity answer, so the pool's ledger must be read
         # *before* anything is released (after release, every block is free again).
@@ -106,6 +157,12 @@ class FillScheduler(Scheduler):
             "retired": self._retired_this_step,
             "step_ms": step_ms,
             "prefill_ms": prefill_ms,
+            # W4.5 step attribution (docs/w4.5-plan.md §4.4). A group is one packed
+            # prefill forward; a serial fill pass has no packed groups, so it reports
+            # one group (zero when nothing was admitted) and pack_wait ~0.
+            "prefill_groups": prefill_groups,
+            "pack_wait_ms": pack_wait_ms,
+            "prefill_shared_ms": prefill_shared_ms,
             # No decode happened; the key stays so ``bench/scenario.py``'s step
             # aggregation keeps the same shape as a scenario row.
             "decode_event_ms": 0.0,

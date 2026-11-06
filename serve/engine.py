@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 import torch
 
 from model import KVcache, KvSlab, MiniLLM, PagedKV, PagedPool
+from model.attention import DECODE_BACKEND
+from model.packed import PackedPrefill
 from model.paged import LPAD_GRANULARITY
 from serve.block_manager import BlockManager, FragStats
 
@@ -103,10 +105,14 @@ class PagedWriteSink:
     overwriting columns (chunked prefill would need a real ``past_len > 0`` container).
     """
 
-    def __init__(self, pool: PagedPool, block_table, length: int) -> None:
+    def __init__(self, pool: PagedPool, block_table, length: int, *, slots=None) -> None:
         self.pool = pool
         self.block_table = list(block_table)
         self.length = int(length)
+        # One slot map for every layer of this request. Without it, ``write_prefill``
+        # would rebuild the map per layer (28 rebuilds) and the packed group's sink list
+        # would evict every other request's map on each layer.
+        self.slots = slots
         self._written = [False] * pool.n_layer
 
     def past_len(self, layer: int | None = None) -> int:
@@ -125,10 +131,9 @@ class PagedWriteSink:
         expected = (1, self.pool.n_kv_head, self.length, self.pool.head_dim)
         if tuple(k.shape) != expected or tuple(v.shape) != expected:
             raise ValueError(f"set_kv needs {expected}, got {tuple(k.shape)} / {tuple(v.shape)}")
-        self.pool.write_prefill(
+        self.pool.write_prefill_slots(
             layer,
-            self.block_table,
-            0,
+            self.slots if self.slots is not None else self.pool.slot_ids(self.block_table, 0, self.length),
             k[0].permute(1, 0, 2),
             v[0].permute(1, 0, 2),
         )
@@ -144,13 +149,32 @@ class MiniLLMEngine:
     path is compared against; ``generate`` runs the slab path.
     """
 
-    def __init__(self, model, eos_token_id=None):
+    def __init__(
+        self,
+        model,
+        eos_token_id=None,
+        *,
+        prefill: str = "serial",
+        max_prefill_tokens: int = 8192,
+        decode: str = "auto",
+    ):
         self.model: MiniLLM = model.eval()
         self.eos_token_id = eos_token_id
         self.device = next(model.parameters()).device
         self.vocab_size = model.config.vocab_size
         self.max_position = model.config.max_position_embeddings
         self._use_cuda_events = self.device.type == "cuda"
+        if prefill not in {"serial", "packed"}:
+            raise ValueError(f"prefill must be 'serial' or 'packed', got {prefill!r}")
+        if int(max_prefill_tokens) < 1:
+            raise ValueError(f"max_prefill_tokens must be >= 1, got {max_prefill_tokens!r}")
+        if decode not in {"auto", "triton", "gather"}:
+            raise ValueError(f"decode must be auto/triton/gather, got {decode!r}")
+        self.prefill_mode = str(prefill)
+        self.max_prefill_tokens = int(max_prefill_tokens)
+        self._decode_preference = str(decode)
+        self._varlen_backend = None
+        self._paged_decode_impl = "gather"
         # Exactly one slab, reallocated when the bucket changes (W2-0005). A bucket cache
         # was measured to be pure cost under this protocol: prompts are grouped, so a new
         # bucket is built once and `warmup=3` already keeps that build out of the timed
@@ -447,6 +471,183 @@ class MiniLLMEngine:
         """
         return self.prefill(prompt_ids)
 
+    def _varlen(self):
+        """The packed-prefill backend for this device (explicit, never a fallback)."""
+        if self._varlen_backend is None:
+            from model.attention.varlen import backend_for
+
+            self._varlen_backend = backend_for(self.device)
+        return self._varlen_backend
+
+    def attn_backends(self) -> dict[str, str]:
+        """Actual attention backends of the open arms, for run provenance."""
+        prefill = self._varlen().name
+        triton_decode = (
+            self._decode_preference == "triton"
+            or (self._paged_pool is not None and self._paged_decode_impl == "triton")
+        )
+        decode = "paged-triton" if triton_decode else DECODE_BACKEND.name
+        return {"prefill": prefill, "decode": decode}
+
+    @torch.inference_mode()
+    def _packed_prefill(self, sinks, prompts: list[list[int]]) -> torch.Tensor:
+        """One varlen forward over ``prompts``; returns ``(n_seqs, vocab)`` last-token logits.
+
+        ``sinks`` are one-shot write sinks, one per prompt, each already pointing at its
+        destination. The container writes each layer's K/V through them and selects each
+        request's final token before ``lm_head``; the vocabulary projection is never
+        materialized for the packed token axis.
+        """
+        if len(sinks) != len(prompts) or not prompts:
+            raise ValueError("packed prefill needs one sink and one prompt per request")
+        cu = [0]
+        positions: list[int] = []
+        tokens: list[int] = []
+        for prompt in prompts:
+            if not prompt:
+                raise ValueError("prompt_ids must not be empty")
+            cu.append(cu[-1] + len(prompt))
+            positions.extend(range(len(prompt)))
+            tokens.extend(prompt)
+        total = len(tokens)
+        if len(prompts) > 1 and total > self.max_prefill_tokens:
+            raise ValueError(
+                f"packed prefill group has {total} tokens, above max_prefill_tokens="
+                f"{self.max_prefill_tokens}; the scheduler must split the group "
+                "(a single over-budget prompt is allowed alone)"
+            )
+        packed = PackedPrefill(
+            cu_seqlens=cu,
+            positions=torch.tensor(positions, dtype=torch.long, device=self.device),
+            sinks=sinks,
+            backend=self._varlen(),
+        )
+        ids = torch.tensor(tokens, dtype=torch.long, device=self.device).view(1, -1)
+        logits, _ = self.model(ids, past_keys_values=packed, logits_to_keep=1)
+        return logits
+
+    @torch.inference_mode()
+    def prefill_group(self, requests: list[dict]) -> torch.Tensor:
+        """Prefill a FIFO group of whole prompts; returns ``(n, vocab)`` logits.
+
+        A request is ``{"id": int, "prompt_ids": list[int], "seat": int, "budget": int}``.
+        The seat arm writes each prompt's KV into its own ``KvSlab`` row; the paged arm
+        reserves each prompt's blocks and writes through its block table. Both arms run
+        the **same** packed varlen computation (only the sink differs), which is what
+        makes the serial-vs-packed A/B a scheduling comparison rather than a kernel
+        comparison. A failure rolls back every row/block in the group before re-raising;
+        the caller aborts the whole group because a single forward cannot attribute the
+        error to one request.
+        """
+        if not requests:
+            raise ValueError("prefill_group needs at least one request")
+        if self._paged_pool is not None:
+            return self._prefill_group_paged(requests)
+        return self._prefill_group_seat(requests)
+
+    def _prefill_group_seat(self, requests: list[dict]) -> torch.Tensor:
+        slab = self.slab
+        rows: list[tuple[int, int]] = []
+        seen: set[int] = set()
+        for spec in requests:
+            prompt = list(spec.get("prompt_ids") or [])
+            if not prompt:
+                raise ValueError("prompt_ids must not be empty")
+            if len(prompt) > self.max_position:
+                raise ValueError("prompt longer than max_position_embeddings")
+            seat = spec.get("seat")
+            if seat is None or not 0 <= int(seat) < slab.batch:
+                raise IndexError(f"seat {seat!r} outside the slab's batch of {slab.batch}")
+            seat = int(seat)
+            if seat in seen:
+                raise ValueError(f"two requests in one packed group share seat {seat}")
+            if len(prompt) > slab.max_len:
+                raise IndexError(
+                    f"prefill length {len(prompt)} exceeds the pool's max_len {slab.max_len}"
+                )
+            seen.add(seat)
+            rows.append((seat, len(prompt)))
+        sinks = [SlabWriteSink(slab, seat, length) for seat, length in rows]
+        try:
+            logits = self._packed_prefill(sinks, [list(spec["prompt_ids"]) for spec in requests])
+        except BaseException:
+            for seat, _ in rows:
+                slab.freeze(seat)
+            raise
+        for seat, length in rows:
+            slab.activate(seat, length)
+        return logits
+
+    def _prefill_group_paged(self, requests: list[dict]) -> torch.Tensor:
+        if self._paged_pool is None or self._blocks is None or self._paged_max_batch is None:
+            raise RuntimeError("open_paged_pool() must be called before prefill_group()")
+        pool = self._paged_pool
+        blocks = self._blocks
+        reserved: list[tuple[int, list[int], int, int, int]] = []
+        used_seats: set[int] = set()
+        try:
+            for spec in requests:
+                request_id = spec.get("id")
+                if request_id is None:
+                    request_id = -len(reserved) - 1
+                request_id = int(request_id)
+                if request_id in self._paged_state:
+                    raise ValueError(f"request {request_id} is already in the paged pool")
+                prompt = list(spec.get("prompt_ids") or [])
+                if not prompt:
+                    raise ValueError("prompt_ids must not be empty")
+                if len(prompt) > self.max_position:
+                    raise ValueError("prompt longer than max_position_embeddings")
+                budget = int(spec.get("budget") or 0)
+                seat_value = spec.get("seat")
+                if seat_value is None:
+                    occupied = {state["seat"] for state in self._paged_state.values()}
+                    occupied |= used_seats
+                    seat = next(
+                        (row for row in range(int(self._paged_max_batch)) if row not in occupied),
+                        None,
+                    )
+                    if seat is None:
+                        raise RuntimeError("no free seat id for the paged request")
+                else:
+                    seat = int(seat_value)
+                    if not 0 <= seat < int(self._paged_max_batch):
+                        raise IndexError(f"seat {seat} outside the paged pool's max_batch")
+                if seat in {state["seat"] for state in self._paged_state.values()}:
+                    raise ValueError(f"seat {seat} is already occupied by a paged request")
+                if seat in used_seats:
+                    raise ValueError(f"two requests in one packed group share seat {seat}")
+                used_seats.add(seat)
+                needed = blocks.blocks_for(len(prompt), budget)
+                table = blocks.reserve(needed)
+                if table is None:
+                    raise RuntimeError(
+                        f"cannot reserve {needed} blocks for request {request_id}: "
+                        f"{blocks.stats()['free']} free (can_admit should have refused it)"
+                    )
+                reserved.append((request_id, list(table), len(prompt), seat, budget))
+            slots = [pool.slot_ids(table, 0, length) for _, table, length, _, _ in reserved]
+            sinks = [
+                PagedWriteSink(pool, table, length, slots=slot)
+                for (_, table, length, _, _), slot in zip(reserved, slots)
+            ]
+            logits = self._packed_prefill(
+                sinks, [list(spec["prompt_ids"]) for spec in requests]
+            )
+        except BaseException:
+            for _, table, _, _, _ in reserved:
+                blocks.free(table)
+            raise
+        for request_id, table, length, seat, _ in reserved:
+            self._paged_state[request_id] = {
+                "block_table": list(table),
+                "prompt_len": length,
+                "length": length,
+                "seat": seat,
+            }
+        self._paged_cache_key = None
+        return logits
+
     @torch.inference_mode()
     def prefill_into_seat(self, row: int, prompt_ids: list[int]) -> torch.Tensor:
         """Prefill one prompt straight into pool row ``row``; returns ``(1, vocab)`` logits.
@@ -476,14 +677,13 @@ class MiniLLMEngine:
             )
 
         sink = SlabWriteSink(slab, row, length)
-        tokens = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
         try:
-            logits, _ = self.model(tokens, past_keys_values=sink, logits_to_keep=1)
+            logits = self._packed_prefill([sink], [list(prompt_ids)])
         except BaseException:
             slab.freeze(row)
             raise
         slab.activate(row, length)
-        return logits[:, -1, :]
+        return logits
 
     @torch.inference_mode()
     def activate_seat(self, slot: int, cache: KVcache, prompt_len: int) -> None:
@@ -555,6 +755,7 @@ class MiniLLMEngine:
         block_size: int,
         max_batch: int,
         max_position: int | None = None,
+        decode: str | None = None,
     ) -> PagedPool:
         """Allocate the paged KV pool and its block manager.
 
@@ -562,6 +763,12 @@ class MiniLLMEngine:
         wide) and also the gather workspace's row cap (``max_rows``). ``max_position`` is
         the run's position bound used for the RoPE table (``rope_len``); it defaults to the
         model's ``max_position_embeddings`` and is **not** ``n_blocks * block_size`` (P-34).
+
+        ``decode`` selects the paged decode container explicitly: ``"triton"`` (CUDA
+        block-table kernel), ``"gather"`` (W4's dense gather + ``hand_baddbmm`` oracle
+        path), or ``None`` to resolve the engine's ``decode`` preference. ``"auto"`` means
+        triton on CUDA and gather elsewhere; a CUDA-only kernel on CPU raises here rather
+        than being swapped silently.
         """
         if int(max_batch) < 1:
             raise ValueError(f"max_batch must be >= 1, got {max_batch}")
@@ -569,6 +776,17 @@ class MiniLLMEngine:
             raise ValueError(f"kv_blocks must be >= 1, got {kv_blocks}")
         if int(block_size) < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
+        preference = self._decode_preference if decode is None else str(decode)
+        if preference == "auto":
+            preference = "triton" if self.device.type == "cuda" else "gather"
+        if preference not in {"triton", "gather"}:
+            raise ValueError(f"paged decode must be 'triton', 'gather' or 'auto', got {preference!r}")
+        if preference == "triton" and self.device.type != "cuda":
+            raise ValueError(
+                "paged decode='triton' is the CUDA block-table kernel; this engine is on "
+                f"{self.device}. Select decode='gather' explicitly for CPU/MPS."
+            )
+        self._paged_decode_impl = preference
         max_position = int(self.max_position if max_position is None else max_position)
         self._paged_pool = PagedPool(
             self.model.config.n_layer,
@@ -629,6 +847,26 @@ class MiniLLMEngine:
             return False
         return needed <= self._blocks.stats()["free"]
 
+    def can_admit_group(self, requests: list[dict]) -> bool:
+        """Whether a whole packed group fits now; never changes state.
+
+        ``can_admit`` checks one request against the *current* free list. A packed group
+        reserves several requests back to back, so checking each head independently lets
+        the group over-commit the pool: the first members take blocks, the last one then
+        fails inside ``prefill_group`` and aborts requests that were legitimately
+        admissible on their own. This hook makes the whole group the admission unit,
+        matching the all-or-nothing reservation the engine performs.
+        """
+        if self._paged_pool is None or self._blocks is None:
+            return True
+        if len(self._paged_state) + len(requests) > int(self._paged_max_batch):
+            return False
+        needed = sum(
+            self._blocks.blocks_for(len(spec.get("prompt_ids") or []), int(spec.get("budget") or 0))
+            for spec in requests
+        )
+        return needed <= self._blocks.stats()["free"]
+
     @torch.inference_mode()
     def prefill_into_blocks(
         self,
@@ -678,10 +916,14 @@ class MiniLLMEngine:
             self._blocks.free(block_table)
             raise IndexError(f"seat {seat} outside the paged pool's max_batch")
 
-        sink = PagedWriteSink(self._paged_pool, block_table, length)
-        tokens = torch.tensor([prompt_ids], dtype=torch.long, device=self.device)
+        sink = PagedWriteSink(
+            self._paged_pool,
+            block_table,
+            length,
+            slots=self._paged_pool.slot_ids(block_table, 0, length),
+        )
         try:
-            logits, _ = self.model(tokens, past_keys_values=sink, logits_to_keep=1)
+            logits = self._packed_prefill([sink], [list(prompt_ids)])
         except BaseException:
             self._blocks.free(block_table)
             raise
@@ -692,7 +934,7 @@ class MiniLLMEngine:
             "seat": seat,
         }
         self._paged_cache_key = None
-        return logits[:, -1, :]
+        return logits
 
     def release_request(self, request_id: int) -> None:
         """Return every block of ``request_id`` to the free list; idempotent.
@@ -753,7 +995,8 @@ class MiniLLMEngine:
             [int(tokens[seat]) for seat in seats], dtype=torch.long, device=self.device
         ).view(-1, 1)
         # Step boundary for the gather account: every layer's ``PagedKV.get`` below adds
-        # one call, its host time and its shape-derived k+v traffic.
+        # one call, its host time and its shape-derived k+v traffic. In triton mode no
+        # gather runs, so the account is zero by construction.
         self._paged_pool.begin_step()
         start = time.perf_counter()
         event = self._new_event()
@@ -771,8 +1014,12 @@ class MiniLLMEngine:
             self._sync()
         dt_s = time.perf_counter() - start
         # Produced by the pool's own accumulator, never recomputed here: the same numbers
-        # the step's gather calls just measured (plan §5, appendix C).
-        self._paged_gather_stats = self._paged_pool.step_stats()
+        # the step's gather calls just measured (plan §5, appendix C). The triton path
+        # never calls gather, so its traffic is exactly zero.
+        self._paged_gather_stats = (
+            _empty_gather_stats() if self._paged_decode_impl == "triton"
+            else self._paged_pool.step_stats()
+        )
 
         for _, state in active:
             state["length"] += 1
@@ -810,10 +1057,16 @@ class MiniLLMEngine:
                 rope_len=int(self._paged_max_position),
                 seats=[state["seat"] for _, state in active],
                 n_head=self.model.config.n_head,
+                decode_impl=self._paged_decode_impl,
             )
             self._paged_cache = cache
             self._paged_cache_key = key
 
+        if self._paged_decode_impl == "triton":
+            # No mask/bias and no gather workspace: the container owns the kernel and
+            # reads the pool directly. ``build_mask`` still runs once inside the model
+            # forward, but it only refreshes the int32 seqlen vector.
+            return cache
         batch = int(cache.batch)
         lpad = self._paged_lpad([state["length"] for _, state in active])
         mask, bias = self._paged_mask_bias(lpad, batch)
@@ -891,16 +1144,18 @@ class MiniLLMEngine:
         different numbers and all are reported. ``frag_internal`` is the time-weighted C2
         metric; ``reservation_slack`` is the instantaneous upper-bound waste (reported, not
         judged). ``workspace_mb`` is every gather/mask buffer the paged arm allocates on top
-        of KV (a cost the seat arm does not pay). ``gather_ms`` / ``gather_read_mb`` /
+        of KV (a cost the seat arm does not pay); in triton mode there is no gather and no
+        mask/bias pair, so it is zero. ``gather_ms`` / ``gather_read_mb`` /
         ``gather_write_mb`` / ``gather_calls`` are the **last decode step's** gather
         account: host time summed over the step's per-layer ``gather`` calls and the
-        shape-derived k+v traffic (plan §5 / appendix C). Traffic, not occupancy; a step
-        that did not decode (fill) reports zeros.
+        shape-derived k+v traffic (plan §5 / appendix C). Traffic, not occupancy; the
+        triton path never gathers, so its traffic is exactly zero.
         """
         if self._paged_pool is None or self._blocks is None:
             raise RuntimeError("open_paged_pool() must be called before paged_stats()")
         block_size = self._paged_pool.block_size
         pool = self._paged_pool
+        triton = self._paged_decode_impl == "triton"
         per_token_bytes = 2 * pool.n_layer * pool.n_kv_head * pool.head_dim * pool.dtype.itemsize
         active = sorted(self._paged_state.items(), key=lambda item: item[1]["seat"])
         written_tokens = sum(state["length"] for _, state in active)
@@ -911,8 +1166,8 @@ class MiniLLMEngine:
             "kv_mb": pool.mb(),
             "kv_live_mb": written_tokens * per_token_bytes / 2**20,
             "kv_alloc_mb": reserved_tokens * per_token_bytes / 2**20,
-            "workspace_mb": pool.workspace_mb() + self._paged_buffer_mb(),
-            "gather_workspace_mb": pool.workspace_mb(),
+            "workspace_mb": 0.0 if triton else pool.workspace_mb() + self._paged_buffer_mb(),
+            "gather_workspace_mb": 0.0 if triton else pool.workspace_mb(),
             "active_rows": len(active),
             "blocks_in_use": in_use,
             "free_blocks": stats["free"],
@@ -922,6 +1177,7 @@ class MiniLLMEngine:
                 reserved_tokens, written_tokens
             ),
             "lpad": self._paged_last_lpad,
+            "decode_impl": self._paged_decode_impl,
         }
         # Appended, never replacing an existing key: the step row's gather account.
         result.update(self._paged_gather_stats)

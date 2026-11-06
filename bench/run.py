@@ -45,6 +45,7 @@ IMPLS = {"dummy", "hf", "minillm", "continuous", "paged", "hybrid"}
 TIMERS = {"auto", "perf_counter", "cuda_event"}
 RUN_ID_RE = re.compile(r"^(?P<stage>[A-Z]\d+)-(?P<seq>\d{4})$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigError(ValueError):
@@ -135,6 +136,42 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 "[engine].kv_blocks is required and must be an integer >= 1 when "
                 f"[engine].impl='paged' (got {kv_blocks!r})"
             )
+
+    # ---- W4.5 attention-path contract (docs/w4.5-plan.md §7) ----------
+    # These keys are additive: W0–W4 configs never write them, so their validation is
+    # unchanged. `prefill` is the temporary E3 control arm, not a production fallback;
+    # `packed` without a scheduler arm would silently do nothing (there is no batch to
+    # pack), and `decode="triton"` is a paged block-table kernel only.
+    prefill = engine.get("prefill", "serial")
+    if prefill not in {"serial", "packed"}:
+        errors.append(
+            f"[engine].prefill must be 'serial' or 'packed' (got {prefill!r})"
+        )
+    max_prefill_tokens = engine.get("max_prefill_tokens", 8192)
+    if (
+        not isinstance(max_prefill_tokens, int)
+        or isinstance(max_prefill_tokens, bool)
+        or max_prefill_tokens < 1
+    ):
+        errors.append(
+            "[engine].max_prefill_tokens must be a positive int "
+            f"(got {max_prefill_tokens!r})"
+        )
+    decode = engine.get("decode", "auto")
+    if decode not in {"auto", "triton", "gather"}:
+        errors.append(
+            f"[engine].decode must be 'auto', 'triton', or 'gather' (got {decode!r})"
+        )
+    if prefill == "packed" and engine.get("impl") not in {"continuous", "paged"}:
+        errors.append(
+            "[engine].prefill='packed' requires [engine].impl='continuous' or 'paged' "
+            "(a per-request arm has no scheduler to pack)"
+        )
+    if decode == "triton" and engine.get("impl") != "paged":
+        errors.append(
+            "[engine].decode='triton' requires [engine].impl='paged' "
+            "(only the block-table pool has a paged decode kernel)"
+        )
 
     workload = cfg.get("workload") or {}
     if not isinstance(workload, dict):
@@ -286,6 +323,12 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append("[accept].mode must be 'record_only' or 'threshold'")
     if accept.get("mode") == "threshold" and not accept.get("criteria"):
         errors.append("[accept].criteria is required when mode='threshold'")
+    # W4.5 E0: an optional golden directory. It is not required to exist at validation
+    # time (a run may be planned before the fixture is checked out), but a non-string
+    # value would be silently ignored, so it is refused.
+    golden = accept.get("golden")
+    if golden is not None and not isinstance(golden, str):
+        errors.append("[accept].golden must be a path string")
 
     return errors
 
@@ -659,6 +702,13 @@ def _scenario_execute(
                         metrics_file.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
                     metrics_file.flush()
                     rows.extend(request_rows + step_rows)
+                # W4.5: a paged engine may resolve ``decode="auto"`` when its pool opens,
+                # which is after the manifest was first written. Re-read the adapter now
+                # so the recorded kernel is the one that actually ran.
+                if "decode" in (manifest.get("scheduler") or {}):
+                    resolved = getattr(engine, "decode_impl", None)
+                    if resolved is not None:
+                        manifest["scheduler"]["decode"] = str(resolved)
             finally:
                 engine.close()
 
@@ -671,30 +721,38 @@ def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
     """``manifest["scheduler"]``: the arm's concurrency unit, policy and pool shape.
 
     The paged arm's unit is a block table, not a seat row; it also records the block
-    geometry so a reader can turn ``kv_blocks``/``block_size`` into a budget. The seat
-    arm keeps exactly the W3 keys and values (P-28) except for the additive ``fill_only``.
+    geometry so a reader can turn ``kv_blocks``/``block_size`` into a budget. W4.5 adds
+    ``prefill``/``max_prefill_tokens`` to both arms and the resolved ``decode`` kernel to
+    the paged arm; no existing key is renamed. ``fill_only`` stays additive.
     """
     impl = str(getattr(engine, "impl", ""))
     entry: dict[str, Any] = {
         "policy": engine.policy,
         "max_batch": int(engine.max_batch),
+        # W4.5: the temporary serial/packed control arm and its packing budget. Both are
+        # recorded even on the serial default so a paired E3 arm cannot be inferred from
+        # a missing key. Existing keys keep their names (`prefill` was "per_sequence").
+        "prefill": str(getattr(engine, "prefill_mode", "serial")),
+        "max_prefill_tokens": int(getattr(engine, "max_prefill_tokens", 8192)),
     }
     if impl == "paged":
         entry.update(
             {
                 "seats": "paged_blocks",
-                "prefill": "per_sequence",
                 "block_size": int(getattr(engine, "block_size", 0)),
                 "kv_blocks": int(getattr(engine, "kv_blocks", 0)),
                 "free_rows": "not_applicable",
+                # The resolved kernel, not the config's "auto":
+                # ``PagedEngine.decode_impl`` asks the loaded engine and falls back to
+                # "gather" when the engine predates the knob.
+                "decode": str(getattr(engine, "decode_impl", "gather")),
             }
         )
     else:
-        # Same keys, same order, same values as W3.
+        # Same keys, same order as W3 except the additive W4.5 prefill fields above.
         entry.update(
             {
                 "seats": "one_kvslab_one_row_each",
-                "prefill": "per_sequence",
                 "free_rows": "masked_in_forward",
             }
         )
@@ -959,6 +1017,159 @@ def _execute(
     return rows
 
 
+def _first_repeat_request_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Request rows of the first measured repeat only.
+
+    Warmup rows are never written to ``rows``; the repeats that are written start at 0,
+    but taking ``min`` keeps this robust to a future ``--limit``/resume path. A row
+    without a ``repeat`` field (a historical single-shot row) is treated as the first
+    repeat rather than dropped, so old runs still produce a token map.
+    """
+    request_rows = [row for row in rows if row.get("row_kind", "request") == "request"]
+    repeats = [
+        int(row["repeat"])
+        for row in request_rows
+        if isinstance(row.get("repeat"), (int, float))
+        and not isinstance(row.get("repeat"), bool)
+    ]
+    first = min(repeats) if repeats else None
+    if first is None:
+        return request_rows
+    return [
+        row
+        for row in request_rows
+        if row.get("repeat") is None or int(row["repeat"]) == first
+    ]
+
+
+def _tokens_block(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """``{prompt_id: token_sha256}`` for the first repeat, sorted by prompt id.
+
+    This is the paged-vs-seat token-match evidence (C3/W4.5): a digest is comparable
+    across arms without shipping token ids in the summary. A request row without a
+    prompt id (synthetic workloads) is not representable and is skipped.
+    """
+    tokens: dict[str, Any] = {}
+    for row in _first_repeat_request_rows(rows):
+        prompt_id = row.get("prompt_id")
+        if prompt_id is None:
+            continue
+        tokens[str(prompt_id)] = row.get("token_sha256")
+    return {key: tokens[key] for key in sorted(tokens)}
+
+
+def _golden_block(
+    cfg: dict[str, Any], rows: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Compare the first repeat's token ids with a golden fixture (W4.5 E0).
+
+    The fixture format is the one ``scripts/check_paged_golden.py`` reads:
+    ``meta.json`` (``prompts[].id``) + ``tensors.npz`` (``greedy_ids``). Comparison is
+    an exact token prefix over ``min(len(expected), len(actual))`` -- a short budget
+    compares the prefix and says so, never a tolerance. A missing/unreadable fixture is
+    recorded as ``{"error": ...}``; it is never silently skipped or regenerated.
+    """
+    configured = (cfg.get("accept") or {}).get("golden")
+    if not configured:
+        return None
+    text = str(configured).strip()
+    if not text:
+        return None
+    path = Path(text)
+    if not path.is_absolute():
+        path = ROOT / path
+
+    try:
+        import numpy as np
+
+        meta = json.loads((path / "meta.json").read_text(encoding="utf-8"))
+        with np.load(path / "tensors.npz") as arrays:
+            greedy = np.asarray(arrays["greedy_ids"])
+        prompts = meta.get("prompts") or []
+        if len(prompts) != len(greedy):
+            raise ValueError(
+                f"golden has {len(prompts)} prompt entries but {len(greedy)} greedy rows"
+            )
+        expected = {
+            str(entry["id"]): [int(value) for value in greedy[index]]
+            for index, entry in enumerate(prompts)
+        }
+    except Exception as exc:  # noqa: BLE001 - a broken fixture must not fail the run
+        return {"path": str(path), "error": f"{type(exc).__name__}: {exc}"}
+
+    matched_ids = 0
+    total_ids = 0
+    matched_prompts = 0
+    total_prompts = 0
+    details: list[dict[str, Any]] = []
+    for row in _first_repeat_request_rows(rows):
+        prompt_id = row.get("prompt_id")
+        if prompt_id is None:
+            continue
+        key = str(prompt_id)
+        if key not in expected:
+            details.append(
+                {"prompt_id": key, "status": "skipped", "reason": "not in golden"}
+            )
+            continue
+        want = expected[key]
+        actual = [int(value) for value in (row.get("token_ids") or [])]
+        total_prompts += 1
+        if not actual:
+            # The run produced no ids at all: a hard gate must fail, not pass vacuously.
+            total_ids += len(want)
+            details.append(
+                {
+                    "prompt_id": key,
+                    "status": "missing",
+                    "reason": "no token_ids",
+                    "expected_n": len(want),
+                    "actual_n": 0,
+                }
+            )
+            continue
+
+        width = min(len(want), len(actual))
+        equal = sum(1 for i in range(width) if want[i] == actual[i])
+        matched_ids += equal
+        total_ids += width
+        first_mismatch = next(
+            (i for i in range(width) if want[i] != actual[i]), None
+        )
+        matched = first_mismatch is None
+        if matched:
+            matched_prompts += 1
+        details.append(
+            {
+                "prompt_id": key,
+                "status": "pass" if matched else "fail",
+                "compared": width,
+                "expected_n": len(want),
+                "actual_n": len(actual),
+                "matched_ids": equal,
+                **(
+                    {}
+                    if matched
+                    else {
+                        "first_mismatch": first_mismatch,
+                        "expected_id": want[first_mismatch],
+                        "actual_id": actual[first_mismatch],
+                    }
+                ),
+            }
+        )
+
+    return {
+        "path": str(path),
+        "match_rate": (matched_ids / total_ids) if total_ids else 0.0,
+        "matched_ids": matched_ids,
+        "total_ids": total_ids,
+        "matched_prompts": matched_prompts,
+        "total_prompts": total_prompts,
+        "details": details,
+    }
+
+
 def _summary(
     cfg: dict[str, Any],
     manifest: dict[str, Any],
@@ -1039,20 +1250,37 @@ def _summary(
         warnings.append("no paired baseline run_id; mechanism conclusions are incomplete")
 
     attn = (manifest.get("engine") or {}).get("attn") or {}
+    engine_meta = manifest.get("engine") or {}
+    scheduler_meta = manifest.get("scheduler") or {}
     protocol = {
         "warmup": _warmup_count(cfg),
         "repeats": _repeat_count(cfg),
         "timer": (cfg.get("measure") or {}).get("timer", "auto"),
         "max_new_tokens": int((cfg.get("workload") or {}).get("max_new_tokens", 0)),
         "prompt_sha256": (manifest.get("prompt") or {}).get("sha256"),
-        "dtype": (manifest.get("engine") or {}).get("dtype"),
+        "dtype": engine_meta.get("dtype"),
         "device_class": manifest.get("device_class"),
         # Constant provenance of the frozen attention policy (D4): prefill "sdpa",
         # decode "hand_baddbmm" for this engine. Absent for the HF/dummy arms, which
         # is why the pairing check treats "both None" as equal (bench/thresholds.py).
         "attn_prefill": attn.get("prefill"),
         "attn_decode": attn.get("decode"),
+        # W4.5: the control arm and packing budget. `attn_prefill`/`attn_decode` keep
+        # their source above; these are the scheduler's knobs, recorded even when the
+        # run is a per-request arm (where prefill packing is not used) so a pairing can
+        # never infer the mode from a missing key.
+        "prefill_mode": scheduler_meta.get("prefill", engine_meta.get("prefill", "serial")),
+        "max_prefill_tokens": scheduler_meta.get(
+            "max_prefill_tokens", int(engine_meta.get("max_prefill_tokens", 8192))
+        ),
     }
+    if (
+        str(engine_meta.get("impl") or "") == "paged"
+        or scheduler_meta.get("seats") == "paged_blocks"
+    ):
+        protocol["decode"] = scheduler_meta.get(
+            "decode", engine_meta.get("decode", "auto")
+        )
     scenario_blocks = _scenario_blocks(rows, manifest, trace_rows, request_rows, step_rows)
     if scenario_blocks is not None:
         protocol.update(scenario_blocks["protocol"])
@@ -1070,6 +1298,14 @@ def _summary(
         warnings.append(f"baseline {baseline_id} has no summary.json under {out_root}; ratio criteria stay pending")
     baseline_info = {"run_id": baseline_id or None, "found": baseline_summary is not None}
 
+    # W4.5 evidence blocks. `tokens` is the paged-vs-seat token-match source; `golden` is
+    # only present when `[accept].golden` names a fixture (and records `error` if that
+    # fixture cannot be read, so the evaluator can stay pending instead of passing).
+    tokens = _tokens_block(rows)
+    golden = _golden_block(cfg, rows)
+    if golden is not None and golden.get("error"):
+        warnings.append(f"golden comparison unavailable: {golden['error']}")
+
     if accept.get("mode", "record_only") == "record_only":
         acceptance = [{"name": "record_only", "status": "recorded"}]
     else:
@@ -1079,6 +1315,8 @@ def _summary(
             "stability": stability,
             "by_prompt": by_prompt,
             "protocol": protocol,
+            "tokens": tokens,
+            "golden": golden,
         }
         if scenario_blocks is not None:
             evaluated.update(
@@ -1116,9 +1354,12 @@ def _summary(
         "baseline": baseline_info,
         "warnings": warnings,
         "acceptance": acceptance,
+        "tokens": tokens,
         "key_metric": {"name": key_name, "value": key_value},
         "protocol": protocol,
     }
+    if golden is not None:
+        result["golden"] = golden
     if scenario_blocks is not None:
         # D5 blocks, plus the tok/s key metric a scenario index row should show.
         result.update(

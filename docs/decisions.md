@@ -343,6 +343,110 @@
 
 ---
 
+## D7 · W4.5 注意力路径 v2：packed prefill + block-table decode 的口径
+
+- **日期**：2026-11-06
+- **状态**：proposed（口径已按 dry run 校准；正式 run 前由用户确认后转 accepted）
+- **取代/关系**：
+  - **部分取代 D4**：W4.5 的 seat/paged 两臂 prefill 改为 packed varlen（FA2 on CUDA /
+    SDPA-per-segment on CPU），paged decode 改为 Triton block-table kernel；D4 的
+    「prefill=逐序列 SDPA / decode=hand_baddbmm+slab」只保留给 W2/W3/W4 的历史 run 与
+    seat 臂的 decode。**W2/W3/W4 的结果不因本决策改写**，但用新 commit 复跑旧配置会走新
+    路径，不能与历史数字直接配对。
+  - **反转 D6 的一条边界**：D6 写「W4 不做 flash-attn/paged-attention kernel」；W4.5 正是
+    这个 kernel 阶段。D6 的预算/容量/碎片/配对口径**不变**，只有注意力条款被本决策取代。
+  - **扩展 D5 的 TTFT 分解**：串行臂仍满足 `ttft == queue + prefill`；packed 臂改为
+    `ttft == queue + pack_wait + prefill_shared`。W3/W4 的 request/step row 语义不变。
+- **背景**：W4 的 paged 臂在 decode 前把块表 gather 成 `(B, H_kv, lpad, D)`，再走
+  `hand_baddbmm`。gather 的读写流量与 `lpad` 桶宽是分页的代价，也把 decode 实验和
+  prefill 的逐请求 SDPA 混在一起。W4.5 要把 attention 路径本身换成
+  「整 prompt 打包的 varlen prefill + 直接读块表的 decode」，因此必须先冻结：打包/准入
+  策略、TTFT 的归属、控制臂、C3 的适用范围，以及哪些数字可以跨臂比较。
+
+- **证据（dry run，dirty，仅用于校准；正式证据须干净树重跑）**：
+  - G1 `scripts/bench_prefill_pack.py --spike fa2`：B=2/4/8 的 packed/serial
+    `prefill_ms` = 1.93× / 3.47× / 3.98×；token ids 全等；`max|Δ|` = 0.30 / 0.44 / 0.50
+    （bf16，Qwen3 logits 的 |max|≈28，属于 kernel 归约顺序差异，不是接线错）。
+  - G2 `scripts/bench_decode_kernel.py --spike triton`：0.6B anchor（B=8, L=1664, D=128）
+    单次 kernel p50 0.089 ms；对 dense oracle 的 bf16 `max|Δ|` = 2.44e-4。
+  - `W45-0001`：packed + Triton，s01 64 token，golden **64/64**（match_rate=1.0）。
+  - `W45-0002/0003`：E1 容量 **9 vs 28 = 3.111×**；`kv_total = 1601.97 ≤ 1640`。
+  - `W45-0004/0005`：E2 `step_ms` paged/seat = **1.097×**（active=8，27.293 / 24.888 ms）；
+    8/8 first-repeat prompt token hash 全等；frag 0.0055。
+  - `W45-0006/0007`：E3 TTFT p99 **3.491×**（208.02 / 59.59 ms），p50 **0.558×**
+    （58.24 / 104.37 ms）。
+  - `W45-0008/0009`：E4 seat **327.37 tok/s**、paged **590.04 tok/s**（1.80×），两臂
+    `saturated=true`，paged `kv_total=1400`；paged/seat 的逐请求 token 一致率
+    **75.8%（31/128 不同）**、token 级 **78.9%**，见下面 C3 条款，**不作为门禁**。
+  - 同组对照（两臂相同 packed group、相同 prompt/预算、128 步）：seat vs paged gather
+    **8/8 全等**；seat vs paged Triton 3/8 prompt 翻转，首个翻转的 top-2 margin 为
+    0.0 / 0.0625 / 0.0，单步 kernel 差 2.44e-4。翻转发生在 bf16 的 near-tie 上，
+    不是块表/位置/页掩码错误。
+
+- **判据（引用 `configs/thresholds.toml` 的 `[W45.paged]`，本决策不复制数值）**：
+
+  | # | 判据 | 口径 | 失败线 |
+  |---|---|---|---|
+  | G1 | FA2 varlen 可用 | 与 serial 比 token ids 全等、`max\|Δ\|` 在容差内、B≥4 有收益 | 不过则不开 W4.5 |
+  | G2 | Triton decode 可用 | 单步 vs dense oracle：无 NaN，argmax 全等，bf16 `max\|Δ\| ≤2e-2`；B=8/L=1664 `step_ms` ≤1.15× seat | 不过则只做 packed prefill（W4.5a） |
+  | E0 | 数值门 | `W45-0001` golden 64/64；packed vs serial token 全等 | 不过不跑性能 |
+  | E1 | 容量不变 | 9/28、3.111×、`kv_total ≤1640` | 查 allocator，不改预算 |
+  | E2 | decode 代价 | `step_ms` paged/seat ≤1.15×（目标 ≤1.0×）；E2 同组 token 全等；gather 流量 0 | 调 kernel / 退回 W4.5a |
+  | E3 | packed prefill | TTFT p99 改善 ≥1.15×；p50 ≤1.10× | 查打包策略；不过则只做 decode |
+  | E4 | 端到端 | 两臂 saturated；paged tok/s ≥ seat；`kv_total ≤1640`；无错误 | 查 kernel/prefill/峰值，不调参 |
+
+- **决定**：
+
+  | 项 | 定义 |
+  |---|---|
+  | **prefill 路径** | packed whole-prompt varlen：`q/k/v` 为 `[total_tokens, H, D]`，`cu_seqlens` 按请求切段；CUDA 用 `flash_attn_varlen_func`（fp16/bf16），CPU/MPS 用逐段 SDPA reference。**不使用** `block_table` 读 paged cache，因此不触发 FA2 的 256 page 约束。 |
+  | **packing** | step 开始按 FIFO 取已到达请求，填到 `max_prefill_tokens`（默认 8192）或 `max_batch`；不等待填满、不跳队；队头单独放不下时自己成组；一个 prompt 不拆（无 chunk）；不与 decode 混一个 forward。 |
+  | **KV 写入** | 每层 K/V 通过 per-request sink 写 seat 行（`SlabWriteSink`）或 paged 块（`PagedWriteSink` + 预计算 slot map）；两臂共用同一 varlen 计算，只差写入目标。 |
+  | **logits / 首 token** | 每组只取每个请求的最后一个 token（`last_token_index`）过 `lm_head`；一次批量 greedy argmax；同组 `t_first` 同一时间戳。 |
+  | **decode 路径** | paged：Triton `paged_decode` 直接读 `(n_blocks, bs, H_kv, D)` 池 + int32 block table + int32 seqlen，无 gather/lpad/zero block/causal mask；seat：`hand_baddbmm` 不变。paged 在 CUDA 上不允许自动回退 gather。 |
+  | **TTFT 归属** | `queue_ms = t_admitted − t_arrival`；`pack_wait_ms = t_prefill_start − t_admitted`；`prefill_shared_ms = t_first − t_prefill_start`。串行臂 `t_admitted == t_prefill_start`，退化为 `ttft == queue + prefill`。step 的 `prefill_ms` 是**组耗时之和**，不是逐请求相加。 |
+  | **step/request row** | 新增 `prefill_group`、`pack_wait_ms`、`prefill_shared_ms`、`prefill_groups`、`prefill_ids_per_group`；旧字段不改名。`host_gap_ms = step_ms − decode_event_ms − prefill_ms`。 |
+  | **计时** | 沿用 D5：墙钟 `perf_counter`，单步 GPU `cuda_event`；报 p50/p95/p99/max，不报单一均值。 |
+  | **C3 数值** | 精确 token 一致只在两种同组场景判：① `W45-0001` golden 64/64；② E2（closed、同 prompt 集、同 packed group 组成）8/8 first-repeat prompt hash、W4 口径 40/40 row。**E4 开放负载的 paged vs seat token 一致率只作诊断**：两臂 group 组成不同（B=9 vs B=64），且 Triton 与 hand 的 bf16 归约不同，near-tie 翻转不是接线错误；不设 0.999 门禁。 |
+  | **单步 kernel 容差** | bf16：`max|Δ| ≤ 2e-2`、argmax 全等、无 NaN/Inf；fp32：`≤1e-4`。packed vs serial 的 logits 容差按 dry run 记为 `max|Δ| ≤ 1.0`（Qwen3 bf16 的 |logit|≈28），**不用于替代 token 门禁**。 |
+  | **控制臂** | `[engine].prefill="serial"` 只在 W4.5 实验期存在，写入 provenance；它不是生产回退。`[engine].decode="gather"` 只作 oracle/对照；`auto` 按 device 解析（CUDA→triton，其他→gather），不按可用性回退。 |
+  | **阈值** | `[W45.paged]` 于 2026-11-06 dry run 后冻结：`decode_step_ratio_max=1.15`（目标 1.0）、`packed_prefill_ttft_p99_speedup_min=1.15`、`p50_ratio_max=1.10`、`capacity_speedup_min=1.50`、`fragmentation_max=0.05`、`golden_token_match_min=1.0`、`paged_vs_seat_token_match_min=0.999`（**只用于 E2**）。`decode_step_ratio_max` 取两臂最大公共、prefill 占比 ≤10% 的 active bucket，不取全 bucket 中位数。 |
+
+- **后果**：
+  1. **D4 的注意力条款被部分取代**：W4.5 的 seat prefill 也不再是逐请求 SDPA，而是
+     `SdpaVarlen` 的单段（CPU）或 FA2 varlen（CUDA）。用新 commit 复跑 W2/W3/W4 配置会
+     改变 `attn_prefill` provenance 与数值路径，不能再与历史 run 做 mechanism 配对。
+  2. **D6 的容量/碎片口径继续有效**：E1 的 9/28、`kv_total` 与 E2 的 internal frag 仍是
+     C1/C2 的证据；本决策只改 attention kernel。
+  3. **E4 的 token 一致率不是正确性门禁**：跨调度器/跨 kernel 的 greedy id 在 bf16
+     near-tie 上会翻转；正确性由 E0 golden、E2 同组全等与单步 kernel 容差承担。报告必须
+     同时给出一致率和首个翻转的 top-2 margin，不能只报一个百分比。
+  4. **`decode="gather"` 是 oracle**：paged 生产路径在 CUDA 上必须走 Triton；`auto` 只按
+     device 解析，不因 Triton 缺失而静默切 gather（缺失时构造/调用直接 `RuntimeError`）。
+  5. **阶段结束删除**：`[engine].prefill` 开关与 serial 生产分支；`PagedPool.gather`、
+     `lpad`、`zero_block`、`mask-bias`、`gather_*` 记账从生产路径移到
+     `tests/reference/`（oracle 保留）。`max_prefill_tokens` 保留。删除前先 `grep` 确认
+     没有生产引用，并跑完整快速门禁。
+  6. **新坑（收口时编号，候选 P-40…P-45）**：
+     - P-40 packed 的 TTFT 是共享时间，p50 可能变差、p99 可能变好；只报均值会掩盖；
+     - P-41 FA2 的 256 page 约束只在 `block_table` 路径触发，varlen prefill 不受影响，
+       但一旦加 prefix cache 就会重新适用；
+     - P-42 Triton decode 的最后页必须按 `seqlen` mask，block table 必须 int32，不能依赖
+       零块；
+     - P-43 static 臂也从 packed prefill 受益，continuous/static 比值会被稀释；
+     - P-44 超 `max_prefill_tokens` 的队头单独成组，不是 chunked prefill；
+     - P-45 跨 kernel/跨调度器的 greedy token 全等不是良定义判据，near-tie 会翻转。
+
+- **复盘点**：
+  - 正式 E4 两臂是否都 `saturated=true`；paged tok/s 是否 ≥ seat；`kv_total ≤1640`；
+  - E2 的 1.097× 是否稳定在 1.15× 以内；若 >1.15×，先加 split-K/瓦片，不调阈值；
+  - E4 的 token 一致率与首个翻转 margin 是否与 dry run 同量级；若出现 early-token
+    大面积翻转（不是 near-tie），按 kernel bug 查，不引用吞吐；
+  - E4b（可选）continuous/static 比值是否被 packed 稀释；
+  - 收口时删除 `docs/w4.5-plan.md`，本决策、PITFALLS、ROADMAP、`results/W45/` 保留。
+
+---
+
 ## 模板
 
 ```markdown

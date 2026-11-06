@@ -5,6 +5,7 @@ from transformers import PreTrainedModel
 
 from model.config import MiniLLMConfig
 from model.layers import RMSNorm, TransformerBlock, rope_cos_sin
+from model.packed import as_packed_prefill
 from model.slab import as_decode_container
 
 
@@ -65,6 +66,44 @@ class MiniLLM(PreTrainedModel):
     def forward(self, tokens, targets=None, attention_mask=None, past_keys_values=None, logits_to_keep=None):
         B, T = tokens.shape
         x = self.token_embedding(tokens)
+
+        # W4.5 packed whole-prompt prefill: B == 1, every request on the token axis,
+        # and each row's RoPE position is request-local. The varlen kernel sees
+        # ``cu_seqlens`` from the container, so a token can never attend across a
+        # request boundary. Only each request's final token reaches ``lm_head`` --
+        # a full [total_tokens, vocab] projection is 8192 x 151936, which is pure
+        # bandwidth for tokens whose logits nobody reads.
+        packed = as_packed_prefill(past_keys_values)
+        if packed is not None:
+            if targets is not None:
+                raise ValueError("the packed-prefill path is inference-only; targets cannot feed a loss")
+            if attention_mask is not None:
+                raise ValueError(
+                    "the packed-prefill path carries its own per-request boundaries "
+                    "(cu_seqlens); a padded-batch attention_mask is not part of it"
+                )
+            if B != 1 or T != packed.total_tokens:
+                raise ValueError(
+                    f"the packed-prefill path needs one token axis of {packed.total_tokens} "
+                    f"tokens (B=1), got {(B, T)}"
+                )
+            cos, sin = self._rope_rows(packed.positions, packed.rope_len)
+            # ``_rope_rows`` returns (T, 1, D/2) for the slab path, where the leading
+            # axis is the batch row. Packed prefill has one batch row and a per-token
+            # position axis, so the (T, D/2) form is what ``apply_rotary_emb``
+            # broadcasts over (1, T, H, D) -- the (T, 1, D/2) form would align T
+            # against B and produce a (T, T, ...) tensor.
+            cos, sin = cos.squeeze(1), sin.squeeze(1)
+            for idx, layer in enumerate(self.layers):
+                x = layer(x, None, idx, past_keys_values, cos, sin)
+            x = self.norm(x)
+            if logits_to_keep is not None:
+                if int(logits_to_keep) != 1:
+                    raise ValueError(
+                        "packed prefill returns one row per request; logits_to_keep must be 1"
+                    )
+                x = x[0, packed.last_token_index]
+            return self.lm_head(x), None
 
         # Explicit protocol dispatch (``model.slab.as_decode_container``): a ``KvSlab`` and
         # W4's ``PagedKV`` both carry ``decode_container = True`` and take the decode path;

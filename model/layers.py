@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from typing import Optional
 from model.attention import DECODE_BACKEND, PREFILL_BACKEND
 from model.config import MiniLLMConfig
+from model.packed import as_packed_prefill
 from model.slab import as_decode_container
 
 
@@ -142,6 +143,7 @@ class Attention(nn.Module):
         # recognised by its explicit protocol flag (see ``model.slab``), not by class, so
         # ``PagedKV`` takes the same path and a plain ``KVcache`` keeps the growing-cache one.
         decode = as_decode_container(past_keys_values)
+        packed = as_packed_prefill(past_keys_values)
         past_len = 0 if (decode is not None or past_keys_values is None) else past_keys_values.past_len(idx)
 
         # 1. Q/K/V 投影并 reshape 为多头形状
@@ -155,9 +157,31 @@ class Attention(nn.Module):
                     "the KvSlab path needs per-row cos/sin from the model (rows sit at "
                     "different positions); do not call the layer directly with a slab"
                 )
+            if packed is not None:
+                raise ValueError(
+                    "the packed-prefill path needs per-token cos/sin from the model "
+                    "(each request has its own position axis); do not call the layer "
+                    "directly with a PackedPrefill"
+                )
             cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
+
+        # 2a. Packed whole-prompt prefill (W4.5): one token axis, one varlen call,
+        # no cross-request attention. The container slices the packed K/V and writes
+        # each request through its own sink, so the layer never builds a padded
+        # ``(B, T_max)`` batch and never grows a ``KVcache``.
+        if packed is not None:
+            if B != 1:
+                raise ValueError(
+                    "the packed-prefill path is one token axis (B == 1); put every "
+                    "request's tokens on that axis and pass cu_seqlens, do not pad"
+                )
+            packed.write(idx, k, v)
+            y = packed.attend(q, k, v)
+            # ``attend`` returns the packed (B, T, H, D) layout, unlike the dense
+            # backends' (B, H, T, D): no transpose here.
+            return self.resid_dropout(self.o_proj(y.reshape(B, T, self.n_head * self.head_dim)))
 
         # 2b. Fixed-slab decode: write this token into the layer's buffer and attend over
         # the whole buffer with the slab's in-place mask, so there is no per-step ``cat``
@@ -169,6 +193,16 @@ class Attention(nn.Module):
                     "and hands over with KvSlab.fill_from()"
                 )
             decode.write(idx, k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
+            if getattr(decode, "kernel_decode", False):
+                # W4.5: the paged container owns a block-table kernel that reads the
+                # pool directly. There is no dense gather and no bias to pass; the
+                # container applies each row's seqlen itself.
+                y = decode.attend(
+                    idx,
+                    q.transpose(1, 2),
+                    dropout_p=self.attn_dropout.p if self.training else 0.0,
+                )
+                return self.resid_dropout(self.o_proj(y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)))
             k_all, v_all = decode.get(idx)
             # The mask is identical for every layer, so the container already turned it into
             # the additive bias once at the step boundary (``build_mask``). Passing ``bias=``

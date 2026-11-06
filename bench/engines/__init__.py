@@ -66,6 +66,9 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
         # `name="dummy"` selects the deterministic stand-in used by the smoke config.
         # `policy` lives in `[scheduler]` (a top-level table), not `[engine]`, so the
         # runner passes it in through `engine_cfg["_policy"]` after config validation.
+        # W4.5: `prefill`/`max_prefill_tokens`/`decode` are recorded on the adapter and
+        # hand the scheduler's packing policy to the engine; defaults keep W3/W4 configs
+        # on the serial/gather path byte for byte.
         return ContinuousEngine(
             name=name,
             revision=model_cfg.get("revision"),
@@ -77,12 +80,17 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             vocab_size=int(engine_cfg.get("vocab_size", 1024)),
             seed=int(engine_cfg.get("seed", 0)),
             fill=bool(engine_cfg.get("_fill", False)),
+            prefill=str(engine_cfg.get("prefill", "serial")),
+            max_prefill_tokens=int(engine_cfg.get("max_prefill_tokens", 8192)),
+            decode=str(engine_cfg.get("decode", "auto")),
         )
     if impl == "paged":
         # W4 (D6): the same trace/scheduler path as `continuous`, with physical KV blocks
         # instead of one slab row per seat. `block_size` / `kv_blocks` come from `[engine]`
         # and are validated by the runner; `fill` selects the fill-only step loop
         # (`bench/engines/fill.py`) for `[exp].type = "fill"` capacity probes.
+        # W4.5: `decode="auto"` lets the loaded paged engine resolve the kernel
+        # (Triton block-table vs gather); the adapter records the resolved name.
         return PagedEngine(
             name=name,
             revision=model_cfg.get("revision"),
@@ -96,6 +104,9 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             block_size=int(engine_cfg.get("block_size", 16)),
             kv_blocks=int(engine_cfg.get("kv_blocks", 1)),
             fill=bool(engine_cfg.get("_fill", False)),
+            prefill=str(engine_cfg.get("prefill", "serial")),
+            max_prefill_tokens=int(engine_cfg.get("max_prefill_tokens", 8192)),
+            decode=str(engine_cfg.get("decode", "auto")),
         )
     if impl in _NOT_YET:
         raise NotImplementedError(f"engine impl={impl!r}: {_NOT_YET[impl]}")

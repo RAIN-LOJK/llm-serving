@@ -66,6 +66,9 @@ class ContinuousEngine:
         vocab_size: int = 1024,
         seed: int = 0,
         fill: bool = False,
+        prefill: str = "serial",
+        max_prefill_tokens: int = 8192,
+        decode: str = "auto",
     ) -> None:
         self.name = name
         self.revision = revision
@@ -77,6 +80,14 @@ class ContinuousEngine:
         # keeps every W3 scenario row on the original path (``run_fill_trace`` is only
         # entered when a fill config asks for it).
         self.fill = bool(fill)
+        # W4.5 control arm (docs/w4.5-plan.md §4.1/§5). ``prefill`` is the temporary
+        # serial/packed switch, ``max_prefill_tokens`` the per-step packing budget. The
+        # engine (serve/) consumes both; the adapter only records what was asked for so
+        # provenance cannot drift from the config. ``decode`` is recorded the same way;
+        # a seat arm resolves to ``gather`` because it has no block-table kernel.
+        self._prefill = str(prefill or "serial")
+        self._max_prefill_tokens = int(max_prefill_tokens)
+        self._decode = str(decode or "auto")
         self.model_path = model_path
         self._vocab = int(vocab_size)
         self._seed = int(seed)
@@ -97,6 +108,21 @@ class ContinuousEngine:
         return None if self._delegate is None else self._delegate.eos_token_id
 
     @property
+    def prefill_mode(self) -> str:
+        """``"serial"`` or ``"packed"`` -- the W4.5 control switch actually configured."""
+        return self._prefill
+
+    @property
+    def max_prefill_tokens(self) -> int:
+        """Packing budget per step; one prompt wider than this forms its own group."""
+        return self._max_prefill_tokens
+
+    @property
+    def decode_impl(self) -> str:
+        """Resolved decode kernel. The seat arm has no block table, so it gathers."""
+        return "gather"
+
+    @property
     def weights_mb(self) -> float:
         """Parameter footprint the memory account needs; the dummy arm has none."""
         return 0.0 if self._delegate is None else float(self._delegate.weights_mb)
@@ -114,6 +140,9 @@ class ContinuousEngine:
             dtype=self.dtype_name,
             device=self.device,
             model_path=self.model_path,
+            prefill=self.prefill_mode,
+            max_prefill_tokens=self.max_prefill_tokens,
+            decode=self._decode,
         )
         self._delegate.load()
         self.device = self._delegate.device
@@ -355,11 +384,35 @@ def _request_row(
     max_batch: int,
     repeat: int,
 ) -> dict[str, Any]:
-    """One request row in the field names ``bench/scenario.py`` reads (D5)."""
+    """One request row in the field names ``bench/scenario.py`` reads (D5).
+
+    W4.5 adds the packed-prefill attribution (``docs/w4.5-plan.md`` §4.4)::
+
+        queue_ms          = t_admitted - t_arrival       (W3: t_prefill_start - t_arrival)
+        pack_wait_ms      = t_prefill_start - t_admitted  (0.0 without a scheduler stamp)
+        prefill_shared_ms = t_first - t_prefill_start    (same as prefill_ms for a group of 1)
+        prefill_group     = the scheduler's packed group, or None on the serial arm
+
+    A serial arm stamps ``t_admitted == t_prefill_start``, so every W3/W4 field keeps its
+    value and ``pack_wait_ms`` is 0.0. ``prefill_ms``/``ttft_ms`` are unchanged: they are
+    the frozen D5 names, not a second copy of the new attribution.
+    """
     arrival = request.t_arrival
     first = request.t_first if request.t_first is not None else arrival
     finish = request.t_finish if request.t_finish is not None else first
-    prefill_start = request.t_prefill_start if request.t_prefill_start is not None else arrival
+    stamped_start = request.t_prefill_start
+    prefill_start = stamped_start if stamped_start is not None else arrival
+    admitted = getattr(request, "t_admitted", None)
+    # W3 had no admission stamp; falling back to ``t_prefill_start`` reproduces the old
+    # queue_ms exactly. W4.5's serial arm keeps them equal by construction.
+    queue_start = admitted if admitted is not None else prefill_start
+    # "0.0 if either timestamp is missing": a request that never started prefill has no
+    # pack wait to attribute, and must not invent a negative one from the arrival fallback.
+    pack_wait_ms = (
+        (stamped_start - admitted) * 1000.0
+        if stamped_start is not None and admitted is not None
+        else 0.0
+    )
     out_tokens = len(request.out)
     decode_s = max(0.0, finish - first)
     return {
@@ -376,8 +429,11 @@ def _request_row(
         # would put a 4-token and an 8-token decode in the same row (P-30).
         "context": len(request.prompt_ids) + out_tokens,
         "t_arrival_s": round(arrival, 6),
-        "queue_ms": (prefill_start - arrival) * 1000.0,
+        "queue_ms": (queue_start - arrival) * 1000.0,
+        "pack_wait_ms": pack_wait_ms,
         "prefill_ms": (first - prefill_start) * 1000.0,
+        "prefill_shared_ms": (first - prefill_start) * 1000.0,
+        "prefill_group": getattr(request, "prefill_group", None),
         "ttft_ms": (first - arrival) * 1000.0,
         "tpot_ms": (decode_s * 1000.0 / (out_tokens - 1)) if out_tokens > 1 else None,
         "e2e_ms": (finish - arrival) * 1000.0,

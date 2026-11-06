@@ -1,0 +1,53 @@
+# W45-0004 · E2 decode 代价基线（seat）：8 条最长 / B=8 / budget 128
+# W4.5 口径见 ROADMAP.md §5 W4.5。seat 走 hand_baddbmm + KvSlab（W2/W3 基线不动），
+# 与 W45-0005 同 workload、同 packed prefill（两臂只差 decode 内核与池）。
+# 运行：python -m bench.run --config configs/experiments/W45/0004-seat-b8-cost.toml
+#
+# 门禁：本臂只做基线；0005 的 decode_step_ratio_max ≤1.15（目标 ≤1.0）。
+
+schema = 1
+
+[exp]
+id = "W45-0004"
+stage = "W45"
+type = "scenario"
+slug = "seat-b8-cost"
+title = "E2 decode 基线（seat）：8 条最长 / B=8 / budget 128"
+hypothesis = ["seat_decode_step_cost_is_the_cost_baseline_for_paged_triton"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+prompt_ids = ["l01", "l02", "l03", "l04", "l05", "l06", "l07", "l08"]
+max_new_tokens = 128
+arrival = "closed"
+requests = 8
+budgets = [128]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 8
+prefill = "packed"
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

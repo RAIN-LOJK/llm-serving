@@ -15,6 +15,7 @@ A criterion name must exist as a key under some ``[Wx.y]`` section of the thresh
 
 from __future__ import annotations
 
+import math
 import statistics
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -22,6 +23,17 @@ from typing import Any, Mapping, Sequence
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _number(value: Any) -> float | None:
+    """Finite float, or ``None`` -- a missing/malformed measurement is never a zero."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 def load(path: str | Path | None = None) -> dict[str, Any]:
@@ -372,6 +384,244 @@ def _check_fragmentation(summary: Mapping[str, Any], limit: float) -> dict[str, 
     return entry
 
 
+# ------------------------------------------------------------------------ W4.5 (D7 draft)
+#
+# The packed-prefill and decode-kernel criteria are *paired*: they compare two arms of
+# this repo that ran the same trace on the same pool width. The attention backend is the
+# variable under test, so these checks deliberately use the common + scenario keys only;
+# ``mechanism=True`` would mark every honest serial-vs-packed pair invalid.
+
+
+def _scenario_pair_problems(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> list[str]:
+    return _protocol_mismatches(summary, baseline, mechanism=False) + _scenario_mismatches(
+        summary, baseline
+    )
+
+
+def _latency_percentile(
+    summary: Mapping[str, Any], metric: str, percentile: str
+) -> float | None:
+    block = (summary.get("latency") or {}).get(metric) or {}
+    return _number(block.get(percentile))
+
+
+def _check_decode_step_ratio(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any] | None, limit: float
+) -> dict[str, Any]:
+    """C4: step_ms ratio at the largest common decode-only ``active`` bucket.
+
+    D6 defines C4 as the steady-state decode cost at the run's full batch. Averaging every
+    common ``active`` bucket would charge the kernel for admission/prefill steps (W4.5's
+    ``prefill_groups`` marks them) and for ``active=0`` idle steps, so the largest common
+    bucket whose prefill fraction is negligible (<= 0.1 groups/step; E2's active=8 bucket
+    has 5 prefill steps among 625 decode steps) is selected. If neither arm reports
+    ``prefill_groups`` (historical rows) the largest common bucket is used as-is.
+
+    The decode backend is the variable under test, so the pair is checked on the common
+    workload/device keys and the scenario keys only (mechanism=False). Buckets are matched
+    on ``active``, never on position: a run with a different step count would otherwise
+    compare unrelated steps.
+    """
+    if not baseline:
+        return {"status": "pending", "reason": "no paired baseline summary"}
+    problems = _scenario_pair_problems(summary, baseline)
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "arms are not comparable; fix the pair before reading a decode ratio",
+        }
+
+    ours = (summary.get("steps") or {}).get("by_active") or []
+    theirs = (baseline.get("steps") or {}).get("by_active") or []
+    mine_by_active = {
+        entry.get("active"): entry for entry in ours if isinstance(entry, Mapping)
+    }
+    ref_by_active = {
+        entry.get("active"): entry for entry in theirs if isinstance(entry, Mapping)
+    }
+
+    def pure_decode(entry: Mapping[str, Any]) -> bool:
+        # ``prefill_groups`` is additive (W4.5); a historical row without it is a
+        # decode-only bucket by construction. A steady-state bucket may still contain a
+        # handful of prefill steps (one per repeat), so the test is "prefill is not a
+        # material fraction", not "exactly zero": E2's active=8 bucket has 5 prefill
+        # steps among 625 decode steps (mean 0.008).
+        groups = _number(entry.get("prefill_groups"))
+        return groups is None or groups <= 0.1
+
+    candidates = [
+        active
+        for active, entry in mine_by_active.items()
+        if active in ref_by_active
+        and pure_decode(entry)
+        and pure_decode(ref_by_active[active])
+        and _number(entry.get("step_ms")) is not None
+        and _number(ref_by_active[active].get("step_ms")) is not None
+    ]
+    if not candidates:
+        candidates = [
+            active
+            for active, entry in mine_by_active.items()
+            if active in ref_by_active
+            and _number(entry.get("step_ms")) is not None
+            and _number(ref_by_active[active].get("step_ms")) is not None
+        ]
+    if not candidates:
+        return {
+            "status": "pending",
+            "reason": "no active bucket has step_ms on both arms",
+        }
+    # C4 is the steady-state decode cost at the run's full batch. The earlier buckets
+    # include admissions/prefill steps (W4.5's ``prefill_groups`` marks them), and the
+    # active=0 bucket is not a decode step at all; averaging them in would charge the
+    # kernel for the scheduler's prefill.
+    active = max(candidates, key=lambda value: float(value))
+    mine = _number(mine_by_active[active].get("step_ms"))
+    reference = _number(ref_by_active[active].get("step_ms"))
+    if mine is None or reference is None or reference <= 0.0:
+        return {"status": "pending", "reason": "selected active bucket has no positive step_ms"}
+    ratio = mine / reference
+    return {
+        "status": "pass" if ratio <= limit else "fail",
+        "value": round(ratio, 3),
+        "target": limit,
+        "active_bucket": active,
+        "ours_step_ms": round(mine, 3),
+        "baseline_step_ms": round(reference, 3),
+        "reason": "steady-state decode step_ms at the largest common active bucket "
+        "(prefill steps excluded), ours / baseline; decode kernel is the variable",
+    }
+
+
+def _check_ttft_ratio(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    limit: float,
+    *,
+    percentile: str,
+    mode: str,
+) -> dict[str, Any]:
+    """E3: paired TTFT p99 speedup / p50 ratio between packed and serial prefill.
+
+    ``mode="speedup"`` is ``baseline / ours >= limit`` (the packed arm must be faster);
+    ``mode="ratio"`` is ``ours / baseline <= limit`` (the packed arm must not regress the
+    median). Both arms must share the trace and pool width; the prefill mode is the
+    variable and is therefore not part of the pairing keys.
+    """
+    if not baseline:
+        return {"status": "pending", "reason": "no paired baseline summary"}
+    problems = _scenario_pair_problems(summary, baseline)
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "arms are not comparable; fix the pair before reading a TTFT ratio",
+        }
+
+    metric = "ttft_ms"
+    mine = _latency_percentile(summary, metric, percentile)
+    reference = _latency_percentile(baseline, metric, percentile)
+    if mine is None or reference is None:
+        return {
+            "status": "pending",
+            "reason": f"latency.{metric}.{percentile} missing from an arm",
+        }
+    if reference <= 0.0 or mine <= 0.0:
+        return {
+            "status": "pending",
+            "reason": f"latency.{metric}.{percentile} is not positive",
+        }
+
+    if mode == "speedup":
+        value = reference / mine
+        passed = value >= limit
+        reason = "baseline / ours ttft p99 (packed prefill must be faster)"
+    else:
+        value = mine / reference
+        passed = value <= limit
+        reason = "ours / baseline ttft p50 (packed prefill must not regress the median)"
+    return {
+        "status": "pass" if passed else "fail",
+        "value": round(value, 3),
+        "target": limit,
+        f"ours_{percentile}": mine,
+        f"baseline_{percentile}": reference,
+        "reason": reason,
+    }
+
+
+def _check_golden_token_match(
+    summary: Mapping[str, Any], limit: float
+) -> dict[str, Any]:
+    """E0: the runner's golden comparison, judged by token-id match rate."""
+    block = summary.get("golden")
+    if not isinstance(block, Mapping):
+        return {"status": "pending", "reason": "summary has no golden comparison block"}
+    if block.get("error"):
+        return {
+            "status": "pending",
+            "reason": f"golden comparison unavailable: {block.get('error')}",
+        }
+    rate = _number(block.get("match_rate"))
+    if rate is None:
+        return {"status": "pending", "reason": "golden.match_rate missing"}
+    entry: dict[str, Any] = {
+        "status": "pass" if rate >= limit else "fail",
+        "value": round(rate, 4),
+        "target": limit,
+        "reason": "exact token-id prefix vs tests/golden (E0; never regenerated here)",
+    }
+    for key in ("matched_ids", "total_ids", "matched_prompts", "total_prompts", "path"):
+        if block.get(key) is not None:
+            entry[key] = block[key]
+    return entry
+
+
+def _check_paged_vs_seat_token_match(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    limit: float,
+) -> dict[str, Any]:
+    """C3: per-prompt ``token_sha256`` agreement on the ids both arms actually ran."""
+    if not baseline:
+        return {"status": "pending", "reason": "no paired baseline summary"}
+    ours = summary.get("tokens")
+    theirs = baseline.get("tokens")
+    if not isinstance(ours, Mapping) or not isinstance(theirs, Mapping):
+        return {"status": "pending", "reason": "summary.tokens missing from an arm"}
+    if not ours or not theirs:
+        return {"status": "pending", "reason": "summary.tokens is empty on an arm"}
+    common = sorted(set(ours) & set(theirs))
+    if not common:
+        return {
+            "status": "pending",
+            "reason": "the two token maps share no prompt ids",
+        }
+
+    mismatched = [
+        key
+        for key in common
+        if ours.get(key) is None
+        or theirs.get(key) is None
+        or ours.get(key) != theirs.get(key)
+    ]
+    rate = (len(common) - len(mismatched)) / len(common)
+    entry: dict[str, Any] = {
+        "status": "pass" if rate >= limit else "fail",
+        "value": round(rate, 4),
+        "target": limit,
+        "n_prompts": len(common),
+        "matched_prompts": len(common) - len(mismatched),
+        "reason": "per-prompt token_sha256 agreement on the shared prompt ids",
+    }
+    if mismatched:
+        entry["mismatched_prompt_ids"] = mismatched[:20]
+    return entry
+
+
 def _step_cost_ratio(summary: Mapping[str, Any]) -> float | None:
     """C4's B=8 matched-``lpad`` step ratio, when a summary happens to carry it."""
     for container in (summary, _block(summary, "steps")):
@@ -555,9 +805,40 @@ def evaluate(
                         "reason": "ttft == queue + prefill within 1 ms on >= 99% of requests",
                     }
                 )
-        elif name == "max_concurrency_speedup_min":
-            # W4 C1: fill-only allocator capacity under one total budget (D6). Paired on
-            # device/dtype/workload/budget, deliberately *not* on ``max_batch``.
+        elif name == "decode_step_ratio_max":
+            # W4.5 C4: same active buckets on both arms; the decode kernel is the
+            # variable, so a different attn_decode is expected, not a mismatch.
+            entry.update(_check_decode_step_ratio(summary, baseline, float(limit)))
+        elif name == "packed_prefill_ttft_p99_speedup_min":
+            entry.update(
+                _check_ttft_ratio(
+                    summary,
+                    baseline,
+                    float(limit),
+                    percentile="p99",
+                    mode="speedup",
+                )
+            )
+        elif name == "packed_prefill_ttft_p50_ratio_max":
+            entry.update(
+                _check_ttft_ratio(
+                    summary,
+                    baseline,
+                    float(limit),
+                    percentile="p50",
+                    mode="ratio",
+                )
+            )
+        elif name == "golden_token_match_min":
+            entry.update(_check_golden_token_match(summary, float(limit)))
+        elif name == "paged_vs_seat_token_match_min":
+            entry.update(
+                _check_paged_vs_seat_token_match(summary, baseline, float(limit))
+            )
+        elif name in {"max_concurrency_speedup_min", "capacity_speedup_min"}:
+            # W4 C1 / W4.5 alias: fill-only allocator capacity under one total budget
+            # (D6). Paired on device/dtype/workload/budget, deliberately *not* on
+            # ``max_batch``.
             entry.update(_check_capacity_speedup(summary, baseline, float(limit)))
         elif name == "fragmentation_max":
             # W4 C2: internal frag only; the direction is ``<= limit``.

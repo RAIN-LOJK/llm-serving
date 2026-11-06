@@ -179,26 +179,40 @@ def _latency(
     ttft = percentiles(_values(request_rows, "ttft_ms"))
     queue = percentiles(_values(request_rows, "queue_ms"))
     prefill = percentiles(_values(request_rows, "prefill_ms"))
+    # W4.5 (docs/w4.5-plan.md §4.4): a serial row has no pack_wait field, and its wait is
+    # structurally zero; anything else is used as written. ``prefill_shared_ms`` is the
+    # per-group shared prefill -- identical to ``prefill_ms`` for a serial request, but
+    # reported separately because a packed group pays it once for every member.
+    pack_wait_values: list[float | None] = []
+    for row in request_rows:
+        wait = _finite(row.get("pack_wait_ms"))
+        pack_wait_values.append(0.0 if wait is None else wait)
+    pack_wait = percentiles(pack_wait_values)
+    shared = percentiles(_values(request_rows, "prefill_shared_ms"))
 
     queue_share_p99 = None
     if queue["p99"] is not None and ttft["p99"] not in (None, 0.0):
         queue_share_p99 = queue["p99"] / ttft["p99"]
 
-    triples = [
-        (t, q, p)
-        for t, q, p in zip(
-            _values(request_rows, "ttft_ms"),
-            _values(request_rows, "queue_ms"),
-            _values(request_rows, "prefill_ms"),
-        )
-        if t is not None and q is not None and p is not None
+    # D5 froze ``ttft == queue + prefill``; W4.5 extends the identity by the packed
+    # arm's admission wait: ``ttft == queue + pack_wait + prefill``. A missing
+    # pack_wait is 0, so every W3/W4 row decomposes exactly as it did before.
+    rows = zip(
+        _values(request_rows, "ttft_ms"),
+        _values(request_rows, "queue_ms"),
+        pack_wait_values,
+        _values(request_rows, "prefill_ms"),
+    )
+    quadruples = [
+        (t, q, w, p) for t, q, w, p in rows if t is not None and q is not None and p is not None
     ]
     decomposed_rate = (
-        sum(abs(t - (q + p)) < DECOMPOSE_TOLERANCE_MS for t, q, p in triples) / len(triples)
-        if triples
+        sum(abs(t - (q + w + p)) < DECOMPOSE_TOLERANCE_MS for t, q, w, p in quadruples)
+        / len(quadruples)
+        if quadruples
         else 0.0
     )
-    max_error = max((abs(t - (q + p)) for t, q, p in triples), default=None)
+    max_error = max((abs(t - (q + w + p)) for t, q, w, p in quadruples), default=None)
     all_p99_present = all(block["p99"] is not None for block in (ttft, queue, prefill))
     decomposed = all_p99_present and decomposed_rate >= DECOMPOSE_MIN_RATE
 
@@ -206,6 +220,8 @@ def _latency(
         "ttft_ms": ttft,
         "queue_ms": queue,
         "prefill_ms": prefill,
+        "pack_wait_ms": pack_wait,
+        "prefill_shared_ms": shared,
         "queue_share_p99": queue_share_p99,
         "decomposed": decomposed,
     }
@@ -319,6 +335,10 @@ def _steps(step_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         step_ms = _values(rows, "step_ms")
         prefill_ms = _values(rows, "prefill_ms")
         decode_ms = _values(rows, "decode_event_ms")
+        # W4.5 step attribution. A W3/W4 row has none of these fields; the mean must stay
+        # ``None`` there rather than inventing a zero that would read as "no pack wait".
+        prefill_groups = _values(rows, "prefill_groups")
+        pack_wait_ms = _values(rows, "pack_wait_ms")
 
         host_gap_ms = []
         for row in rows:
@@ -340,6 +360,8 @@ def _steps(step_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "prefill_ms": _mean(prefill_ms),
                 "decode_event_ms": _mean(decode_ms),
                 "host_gap_ms": _mean(host_gap_ms),
+                "prefill_groups": _mean(prefill_groups),
+                "pack_wait_ms": _mean(pack_wait_ms),
             }
         )
     return {"by_active": by_active}

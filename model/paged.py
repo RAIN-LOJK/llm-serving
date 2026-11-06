@@ -223,6 +223,65 @@ class PagedPool:
         self._prefill_slots = slots
         return slots
 
+    def slot_ids(self, block_table, start: int, length: int) -> torch.Tensor:
+        """Public slot-map builder for a caller that writes the same map every layer.
+
+        A packed prefill writes one request per sink; building the map inside every
+        layer would rebuild it 28 times per request and thrash the one-entry cache.
+        The engine builds it once per request and hands it to ``write_prefill_slots``.
+        """
+        start = int(start)
+        length = int(length)
+        if start < 0:
+            raise ValueError(f"start must be >= 0, got {start}")
+        if length < 0:
+            raise ValueError(f"length must be >= 0, got {length}")
+        self._check_block_ids(
+            block_table, (start + length + self.block_size - 1) // self.block_size
+        )
+        return self._slot_ids(block_table, start, length)
+
+    def write_prefill_slots(
+        self, layer: int, slot_ids: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> None:
+        """Write precomputed flat slots (one advanced-index copy per K/V per layer).
+
+        ``slot_ids`` is the 1-D map returned by :meth:`slot_ids`; it is reused by every
+        layer of one prompt. All entries must be distinct and inside the pool.
+        """
+        layer = self._check_layer(layer)
+        if k.dim() != 3 or v.dim() != 3:
+            raise ValueError(
+                f"write_prefill_slots needs (length, n_kv_head, head_dim), got "
+                f"{tuple(k.shape)} / {tuple(v.shape)}"
+            )
+        if tuple(k.shape) != tuple(v.shape):
+            raise ValueError(f"k/v shapes differ: {tuple(k.shape)} vs {tuple(v.shape)}")
+        if k.shape[1:] != (self.n_kv_head, self.head_dim):
+            raise ValueError(
+                f"write_prefill_slots needs head shape {(self.n_kv_head, self.head_dim)}, "
+                f"got {tuple(k.shape[1:])}"
+            )
+        if slot_ids.dim() != 1 or slot_ids.numel() != k.shape[0]:
+            raise ValueError(
+                f"slot_ids must be 1-D with one entry per token ({k.shape[0]}), got "
+                f"{tuple(slot_ids.shape)}"
+            )
+        if slot_ids.dtype not in (torch.int32, torch.int64):
+            raise ValueError(f"slot_ids must be an integer tensor, got {slot_ids.dtype}")
+        if slot_ids.device != self.device:
+            raise ValueError(
+                f"slot_ids on {slot_ids.device} but the pool is on {self.device}"
+            )
+        # No device-side min/max scan here: this runs once per layer (28 times per
+        # request), and ``int(tensor.min())`` is a host sync that would serialize the
+        # whole prefill. The map comes from :meth:`slot_ids`, which validates the block
+        # table against the pool; a hand-built map is the caller's contract.
+        keys = self.keys[layer].view(-1, self.n_kv_head, self.head_dim)
+        values = self.values[layer].view(-1, self.n_kv_head, self.head_dim)
+        keys[slot_ids] = k.to(self.dtype)
+        values[slot_ids] = v.to(self.dtype)
+
     def write_prefill(
         self, layer: int, block_table, start: int, k: torch.Tensor, v: torch.Tensor
     ) -> None:
@@ -268,14 +327,8 @@ class PagedPool:
             return
         self._check_block_ids(block_table, (start + length + self.block_size - 1) // self.block_size)
 
-        k = k.to(self.dtype)
-        v = v.to(self.dtype)
         slot_ids = self._slot_ids(block_table, start, length)
-        # ``view`` (not ``reshape``) is safe: the pool is contiguous and never replaced.
-        keys = self.keys[layer].view(-1, self.n_kv_head, self.head_dim)
-        keys[slot_ids] = k
-        values = self.values[layer].view(-1, self.n_kv_head, self.head_dim)
-        values[slot_ids] = v
+        self.write_prefill_slots(layer, slot_ids, k, v)
 
     def write_token(
         self,
@@ -529,6 +582,7 @@ class PagedKV:
         seats=None,
         n_head: int | None = None,
         check_bounds: bool = True,
+        decode_impl: str = "gather",
     ) -> None:
         if not isinstance(pool, PagedPool):
             raise TypeError(f"PagedKV needs a PagedPool, got {type(pool).__name__}")
@@ -556,6 +610,16 @@ class PagedKV:
         self.dtype = pool.dtype
         self.device = pool.device
         self.check_bounds = bool(check_bounds)
+        decode_impl = str(decode_impl)
+        if decode_impl not in {"gather", "triton"}:
+            raise ValueError(f"decode_impl must be 'gather' or 'triton', got {decode_impl!r}")
+        if decode_impl == "triton" and self.device.type != "cuda":
+            raise ValueError(
+                "decode_impl='triton' is the CUDA block-table kernel; the pool is on "
+                f"{self.device}. Use 'gather' on CPU/MPS, explicitly."
+            )
+        self.decode_impl = decode_impl
+        self.kernel_decode = decode_impl == "triton"
 
         self.block_tables = [list(bt) for bt in block_tables]
         self.seats = list(range(n_rows)) if seats is None else list(seats)
@@ -587,6 +651,26 @@ class PagedKV:
         self._host_pos = list(lengths)
         self._host_valid = list(lengths)
         self._host_active = [True] * n_rows
+
+        # Triton block-table decode owns two small device tensors for the whole batch:
+        # the padded int32 block table (one row per request, zero-padded past the
+        # request's own blocks) and the int32 seqlen vector the kernel masks against.
+        # They are built once per container and updated in place; ``build_mask`` sets
+        # ``seqlen = pos + next_token`` without a host round trip.
+        self._block_table_tensor: torch.Tensor | None = None
+        self._seqlen: torch.Tensor | None = None
+        if self.kernel_decode:
+            max_blocks = max((len(table) for table in self.block_tables), default=1)
+            table = torch.zeros(
+                (n_rows, max_blocks), dtype=torch.int32, device=self.device
+            )
+            for row, block_table in enumerate(self.block_tables):
+                if block_table:
+                    table[row, : len(block_table)] = torch.tensor(
+                        block_table, dtype=torch.int32, device=self.device
+                    )
+            self._block_table_tensor = table
+            self._seqlen = torch.zeros(n_rows, dtype=torch.int32, device=self.device)
 
         # Per-step mask/bias buffers: ONE pair for the current ``lpad`` bucket, refreshed in
         # place. Switching buckets releases the old pair (the engine may also install its
@@ -625,6 +709,11 @@ class PagedKV:
         ``serve/engine.py`` allocates one pair per run and hands the current step's views in
         here, so the container does not pay a second pair of buffers.
         """
+        if self.kernel_decode:
+            raise RuntimeError(
+                "decode_impl='triton' owns no mask/bias buffers: the block-table kernel "
+                "masks the last page by seqlen. Do not call set_buffers() on it."
+            )
         if tuple(mask.shape) != (self.batch, 1, 1, lpad):
             raise ValueError(f"mask must be {(self.batch, 1, 1, lpad)}, got {tuple(mask.shape)}")
         if bias.shape[-1] != lpad or bias.shape[0] < self.batch * self.n_kv_head:
@@ -636,13 +725,19 @@ class PagedKV:
         self._buffers[lpad] = (mask, bias)
 
     # ---------------------------------------------------------------- step hooks
-    def build_mask(self, *, next_token: bool = False) -> torch.Tensor:
+    def build_mask(self, *, next_token: bool = False) -> torch.Tensor | None:
         """Step boundary: choose ``lpad`` and refresh the mask/bias for it.
 
         ``lpad = bucket(max(valid) + next_token, 64)``; it is the gather column count, the
         mask width and the bias width for this step, and is always >= the longest row.
         ``next_token=True`` is the decode convention: the column about to be written is
         already allowed.
+
+        In ``decode_impl="triton"`` mode there is no gather and no mask/bias: the kernel
+        reads each row's block table directly and masks only the last page by ``seqlen``.
+        The step boundary still updates ``seqlen`` (``pos + next_token``), and ``lpad``
+        stays available as the gather-mode-equivalent width for reporting. Returning
+        ``None`` tells the layer that the container owns the attention call.
         """
         counts = [length + int(next_token) for length in self._host_valid]
         longest = max(counts)
@@ -654,6 +749,14 @@ class PagedKV:
         # ``lpad`` may exceed ``max_len`` (it is a bucket of what the rows need, and the
         # padded columns are masked); it is not the RoPE table length (P-34).
         lpad = _bucket(longest, self.bucket)
+        self.lpad = lpad
+        self._step_written = False
+        if self.kernel_decode:
+            self._seqlen.copy_((self.pos + int(next_token)).to(torch.int32))
+            self.mask = None
+            self.bias = None
+            return None
+
         buffer_mask, buffer_bias = self._buffers_for(lpad)
         # Views of the batch's rows only: the backing pair may be padded up to the row
         # granularity, but mask/bias must describe exactly this batch.
@@ -702,10 +805,50 @@ class PagedKV:
         """
         if self.lpad is None:
             raise RuntimeError("PagedKV.get() before build_mask(): the step has no lpad yet")
+        if self.kernel_decode:
+            raise RuntimeError(
+                "decode_impl='triton' reads the pool directly; there is no gathered "
+                "dense tensor to return. Call attend() instead of get()."
+            )
         if not self._step_written:
             raise RuntimeError("PagedKV.get() before write(): this step has no token yet")
         lengths = [position + 1 for position in self._host_pos]
         return self.pool.gather(layer, self.block_tables, lengths, self.lpad)
+
+    def attend(
+        self, layer: int, q: torch.Tensor, *, dropout_p: float = 0.0
+    ) -> torch.Tensor:
+        """Block-table decode for one layer; ``q`` is ``(B, H, 1, D)``, output the same.
+
+        This is the container-owned alternative to ``get()`` + a dense decode backend:
+        the Triton kernel reads K/V from the physical pool, one page per logical page of
+        the request's block table, and masks the tail of the last page by ``seqlen``.
+        No gather, no ``lpad`` padding, no zero block and no additive bias.
+        """
+        if not self.kernel_decode:
+            raise RuntimeError("attend() is only available with decode_impl='triton'")
+        if self._block_table_tensor is None or self._seqlen is None:
+            raise RuntimeError("PagedKV triton state was not built; construct with decode_impl='triton'")
+        if self.lpad is None:
+            raise RuntimeError("PagedKV.attend() before build_mask(): seqlen is stale")
+        if not self._step_written:
+            raise RuntimeError("PagedKV.attend() before write(): this step has no token yet")
+        if dropout_p:
+            raise ValueError("paged decode is inference-only; dropout_p must be 0")
+        expected = (self.batch, self.n_head, 1, self.head_dim)
+        if tuple(q.shape) != expected:
+            raise ValueError(f"attend needs q {expected}, got {tuple(q.shape)}")
+        from model.triton_decode import paged_decode
+
+        out = paged_decode(
+            q[:, :, 0, :].contiguous(),
+            self.pool.keys[layer],
+            self.pool.values[layer],
+            self._block_table_tensor,
+            self._seqlen,
+            scale=1.0 / (self.head_dim ** 0.5),
+        )
+        return out.unsqueeze(2)
 
     def advance(self) -> None:
         """Move every active row's cursors one token (in place, then host mirrors)."""

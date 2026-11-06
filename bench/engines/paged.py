@@ -80,6 +80,9 @@ class PagedEngine(ContinuousEngine):
         block_size: int = 16,
         kv_blocks: int = 1,
         fill: bool = False,
+        prefill: str = "serial",
+        max_prefill_tokens: int = 8192,
+        decode: str = "auto",
     ) -> None:
         super().__init__(
             name=name,
@@ -92,6 +95,9 @@ class PagedEngine(ContinuousEngine):
             vocab_size=vocab_size,
             seed=seed,
             fill=fill,
+            prefill=prefill,
+            max_prefill_tokens=max_prefill_tokens,
+            decode=decode,
         )
         self.block_size = int(block_size)
         self.kv_blocks = int(kv_blocks)
@@ -102,6 +108,38 @@ class PagedEngine(ContinuousEngine):
         self._instrumented: tuple[Any, Any] = (None, None)
 
     # ------------------------------------------------------------------ interface
+    @property
+    def decode_impl(self) -> str:
+        """Resolved block-table decode kernel ("triton"/"gather"), not the config value.
+
+        ``decode="auto"`` is resolved by the loaded engine. The adapter asks the engine
+        for the kernel it actually selected (``decode_impl``/``_paged_decode_impl``); a
+        concrete requested value is recorded as-is, and an engine that predates the knob
+        falls back to ``"gather"`` rather than inventing a kernel name.
+        """
+        if self._decode != "auto":
+            return self._decode
+        engine = self._engine if self._engine is not None else self._delegate
+        candidates = (engine, self._delegate)
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for name in ("decode_impl", "decode_backend", "_paged_decode_impl", "_decode_impl"):
+                value = getattr(candidate, name, None)
+                if value and str(value) != "auto":
+                    return str(value)
+        # The decoder may only expose the public backend pair; ``paged-triton`` is the
+        # engine's name for the block-table kernel, ``hand_baddbmm``/``dummy`` are the
+        # gather path the adapter's ``decode_impl`` vocabulary calls "gather".
+        backend = getattr(engine, "attn_backends", None) if engine is not None else None
+        if callable(backend):
+            try:
+                decode = str((backend() or {}).get("decode") or "")
+            except Exception:  # noqa: BLE001 - provenance must not fail the run
+                decode = ""
+            if "triton" in decode:
+                return "triton"
+        return "gather"
     def load(self) -> None:
         if self.name == _DUMMY_NAME:
             self._engine = _DummyPagedEngine(
@@ -117,6 +155,9 @@ class PagedEngine(ContinuousEngine):
             dtype=self.dtype_name,
             device=self.device,
             model_path=self.model_path,
+            prefill=self.prefill_mode,
+            max_prefill_tokens=self.max_prefill_tokens,
+            decode=self._decode,
         )
         self._delegate.load()
         self.device = self._delegate.device
@@ -140,11 +181,16 @@ class PagedEngine(ContinuousEngine):
         # D6: the pool is sized by the config's kv_blocks. The position bound is the
         # trace's worst prompt + budget (the RoPE table is a run bound, not
         # ``n_blocks * block_size`` -- P-34).
+        open_kwargs = {"max_position": int(need)}
+        if self._delegate is not None:
+            # The real decoder resolves ``auto`` (triton on CUDA, gather elsewhere).
+            # The stand-in keeps its historical signature.
+            open_kwargs["decode"] = self._decode
         engine.open_paged_pool(
             self.kv_blocks,
             self.block_size,
             self.max_batch,
-            max_position=int(need),
+            **open_kwargs,
         )
         self._instrument(engine)
         self.max_len = int(need)

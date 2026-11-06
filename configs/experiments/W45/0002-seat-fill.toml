@@ -1,0 +1,55 @@
+# W45-0002 · E1 容量（seat 臂）：W3-like / fill / B=9 / serial prefill
+# W4.5 口径见 ROADMAP.md §5 W4.5。E1 只验证注意力路径改动没有碰分配器，
+# 因此固定 prefill="serial"（与 W4 同一准入路径），packed 的峰值由 E4 看。
+# 运行：python -m bench.run --config configs/experiments/W45/0002-seat-fill.toml
+#
+# 行宽由实际最长 prompt 1517 决定：bucket(1517 + 128 + 1, 64) = 1664 列
+# → 1664 × 112 KiB = 182 MiB/行 → floor(1640 / 182) = 9 行。
+# 与 W45-0003 必须同 trace（同 seed / rate / requests / budgets / prompts）。
+# 门禁：与 allocator 模拟相差 ±1；本臂只做基线。
+
+schema = 1
+
+[exp]
+id = "W45-0002"
+stage = "W45"
+type = "fill"
+slug = "seat-fill"
+title = "E1 容量（seat）：W3-like / fill-only / B=9 / serial"
+hypothesis = ["seat_capacity_unchanged_after_attention_path_v2"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "closed"
+requests = 32
+budgets = [16, 32, 64, 128]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 9
+prefill = "serial"
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []
