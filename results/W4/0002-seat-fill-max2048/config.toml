@@ -1,0 +1,68 @@
+# W4-0002 · E1 容量（seat 臂）：W3-like / fill / B=9
+# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# 运行：python -m bench.run --config configs/experiments/W4/0002-seat-fill-max2048.toml
+#
+# 用途：plan §4.4 的 E1 seat 臂。只 prefill + 预留、不 decode（type="fill"），
+# 测「同总预算 1640 MiB（KV + workspace）」下 seat 能同时准入多少请求。
+#
+# 行宽由**实际最长 prompt** 决定，不是 plan 假设的 2048：
+#   longest prompt = 1517（prompts.json 的 l05），+ budget 128 + 1 = 1646
+#   → bucket(1646, 64) = 1664 列 → 1664 × 112 KiB = 182 MiB/行
+#   → floor(1640 / 182) = 9 行
+# 因此 max_batch = 9，让 seat 臂由**显存**（而非 max_batch）顶住上限；
+# 若写成 plan §4.1 的 6，比值量到的是 max_batch 而不是同预算容量，C1 会被抬高。
+# 余量（1640 − 9×182 = 2 MiB）单列 seat_unused_mb。
+# 门禁：与 allocator 模拟的并发相差 ±1；本臂只做基线，不单独判 pass/fail。
+#
+# **0002 与 0003 必须是同一份 workload**：同 seed / rate / requests / budgets /
+# prompts（trace_sha256 必须相同），否则容量配对判 invalid（D5）。
+# 两臂唯一的差别是 [engine]（impl / max_batch / block_size / kv_blocks）。
+#
+# 长度分布 = bench/prompts.json：12 short + 12 medium + 8 long（= plan 的 W3-like），
+# 行宽按**实际最长 prompt** 1517 算（不是长桶的声明上界 2048）；
+# 不另造 workload，保证与 E3 的 trace 同源。
+# fill-only 走 bench/engines/fill.py::FillScheduler（准入 + 预留，不 decode）。
+
+schema = 1
+
+[exp]
+id = "W4-0002"
+stage = "W4"
+type = "fill"
+slug = "seat-fill-max2048"
+title = "E1 容量（seat）：W3-like / fill-only / B=9"
+hypothesis = ["seat_capacity_is_limited_by_whole_trace_max_length"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "closed"         # fill-only：全部请求 t=0 就绪，只看能同时准入多少
+requests = 32              # 全部 32 条 frozen prompt（与 0003 完全一致）
+budgets = [16, 32, 64, 128]
+batch_sizes = [1]          # 并发度是 [engine].max_batch，不是行标签（P-20）
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 9              # floor(1640 MiB / 182 MiB per 1664-wide row) = 9
+
+[measure]
+warmup = 1                 # fill-only 是确定性准入，不需要 5 次重复
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"       # 容量判据在 paged 臂（0003）对这条基线求值
+criteria = []
