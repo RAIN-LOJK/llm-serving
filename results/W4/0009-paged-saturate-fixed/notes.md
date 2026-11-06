@@ -1,6 +1,6 @@
 # W4-0009 · E3′ 同预算系统吞吐（paged，prefill 修复后，800 块）
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`（record-only post-fix；C4 仍负）
 - 配置：`config.toml`（运行目录 `results/W4/0009-paged-saturate-fixed`）
 - 类型：`scenario`；workload：`prompts`（与 `W4-0006` 同一份 frozen 32）
 - 证据：`summary.json` / `metrics.jsonl`

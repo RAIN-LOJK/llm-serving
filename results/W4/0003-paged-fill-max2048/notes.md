@@ -1,6 +1,6 @@
 # W4-0003 · E1 容量（paged）：W3-like max-2048 / fill-only / 800 块
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`
 - 配置：`config.toml`（运行目录 `results/W4/0003-paged-fill-max2048`）
 - 类型：`fill`；workload：`prompts`（32 条 frozen prompt，与 `W4-0002` 同一 trace）
 - 证据：`summary.json` / `metrics.jsonl`

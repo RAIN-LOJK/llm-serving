@@ -1,8 +1,8 @@
 {
   "run_id": "W4-0008",
-  "verdict": "unreviewed",
-  "reviewer": null,
-  "reviewed_at": null,
-  "decision_id": null,
-  "notes": ""
+  "verdict": "inconclusive",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-06",
+  "decision_id": "D6",
+  "notes": "pre-fix paged 800 块：0.975x，峰值 1626.8<=1640；已被 W4-0009 supersede，不作 post-fix 吞吐证据。"
 }

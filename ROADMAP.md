@@ -424,7 +424,7 @@ python scripts/exp_index.py --check
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
 | W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
-| W4 | 分页 KV | 🟡 | 实验完成：C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果；E3 pre-fix 0.975×，post-fix `0009` **1.074×**；`W4-0001…0009`（0007 over-budget，0008 pre-fix/superseded），待人工评审 |
+| W4 | 分页 KV | ✅ | C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（按预注册不报吞吐）；post-fix `0009` **1.074×** 为 record-only addendum；`W4-0001…0006/0008/0009`（0007 over-budget，0008 pre-fix/superseded） |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
@@ -456,6 +456,7 @@ python scripts/exp_index.py --check
 | 2026-11-06 | v15 | **W4 实验收口**：`W4-0001` E0 对 golden **64/64**；`W4-0002/0003` E1 seat **9** vs paged **28** = **3.111×**（同 trace、800 块，`kv_total 1601.97 ≤1640`，同 trace 模拟门禁 28±0）；`W4-0004/0005` E2 同并发 decode step **21.32 → 35.63 ms = 1.671×**（`lpad=1664` 子集 1.673×，逐重复 1.661–1.676），internal frag **0.55%**，40/40 token id 全等，workspace **52.42 MiB（+3.6%）**。**C4 >1.5× → 撤回吞吐结论，E3 不跑**（plan §4.3）；W4 以「容量成立、代价负结果」收口。口径偏差：paged `lpad` 实为 1536/1600/1664，不是全程 1664；按 1664 子集复核结论不变。`[W4.paged]` 标 calibrated（basis `W4-0003`）；`docs/w4-plan.md` 收口删除，新增 P-37。 |
 | 2026-11-06 | v16 | **E3 补跑（post-hoc record-only）**：按用户指示在 C4 失败后补跑，不改变 C4。`W4-0006` seat **333.44 tok/s** vs `W4-0008` paged 800 **325.19 tok/s = 0.975×**（同 trace、both saturated）；decode-only **1.103×**，但 prefill 3.39× 把整体拉回略负。`W4-0007` 820 块峰值 **1661.8 MiB > 1640**（R5，动态 36 活跃；summary 的 1455.16 是末步，不是峰值），只保留为 over-budget 记录；`W4-0008` 800 块峰值 **1626.8 ≤ 1640**，是有效同预算臂。E3 是 **post-hoc**，不进 C1–C4；W4 仍不报吞吐。docs 清理：`w4-handoff.md` 与两个容量 sweep JSON 删除，只保留三张图；新增 P-38。 |
 | 2026-11-06 | v17 | **post-fix：prefill slot mapping + E3′**。`PagedPool.write_prefill` 从 per-block 循环改成 slot mapping + 一次 advanced indexing（每层 K/V 各一次；E2 探索 551.8→176.8 ms，seat 163.0，1.08×；40/40 token 不变）。正式 `W4-0009`（800 块、同 `0006` trace）**358.18 tok/s** vs `0006` **333.44** = **1.074×**，both saturated，峰值 **1626.8 ≤ 1640**；decode-only 1.094×，E3 per-request prefill **76.4→23.0 ms**。`0007` 820 块峰值 1661.8>1640（R5）仅 over-budget record；`0008` 是 pre-fix 0.975×，由 `0009` `supersedes`。**C4 仍 1.671×**（只改 prefill，decode 未动），W4 的 C4 负结果/不报吞吐不变；0009 是 post-hoc post-fix 实验，不是 C4 pass。新增 P-39。 |
+| 2026-11-06 | v18 | **W4 评审收口**：9 个 verdict 已审（`0001–0006/0009` pass；`0007` invalid/over-budget；`0008` inconclusive/pre-fix/superseded）；§12 W4 → **✅**。最终结论：C1 **3.111×**、C2 **0.55%**、C3 全等；C4 **1.671×** 负结果，按预注册**不报吞吐**；post-fix `0009` **1.074×** 为 record-only addendum，不改变 C4。 |
 
 ---
 

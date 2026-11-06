@@ -1,6 +1,6 @@
 # W4-0001 · E0 数值门：paged 64 token 贪心输出与 golden 逐 id 全等
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`
 - 配置：`config.toml`（运行目录 `results/W4/0001-paged-numeric-gate`）
 - 类型：`microbench`；workload：`prompts`（`prompt_ids = ["s01"]`）
 - 证据：`summary.json` / `metrics.jsonl`

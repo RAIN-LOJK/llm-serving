@@ -1,6 +1,6 @@
 # W4-0007 · E3 同预算系统吞吐（paged）：frozen 32 / poisson / B=64 / 820 块
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `invalid`（over-budget，R5）
 - 配置：`config.toml`（运行目录 `results/W4/0007-paged-saturate`）
 - 类型：`scenario`；workload：`prompts`（frozen 32）
 - 证据：`summary.json` / `metrics.jsonl`

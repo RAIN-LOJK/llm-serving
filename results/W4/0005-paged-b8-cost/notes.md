@@ -1,6 +1,6 @@
 # W4-0005 · E2 代价（paged）：8 条最长 / B=8 / budget 128 / 832 块
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`（C2/C3；C4 负结果见结论）
 - 配置：`config.toml`（运行目录 `results/W4/0005-paged-b8-cost`）
 - 类型：`scenario`；workload：`prompts`（`l01`–`l08`，与 `W4-0004` 同一份）
 - 证据：`summary.json` / `metrics.jsonl`

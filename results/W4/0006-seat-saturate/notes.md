@@ -1,6 +1,6 @@
 # W4-0006 · E3 同预算系统吞吐（seat）：frozen 32 / poisson / B=9
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`
 - 配置：`config.toml`（运行目录 `results/W4/0006-seat-saturate`）
 - 类型：`scenario`；workload：`prompts`（frozen 32）
 - 证据：`summary.json` / `metrics.jsonl`

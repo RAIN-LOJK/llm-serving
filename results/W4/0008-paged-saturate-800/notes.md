@@ -1,6 +1,6 @@
 # W4-0008 · E3 同预算系统吞吐（paged，800 块，pre-fix；已被 0009 supersede）
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `inconclusive`（pre-fix，已被 0009 supersede）
 - 配置：`config.toml`（运行目录 `results/W4/0008-paged-saturate-800`）
 - 类型：`scenario`；workload：`prompts`（与 `W4-0006` 同一份 frozen 32）
 - 证据：`summary.json` / `metrics.jsonl`

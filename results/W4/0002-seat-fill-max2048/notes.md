@@ -1,6 +1,6 @@
 # W4-0002 · E1 容量（seat）：W3-like / fill-only / B=9
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`
 - 配置：`config.toml`（运行目录 `results/W4/0002-seat-fill-max2048`）
 - 类型：`fill`；workload：`prompts`（32 条 frozen prompt）
 - 证据：`summary.json` / `metrics.jsonl`

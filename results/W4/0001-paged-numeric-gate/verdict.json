@@ -1,8 +1,8 @@
 {
   "run_id": "W4-0001",
-  "verdict": "unreviewed",
-  "reviewer": null,
-  "reviewed_at": null,
-  "decision_id": null,
-  "notes": ""
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-06",
+  "decision_id": "D6",
+  "notes": "E0 数值门：paged 64/64 token 与 tests/golden/qwen3-0-6b/0001 全等；允许进入 E1/E2。"
 }

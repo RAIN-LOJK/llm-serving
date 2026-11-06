@@ -1,6 +1,6 @@
 # W4-0004 · E2 代价基线（seat）：8 条最长 / B=8 / budget 128
 
-- 状态：`unreviewed`
+- 状态：`reviewed`；verdict = `pass`
 - 配置：`config.toml`（运行目录 `results/W4/0004-seat-b8-cost`）
 - 类型：`scenario`；workload：`prompts`（`l01`–`l08`，long 桶 8 条）
 - 证据：`summary.json` / `metrics.jsonl`
