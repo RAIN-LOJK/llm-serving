@@ -16,7 +16,11 @@ What is pinned here:
   (bf16 also compares argmax), and never produces NaN/Inf;
 * the kernel rejects CPU tensors, a non-int32 block table, a cross-device table and a
   seqlen larger than the table capacity instead of silently truncating or falling back;
-* ``paged_decode`` does not mutate any input, including a non-contiguous q.
+* ``paged_decode`` does not mutate any input, including a non-contiguous q;
+* the per-container launch plan (``paged_decode_plan``) launches exactly what
+  ``paged_decode`` launches for every layer, refuses a query whose layout differs from
+  the one it validated, and does not snapshot ``seqlen``: it is the same tensor the
+  container updates in place every step.
 
 CUDA cases are skipped on the CPU gate; they are the only tests that compile Triton.
 """
@@ -31,6 +35,7 @@ import torch
 from model.triton_decode import (
     TRITON_AVAILABLE,
     paged_decode,
+    paged_decode_plan,
     reference_paged_decode,
 )
 
@@ -416,3 +421,113 @@ def test_paged_decode_rejects_a_cache_with_the_wrong_head_dim():
         paged_decode(
             q, k[:, :, :, :-1].contiguous(), v[:, :, :, :-1].contiguous(), table, seqlen
         )
+
+
+# ------------------------------------------------------------ launch plan: CUDA only
+
+
+@CUDA
+@GPU
+def test_decode_plan_matches_paged_decode_for_every_layer():
+    """The cached launch metadata must not change a single output byte."""
+    q, k, v, table, seqlen = _build(3, 8, 4, 64, 16, [17, 15, 32], device="cuda", seed=43)
+    # A distinct pool per layer, like the engine's per-layer keys/values.
+    gen = torch.Generator(device="cuda").manual_seed(44)
+    k_layers = [
+        torch.randn(k.shape, generator=gen, device="cuda", dtype=k.dtype) for _ in range(4)
+    ]
+    v_layers = [
+        torch.randn(v.shape, generator=gen, device="cuda", dtype=v.dtype) for _ in range(4)
+    ]
+
+    plan = paged_decode_plan(q, k_layers, v_layers, table, seqlen)
+    for layer in range(4):
+        got = plan.run(layer, q)
+        expected = paged_decode(q, k_layers[layer], v_layers[layer], table, seqlen)
+        assert torch.equal(got, expected), f"layer {layer} differs from paged_decode"
+
+
+@CUDA
+@GPU
+def test_decode_plan_rejects_int64_seqlen_instead_of_snapshotting_it():
+    q, k, v, table, seqlen = _build(2, 4, 2, 64, 16, [17, 15], device="cuda", seed=59)
+    with pytest.raises(ValueError, match="int32 seqlen"):
+        paged_decode_plan(q, [k], [v], table, seqlen.to(torch.int64))
+
+
+@CUDA
+@GPU
+def test_decode_plan_rejects_non_contiguous_table_and_seqlen():
+    q, k, v, table, seqlen = _build(2, 4, 2, 64, 16, [17, 15], device="cuda", seed=61)
+    with pytest.raises(ValueError, match="column-contiguous block table"):
+        paged_decode_plan(q, [k], [v], table[:, ::2], seqlen)
+    noncontiguous_seqlen = seqlen.repeat(2)[::2]
+    assert noncontiguous_seqlen.stride(0) == 2
+    with pytest.raises(ValueError, match="contiguous 1-D seqlen"):
+        paged_decode_plan(q, [k], [v], table, noncontiguous_seqlen)
+
+
+@CUDA
+@GPU
+def test_decode_plan_refuses_a_query_with_a_different_layout():
+    q, k, v, table, seqlen = _build(2, 4, 2, 64, 16, [17, 15], device="cuda", seed=47)
+    plan = paged_decode_plan(q, [k], [v], table, seqlen)
+
+    with pytest.raises(ValueError, match="does not match the validated layout"):
+        plan.run(0, q.transpose(1, 2).contiguous().transpose(1, 2))  # non-contiguous
+    with pytest.raises(ValueError, match="does not match the validated layout"):
+        plan.run(0, q[:, :2, :].contiguous())  # different head count
+    with pytest.raises(ValueError, match="does not match the validated layout"):
+        plan.run(0, q.double())  # different dtype
+
+
+@CUDA
+@GPU
+def test_decode_plan_rejects_an_unknown_layer_and_validates_every_pool():
+    q, k, v, table, seqlen = _build(2, 4, 2, 64, 16, [17, 15], device="cuda", seed=53)
+    plan = paged_decode_plan(q, [k, k], [v, v], table, seqlen)
+
+    with pytest.raises(IndexError, match="outside the plan"):
+        plan.run(2, q)
+
+    bad_k, bad_v = k[:, :, :, :-1].contiguous(), v[:, :, :, :-1].contiguous()
+    with pytest.raises(ValueError, match="head_dim"):
+        paged_decode_plan(q, [k, bad_k], [v, bad_v], table, seqlen)
+
+
+@CUDA
+@GPU
+def test_container_plan_tracks_in_place_seqlen_updates():
+    """``build_mask`` updates ``seqlen`` in place; the plan must see the new value.
+
+    This is the plan's invalidation contract: it caches *metadata*, never a snapshot of
+    the seqlen values, so a step that appends a token changes the next ``attend``.
+    """
+    from model.paged import PagedKV, PagedPool
+
+    torch.manual_seed(0)
+    pool = PagedPool(1, 4, 16, 2, 32, dtype=torch.float32, device="cuda", n_head=4)
+    kv = PagedKV(
+        pool, [[0, 1, 2, 3]], [10], rope_len=64, n_head=4, decode_impl="triton"
+    )
+    q = torch.randn(1, 4, 1, 32, device="cuda")
+
+    outputs = []
+    for step in range(3):
+        kv.build_mask(next_token=True)
+        k = torch.randn(1, 2, 1, 32, device="cuda")
+        v = torch.randn(1, 2, 1, 32, device="cuda")
+        kv.write(0, k, v)
+        outputs.append(kv.attend(0, q))
+        # The plan's launch must equal the fully-revalidating entry point at this step.
+        expected = paged_decode(
+            q[:, :, 0, :].contiguous(),
+            pool.keys[0],
+            pool.values[0],
+            kv._block_table_tensor,
+            kv._seqlen,
+        ).unsqueeze(2)
+        assert torch.equal(outputs[-1], expected), f"step {step} diverged from paged_decode"
+        kv.advance()
+
+    assert not torch.equal(outputs[0], outputs[-1]), "attention ignored the new tokens"

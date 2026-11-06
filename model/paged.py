@@ -79,6 +79,19 @@ def _check_positive(name: str, value: int) -> int:
     return value
 
 
+def _same_device(a: torch.device, b: torch.device) -> bool:
+    """Whether two device handles name the same physical device.
+
+    ``torch.device("cuda")`` (the pool's handle when it is built with ``device="cuda"``)
+    and the ``cuda:0`` a tensor reports are the same device -- the first means "the
+    current one" and the tensors were allocated on it. Comparing the handles directly
+    would reject a pool's own slot map, so the index is compared only when both sides
+    name one explicitly. Type mismatches (cpu vs cuda) and different GPU indices still
+    fail, so this cannot hide a cross-device mistake.
+    """
+    return a.type == b.type and (a.index is None or b.index is None or a.index == b.index)
+
+
 class PagedPool:
     """Physical KV blocks: ``(n_blocks, block_size, n_kv_head, head_dim)`` K and V per layer.
 
@@ -120,6 +133,12 @@ class PagedPool:
         self.zero_block = torch.zeros(
             (self.block_size, self.n_kv_head, self.head_dim), dtype=dtype, device=self.device
         )
+        # Flat ``(n_blocks * block_size, n_kv_head, head_dim)`` views of the pools, built
+        # once: a slot id is a row of this view. The pool tensors are allocated here and
+        # never replaced (only written in place), so the views cannot go stale; rebuilding
+        # them per layer cost ~4 us of the 36 us per-layer decode write (W45 profile).
+        self._keys_flat = [t.view(-1, self.n_kv_head, self.head_dim) for t in self.keys]
+        self._values_flat = [t.view(-1, self.n_kv_head, self.head_dim) for t in self.values]
 
         if max_rows is not None:
             _check_positive("max_rows", max_rows)
@@ -241,25 +260,36 @@ class PagedPool:
         )
         return self._slot_ids(block_table, start, length)
 
-    def write_prefill_slots(
+    def write_slots(
         self, layer: int, slot_ids: torch.Tensor, k: torch.Tensor, v: torch.Tensor
     ) -> None:
-        """Write precomputed flat slots (one advanced-index copy per K/V per layer).
+        """Write precomputed flat slots: one device-indexed copy per K/V per layer.
 
-        ``slot_ids`` is the 1-D map returned by :meth:`slot_ids`; it is reused by every
-        layer of one prompt. All entries must be distinct and inside the pool.
+        The primitive behind both hot paths -- packed prefill (:meth:`write_prefill`,
+        once per prompt) and decode (:meth:`PagedKV.write`, once per layer per step).
+        ``slot_ids`` is a 1-D device map whose entry ``i`` is the flat pool row
+        ``block_id * block_size + offset`` of the ``i``-th token; the caller owns the map
+        and must rebuild it whenever its block table or position changes. Every entry
+        must be distinct (a repeated slot makes the winner undefined) and inside the
+        pool; :meth:`slot_ids` and :class:`PagedKV` are the two callers that guarantee it.
+
+        ``index_copy_`` rather than ``keys[slot_ids] = ...``: both scatter the same rows,
+        but the decode write of one step costs 83 us of host time per layer in the
+        list-indexed form (``write_token``) against 17 us for the two copies here, and the
+        prefill form is already per-prompt. No ``int(slot_ids.min())`` host scan: that
+        would be a device-to-host sync per layer (P-46).
         """
         layer = self._check_layer(layer)
         if k.dim() != 3 or v.dim() != 3:
             raise ValueError(
-                f"write_prefill_slots needs (length, n_kv_head, head_dim), got "
+                f"write_slots needs (length, n_kv_head, head_dim), got "
                 f"{tuple(k.shape)} / {tuple(v.shape)}"
             )
         if tuple(k.shape) != tuple(v.shape):
             raise ValueError(f"k/v shapes differ: {tuple(k.shape)} vs {tuple(v.shape)}")
         if k.shape[1:] != (self.n_kv_head, self.head_dim):
             raise ValueError(
-                f"write_prefill_slots needs head shape {(self.n_kv_head, self.head_dim)}, "
+                f"write_slots needs head shape {(self.n_kv_head, self.head_dim)}, "
                 f"got {tuple(k.shape[1:])}"
             )
         if slot_ids.dim() != 1 or slot_ids.numel() != k.shape[0]:
@@ -269,18 +299,30 @@ class PagedPool:
             )
         if slot_ids.dtype not in (torch.int32, torch.int64):
             raise ValueError(f"slot_ids must be an integer tensor, got {slot_ids.dtype}")
-        if slot_ids.device != self.device:
+        if not _same_device(slot_ids.device, self.device):
             raise ValueError(
                 f"slot_ids on {slot_ids.device} but the pool is on {self.device}"
             )
-        # No device-side min/max scan here: this runs once per layer (28 times per
-        # request), and ``int(tensor.min())`` is a host sync that would serialize the
-        # whole prefill. The map comes from :meth:`slot_ids`, which validates the block
-        # table against the pool; a hand-built map is the caller's contract.
-        keys = self.keys[layer].view(-1, self.n_kv_head, self.head_dim)
-        values = self.values[layer].view(-1, self.n_kv_head, self.head_dim)
-        keys[slot_ids] = k.to(self.dtype)
-        values[slot_ids] = v.to(self.dtype)
+        # ``index_copy_`` requires a long index even though the public contract accepts
+        # int32 (the prefill builder returns long; a hand-built map may be int32). Cast
+        # only when needed: the decode slot map is already long.
+        if slot_ids.dtype != torch.int64:
+            slot_ids = slot_ids.to(torch.int64)
+        keys = self._keys_flat[layer]
+        values = self._values_flat[layer]
+        keys.index_copy_(0, slot_ids, k if k.dtype == self.dtype else k.to(self.dtype))
+        values.index_copy_(0, slot_ids, v if v.dtype == self.dtype else v.to(self.dtype))
+
+    def write_prefill_slots(
+        self, layer: int, slot_ids: torch.Tensor, k: torch.Tensor, v: torch.Tensor
+    ) -> None:
+        """Write precomputed flat slots (one copy per K/V per layer).
+
+        Kept as the named prefill entry point (``PagedWriteSink`` calls it) on top of
+        :meth:`write_slots`; ``slot_ids`` is the map returned by :meth:`slot_ids`, reused
+        by every layer of one prompt.
+        """
+        self.write_slots(layer, slot_ids, k, v)
 
     def write_prefill(
         self, layer: int, block_table, start: int, k: torch.Tensor, v: torch.Tensor
@@ -652,25 +694,44 @@ class PagedKV:
         self._host_valid = list(lengths)
         self._host_active = [True] * n_rows
 
-        # Triton block-table decode owns two small device tensors for the whole batch:
-        # the padded int32 block table (one row per request, zero-padded past the
-        # request's own blocks) and the int32 seqlen vector the kernel masks against.
-        # They are built once per container and updated in place; ``build_mask`` sets
-        # ``seqlen = pos + next_token`` without a host round trip.
-        self._block_table_tensor: torch.Tensor | None = None
-        self._seqlen: torch.Tensor | None = None
-        if self.kernel_decode:
-            max_blocks = max((len(table) for table in self.block_tables), default=1)
-            table = torch.zeros(
-                (n_rows, max_blocks), dtype=torch.int32, device=self.device
+        # One padded int32 block table per container for the whole batch (one row per
+        # request, zero-padded past the request's own blocks). Triton block-table decode
+        # reads it directly, and the decode write path derives its flat slot ids from it,
+        # so both arms share one copy. It is built once per container and never mutated:
+        # the block tables are fixed at construction (D6 has no mid-request allocation),
+        # so a container rebuild -- not a step -- is what refreshes it.
+        max_blocks = max((len(table) for table in self.block_tables), default=1)
+        table = torch.zeros((n_rows, max_blocks), dtype=torch.int32, device=self.device)
+        for row, block_table in enumerate(self.block_tables):
+            if not block_table:
+                continue
+            # Validate every id once here, not per layer per step: the write path indexes
+            # the pool through these ids, and the old ``write_token`` repeated the check
+            # 28 times a step (8 rows x 28 layers). Same exceptions, one call site.
+            pool._check_block_ids(
+                block_table, (max(lengths[row], 1) + pool.block_size - 1) // pool.block_size
             )
-            for row, block_table in enumerate(self.block_tables):
-                if block_table:
-                    table[row, : len(block_table)] = torch.tensor(
-                        block_table, dtype=torch.int32, device=self.device
-                    )
-            self._block_table_tensor = table
-            self._seqlen = torch.zeros(n_rows, dtype=torch.int32, device=self.device)
+            table[row, : len(block_table)] = torch.tensor(
+                block_table, dtype=torch.int32, device=self.device
+            )
+        self._block_table_tensor = table
+        self._block_table_i64 = table.to(torch.int64)
+        # The int32 seqlen vector the kernel masks against (decode_impl="triton" only).
+        self._seqlen: torch.Tensor | None = (
+            torch.zeros(n_rows, dtype=torch.int32, device=self.device)
+            if self.kernel_decode
+            else None
+        )
+        # Flat pool slot each row writes next, derived from ``pos`` and the table above.
+        # It is rebuilt whenever ``pos`` moves (``advance``), so the per-layer write is one
+        # device-indexed copy with no Python list building and no host->device index copy.
+        self._slot_ids: torch.Tensor | None = None
+        self._slot_error: tuple[int, int, int, int] | None = None
+        self._refresh_slots()
+        # Lazily built launch-metadata cache for ``attend`` (see model/triton_decode.py).
+        # It is per container, so a rebuilt container -- the only way the block table can
+        # change -- can never reuse the previous one's mapping.
+        self._decode_plan = None
 
         # Per-step mask/bias buffers: ONE pair for the current ``lpad`` bucket, refreshed in
         # place. Switching buckets releases the old pair (the engine may also install its
@@ -775,6 +836,37 @@ class PagedKV:
         self._step_written = False
         return mask
 
+    def _refresh_slots(self) -> None:
+        """Rebuild the per-row flat write slot from ``pos`` and the padded block table.
+
+        Slot ``row = block_table[row][pos // bs] * bs + pos % bs`` -- exactly the mapping
+        :meth:`PagedPool.write_token` computes in Python per layer. Here it is one host
+        bounds loop plus three small device ops at the step boundary, shared by all 28
+        layers, instead of eight list builds and an index host->device copy per layer.
+
+        Invariant: the block table tensor and ``pos`` are the only inputs, and both are
+        container-owned (the table is fixed at construction, ``pos`` moves only through
+        :meth:`advance`). A container is rebuilt -- never mutated -- when the active set
+        changes, so a slot map can never outlive its block table.
+        """
+        bs = self.pool.block_size
+        self._slot_error = None
+        for row, position in enumerate(self._host_pos):
+            block_index = position // bs
+            if block_index >= len(self.block_tables[row]):
+                self._slot_error = (row, position, block_index, len(self.block_tables[row]))
+                break
+        if self._slot_error is not None:
+            # No slot map for an out-of-range position: ``write`` raises before touching
+            # the pool, exactly like the per-row check it replaced. A request that ends
+            # *on* its last block therefore parks here without an error until a write is
+            # actually attempted.
+            self._slot_ids = None
+            return
+        block = torch.div(self.pos, bs, rounding_mode="floor")
+        block_id = self._block_table_i64.gather(1, block.view(-1, 1)).squeeze(1)
+        self._slot_ids = block_id * bs + (self.pos % bs)
+
     def write(self, layer: int, k: torch.Tensor, v: torch.Tensor) -> None:
         """Scatter this step's token into each row at its own logical position."""
         expected = (self.batch, self.n_kv_head, 1, self.head_dim)
@@ -785,14 +877,13 @@ class PagedKV:
                 f"PagedKV overflow: write position {max(self._host_pos)} >= max_len "
                 f"{self.max_len}"
             )
-        self.pool.write_token(
-            layer,
-            list(range(self.batch)),
-            self.block_tables,
-            list(self._host_pos),
-            k[:, :, 0, :],
-            v[:, :, 0, :],
-        )
+        if self._slot_ids is None:
+            row, position, block_index, have = self._slot_error or (-1, -1, -1, -1)
+            raise IndexError(
+                f"row {row}: position {position} needs block {block_index}, but its block "
+                f"table has {have} blocks"
+            )
+        self.pool.write_slots(layer, self._slot_ids, k[:, :, 0, :], v[:, :, 0, :])
         self._step_written = True
 
     def get(self, layer: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -838,16 +929,24 @@ class PagedKV:
         expected = (self.batch, self.n_head, 1, self.head_dim)
         if tuple(q.shape) != expected:
             raise ValueError(f"attend needs q {expected}, got {tuple(q.shape)}")
-        from model.triton_decode import paged_decode
+        from model.triton_decode import paged_decode_plan
 
-        out = paged_decode(
-            q[:, :, 0, :].contiguous(),
-            self.pool.keys[layer],
-            self.pool.values[layer],
-            self._block_table_tensor,
-            self._seqlen,
-            scale=1.0 / (self.head_dim ** 0.5),
-        )
+        q3 = q[:, :, 0, :].contiguous()
+        # One plan per container: every layer's pool tensor has the same shape/layout, and
+        # the block table and seqlen are container-owned, so the only thing that changes
+        # per layer -- the query pointer -- is checked by ``run``. The plan validates the
+        # full paged_decode contract for all layers on first use; a container rebuild (new
+        # block tables) builds a new plan, which is what keeps this from going stale.
+        if self._decode_plan is None:
+            self._decode_plan = paged_decode_plan(
+                q3,
+                self.pool.keys,
+                self.pool.values,
+                self._block_table_tensor,
+                self._seqlen,
+                scale=1.0 / (self.head_dim ** 0.5),
+            )
+        out = self._decode_plan.run(layer, q3)
         return out.unsqueeze(2)
 
     def advance(self) -> None:
@@ -864,6 +963,7 @@ class PagedKV:
             raise IndexError(
                 f"PagedKV overflow: max_len={self.max_len}; a request decoded past its budget"
             )
+        self._refresh_slots()
 
     # ---------------------------------------------------------------- helpers
     def past_len(self) -> int:

@@ -79,7 +79,7 @@ except ImportError:  # pragma: no cover - exercised by the CPU-only test gate
     tl = None  # type: ignore[assignment]
     TRITON_AVAILABLE = False
 
-__all__ = ["TRITON_AVAILABLE", "paged_decode", "reference_paged_decode"]
+__all__ = ["TRITON_AVAILABLE", "paged_decode", "paged_decode_plan", "reference_paged_decode"]
 
 #: ``log2(e)``; folding it into the score scale lets the softmax use ``tl.exp2``.
 _LOG2E = 1.4426950408889634
@@ -235,6 +235,22 @@ def _validate(
     _SEQ_CHECK = (seqlen, version, capacity)
 
 
+def _launch_config(block_dim: int) -> tuple[int, int]:
+    """``(num_warps, num_stages)`` for one decode kernel with this head dim.
+
+    Measured on a 4090: one warp per program is fastest for D 64/128 because the page
+    reductions stay inside a warp (no shared-memory barrier per page); D=256 needs two
+    warps to keep enough lanes busy. ``num_stages=1`` avoids pipelining a loop whose
+    carried softmax state is the dependency. The sweep behind these numbers is
+    ``scripts/bench_decode_kernel.py``; note it re-reads one layer's KV, so it measures a
+    warm-L2 kernel. On the cold, 28-layer E2 pattern a second warp is ~24% faster
+    (112.1 -> 84.9 us/layer), but the end-to-end step is CPU-dispatch-bound and did not
+    move (W45-0005: 23.37 vs 23.43 ms, inside run-to-run noise), so the shipped shape is
+    unchanged.
+    """
+    return (1 if block_dim <= 128 else 2), 1
+
+
 def paged_decode(
     q: torch.Tensor,
     k_cache: torch.Tensor,
@@ -280,13 +296,7 @@ def paged_decode(
     scale_log2 = float(scale) * _LOG2E
 
     block_dim = D
-    # Measured on a 4090: one warp per program is fastest for D 64/128 because the page
-    # reductions stay inside a warp (no shared-memory barrier per page); D=256 needs two
-    # warps to keep enough lanes busy. ``num_stages=1`` avoids pipelining a loop whose
-    # carried softmax state is the dependency. The kernel is one page per iteration; see
-    # scripts/bench_decode_kernel.py for the sweep these numbers come from.
-    num_warps = 1 if block_dim <= 128 else 2
-    num_stages = 1
+    num_warps, num_stages = _launch_config(block_dim)
     grid = (B, H)
     _paged_decode_kernel[grid](
         q,
@@ -320,6 +330,216 @@ def paged_decode(
         num_stages=num_stages,
     )
     return out
+
+
+class PagedDecodePlan:
+    """Per-container launch metadata for repeated :func:`paged_decode` calls.
+
+    Why this exists
+    ---------------
+    ``paged_decode`` re-checks the whole contract on every call. That is right for a
+    public entry point, but a 28-layer decode step calls it 28 times with tensors whose
+    *structure* is identical: the pool is allocated once, every layer has the same shape
+    and strides, and the block table / seqlen are container-owned. Measured on the E2
+    workload (W45-0005, B=8, 28 layers), the wrapper cost 64.9 us of host time per layer
+    against 37.7 us for the same launch with precomputed metadata; switching the
+    container to this plan moved its decode step from 23.60 ms to 23.08 ms (single-run
+    harness numbers, +-0.3 ms run-to-run). The launch is only part of the step -- it is
+    partly hidden behind the kernel -- which is why the win is smaller than 0.76 ms.
+
+    A plan validates every ``(k_cache, v_cache)`` pair **once** (the full
+    :func:`paged_decode` contract, including the seqlen range check) and caches the launch
+    metadata that follows from those shapes. ``run`` then re-checks only the one input
+    that changes per layer -- the query -- and launches.
+
+    Invariants (and invalidation)
+    -----------------------------
+    * The validated ``k``/``v`` tensors are held by reference. A caller that *replaces*
+      an entry of the pool's layer list must build a new plan; the container rebuilds
+      itself (and its plan) whenever the active set changes, and a pool's tensors are
+      allocated once and never replaced.
+    * The block table and int32 seqlen are held by reference and may be mutated in place
+      (that is the decode contract: ``seqlen`` advances every step). The seqlen range
+      check is therefore the same cached one ``paged_decode`` already uses, and the kernel
+      clamps the page walk to the table width. An int64 seqlen is rejected rather than
+      copied, because a copy would silently stop tracking those in-place updates.
+    * ``run`` refuses a query whose shape, dtype, device or strides differ from the
+      validated one, so the cached strides can never describe a different layout.
+    """
+
+    __slots__ = (
+        "n_layer",
+        "grid",
+        "_tail",
+        "_meta",
+        "q_shape",
+        "q_dtype",
+        "q_device",
+        "q_strides",
+        "_k",
+        "_v",
+        "_block_table",
+        "_seqlen",
+    )
+
+    def __init__(
+        self,
+        q: torch.Tensor,
+        k_caches,
+        v_caches,
+        block_table: torch.Tensor,
+        seqlen: torch.Tensor,
+        *,
+        scale: float | None = None,
+    ) -> None:
+        _require_backend()
+        _require_cuda_tensors(
+            (("q", q), ("block_table", block_table), ("seqlen", seqlen))
+        )
+        if q.dim() != 3:
+            raise ValueError(f"q must be (B, H, D), got shape {tuple(q.shape)}")
+        if not q.is_contiguous():
+            raise ValueError(
+                "paged_decode_plan needs a contiguous (B, H, D) query, got strides "
+                f"{q.stride()}; call .contiguous() once, not per layer"
+            )
+        b, h, d = q.shape
+        if b == 0:
+            raise ValueError("paged_decode_plan needs at least one row")
+        # The plan holds the seqlen tensor by reference so in-place step updates are seen.
+        # An int64 input would be copied to int32 once and then go stale; make the caller
+        # cast at the boundary (the container already stores int32).
+        if seqlen.dtype != torch.int32:
+            raise ValueError(
+                "paged_decode_plan requires an int32 seqlen so in-place updates are "
+                f"visible; got {seqlen.dtype}. Cast once at the container boundary."
+            )
+        if seqlen.stride(0) != 1:
+            raise ValueError(
+                "paged_decode_plan requires a contiguous 1-D seqlen; got strides "
+                f"{seqlen.stride()}"
+            )
+        if block_table.stride(1) != 1:
+            raise ValueError(
+                "paged_decode_plan requires a column-contiguous block table; got strides "
+                f"{block_table.stride()}"
+            )
+        k_caches = list(k_caches)
+        v_caches = list(v_caches)
+        if len(k_caches) != len(v_caches) or not k_caches:
+            raise ValueError(
+                "paged_decode_plan needs one k_cache/v_cache per layer, got "
+                f"{len(k_caches)} / {len(v_caches)}"
+            )
+        for layer, (k_cache, v_cache) in enumerate(zip(k_caches, v_caches)):
+            # Full contract once per layer: shape/dtype/device cross-checks, the int32
+            # block-table rule, and the (cached) seqlen range validation.
+            _require_cuda_tensors(
+                (
+                    (f"k_cache[{layer}]", k_cache),
+                    (f"v_cache[{layer}]", v_cache),
+                )
+            )
+            _validate(q, k_cache, v_cache, block_table, seqlen, for_kernel=True)
+            if tuple(k_cache.shape) != tuple(k_caches[0].shape) or tuple(
+                v_cache.shape
+            ) != tuple(v_caches[0].shape):
+                raise ValueError("paged_decode_plan needs one pool shape for every layer")
+            if k_cache.stride() != k_caches[0].stride():
+                raise ValueError("paged_decode_plan needs one pool layout for every layer")
+            if v_cache.stride() != v_caches[0].stride():
+                raise ValueError("paged_decode_plan needs one v-pool layout for every layer")
+
+        self.n_layer = len(k_caches)
+        block_size = int(k_caches[0].shape[1])
+        self._k = k_caches
+        self._v = v_caches
+        self._block_table = block_table
+        self._seqlen = seqlen
+
+        self.q_shape = (int(b), int(h), int(d))
+        self.q_dtype = q.dtype
+        self.q_device = q.device
+        self.q_strides = (int(q.stride(0)), int(q.stride(1)), int(q.stride(2)))
+
+        if scale is None:
+            scale = 1.0 / math.sqrt(d)
+        scale_log2 = float(scale) * _LOG2E
+        # One heuristic for both entry points, so the plan and paged_decode can never
+        # launch the same kernel with different block shapes.
+        num_warps, _num_stages = _launch_config(int(d))
+        self.grid = (int(b), int(h))
+        self._meta = {
+            "H": int(h),
+            "H_KV": int(k_caches[0].shape[2]),
+            "BLOCK_D": int(d),
+            "BLOCK_N": int(block_size),
+            "num_warps": num_warps,
+            "num_stages": _num_stages,
+        }
+        # Every trailing scalar is fixed by the validated layouts: q/out share the (B,H,D)
+        # strides, and every layer's pool shares one stride tuple.
+        k0 = k_caches[0]
+        v0 = v_caches[0]
+        self._tail = (
+            self.q_strides[0],
+            self.q_strides[1],
+            self.q_strides[2],
+            int(k0.stride(0)),
+            int(k0.stride(1)),
+            int(k0.stride(2)),
+            int(k0.stride(3)),
+            int(v0.stride(0)),
+            int(v0.stride(1)),
+            int(v0.stride(2)),
+            int(v0.stride(3)),
+            self.q_strides[0],
+            self.q_strides[1],
+            self.q_strides[2],
+            int(block_table.stride(0)),
+            int(block_table.shape[1]),
+            scale_log2,
+        )
+
+    def run(self, layer: int, q: torch.Tensor) -> torch.Tensor:
+        """Launch the kernel for one layer; ``q`` must match the validated layout."""
+        if not 0 <= int(layer) < self.n_layer:
+            raise IndexError(f"layer {layer} outside the plan's {self.n_layer} layers")
+        if (
+            tuple(q.shape) != self.q_shape
+            or q.dtype != self.q_dtype
+            or q.device != self.q_device
+            or q.stride() != self.q_strides
+        ):
+            raise ValueError(
+                "paged_decode_plan.run got a query that does not match the validated "
+                f"layout {(self.q_shape, self.q_dtype, self.q_strides)}; got "
+                f"{(tuple(q.shape), q.dtype, q.stride())}. Rebuild the plan for a new layout."
+            )
+        out = torch.empty_like(q)
+        _paged_decode_kernel[self.grid](
+            q, self._k[layer], self._v[layer], self._block_table, self._seqlen, out,
+            *self._tail, **self._meta,
+        )
+        return out
+
+
+def paged_decode_plan(
+    q: torch.Tensor,
+    k_caches,
+    v_caches,
+    block_table: torch.Tensor,
+    seqlen: torch.Tensor,
+    *,
+    scale: float | None = None,
+) -> PagedDecodePlan:
+    """Validate one container's paged-decode tensors and cache their launch metadata.
+
+    ``k_caches`` / ``v_caches`` are one tensor per layer (the pool's ``keys`` /
+    ``values``). The returned plan's :meth:`PagedDecodePlan.run` is the per-layer hot
+    path; :func:`paged_decode` remains the fully-revalidating public entry point.
+    """
+    return PagedDecodePlan(q, k_caches, v_caches, block_table, seqlen, scale=scale)
 
 
 def reference_paged_decode(

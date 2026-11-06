@@ -631,3 +631,111 @@ def test_begin_step_zeroes_the_gather_account():
         "gather_write_mb": 0.0,
         "gather_calls": 0,
     }
+
+
+# ---------------------------------------------------- decode write: slot map (W4.5 C1)
+#
+# The per-layer decode write used to build Python ``block_ids``/``offsets`` lists and do
+# one advanced-index assignment per layer. It now derives one device slot tensor per step
+# (``PagedKV._refresh_slots``) and scatters with ``PagedPool.write_slots``. These tests pin
+# the bytes to the *same* mapping ``write_token`` implements, so the optimization cannot
+# change what lands in the pool.
+
+def test_slot_write_is_bit_identical_to_write_token():
+    torch.manual_seed(11)
+    pool_slots, pool_ref = _pool(n_blocks=8), _pool(n_blocks=8)
+    assert torch.equal(pool_slots.keys[0], pool_ref.keys[0])
+    tables = [[5, 1, 7], [2, 0, 6]]
+    lengths = [20, 5]
+    kv = PagedKV(pool_slots, tables, lengths, rope_len=64, n_head=N_HEAD)
+
+    k = torch.randn(2, N_KV_HEAD, 1, HEAD_DIM)
+    v = torch.randn(2, N_KV_HEAD, 1, HEAD_DIM)
+    kv.write(0, k, v)
+
+    for row, (table, position) in enumerate(zip(tables, lengths)):
+        pool_ref.write_token(
+            0, [row], [table], [position], k[row : row + 1, :, 0, :], v[row : row + 1, :, 0, :]
+        )
+
+    assert torch.equal(pool_slots.keys[0], pool_ref.keys[0])
+    assert torch.equal(pool_slots.values[0], pool_ref.values[0])
+
+
+def test_slot_write_crosses_a_block_boundary_with_a_shuffled_table():
+    """The slot is ``table[pos // bs] * bs + pos % bs`` -- not the logical column."""
+    pool = _pool(n_blocks=8)
+    table = [5, 1, 7]  # deliberately not [0, 1, 2]
+    kv = PagedKV(pool, [table], [BS16 - 1], rope_len=64, n_head=N_HEAD)
+    before = pool.keys[0].clone()
+    k = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+    v = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+    kv.write(0, k, v)
+
+    flat = pool.keys[0].view(-1, N_KV_HEAD, HEAD_DIM)
+    slot = table[(BS16 - 1) // BS16] * BS16 + (BS16 - 1) % BS16
+    assert torch.equal(flat[slot], k[0, :, 0, :])
+    changed = (pool.keys[0] != before).any(dim=-1).any(dim=-1).view(-1).nonzero().tolist()
+    assert changed == [[slot]], f"only the mapped slot may change, got {changed}"
+
+
+def test_slot_map_follows_a_rebuilt_container():
+    """A new container (new block table) must write through *its* table, not a cached one."""
+    pool = _pool(n_blocks=8)
+    k_a = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+    k_b = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+    v = torch.zeros(1, N_KV_HEAD, 1, HEAD_DIM)
+
+    first = PagedKV(pool, [[0, 1, 2]], [5], rope_len=64, n_head=N_HEAD)
+    first.write(0, k_a, v)
+    second = PagedKV(pool, [[3, 4, 5]], [5], rope_len=64, n_head=N_HEAD)
+    second.write(0, k_b, v)
+
+    flat = pool.keys[0].view(-1, N_KV_HEAD, HEAD_DIM)
+    assert torch.equal(flat[0 * BS16 + 5], k_a[0, :, 0, :])
+    assert torch.equal(flat[3 * BS16 + 5], k_b[0, :, 0, :])
+
+
+def test_write_past_the_block_table_raises_before_touching_the_pool():
+    pool = _pool(n_blocks=4)
+    kv = PagedKV(pool, [[0]], [BS16], rope_len=32, n_head=N_HEAD)  # exactly one block
+    before = pool.keys[0].clone()
+    k = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+    v = torch.randn(1, N_KV_HEAD, 1, HEAD_DIM)
+
+    with pytest.raises(IndexError, match="block table has 1 blocks"):
+        kv.write(0, k, v)
+    assert torch.equal(pool.keys[0], before), "a refused write must not touch the pool"
+
+    # The next position after the last token is out of range; the container parks there
+    # without raising until a write is actually attempted (a request may end on it).
+    kv2 = PagedKV(pool, [[1]], [BS16 - 1], rope_len=32, n_head=N_HEAD)
+    kv2.build_mask(next_token=True)
+    kv2.write(0, k, v)
+    kv2.advance()
+    assert kv2._slot_ids is None
+    with pytest.raises(IndexError, match="needs block 1"):
+        kv2.write(0, k, v)
+
+
+def test_write_slots_rejects_bad_arguments():
+    pool = _pool(n_blocks=4)
+    k, v = _kv(2)  # (2, H_KV, D)
+    slots = torch.tensor([0, 1], dtype=torch.long)
+    pool.write_slots(0, slots, k, v)  # the accepted shape, for contrast
+    slots32 = slots.to(torch.int32)
+    pool.write_slots(0, slots32, k, v)  # int32 is accepted and cast to long
+    assert torch.equal(pool.keys[0].view(-1, N_KV_HEAD, HEAD_DIM)[slots32.long()], k)
+
+    with pytest.raises(ValueError, match="one entry per token"):
+        pool.write_slots(0, slots[:1], k, v)
+    with pytest.raises(ValueError, match="integer tensor"):
+        pool.write_slots(0, slots.float(), k, v)
+    with pytest.raises(ValueError, match="k/v shapes differ"):
+        pool.write_slots(0, slots, k, v[:1])
+    with pytest.raises(ValueError, match="head shape"):
+        pool.write_slots(0, slots, k[:, :, :2], v[:, :, :2])
+    with pytest.raises(IndexError, match="outside the pool's"):
+        pool.write_slots(N_LAYER, slots, k, v)  # layer index is 0..N_LAYER-1
+    with pytest.raises((IndexError, RuntimeError)):
+        pool.write_slots(0, torch.tensor([0, 10_000], dtype=torch.long), k, v)
