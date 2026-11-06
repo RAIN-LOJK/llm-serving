@@ -1,0 +1,59 @@
+# W4-0004 · E2 代价基线（seat 臂）：8 条最长 prompt / B=8 / budget 128
+# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# 运行：python -m bench.run --config configs/experiments/W4/0004-seat-b8-cost.toml
+#
+# 用途：plan §4.4 的 E2 seat 臂。8 条最长 frozen prompt、budget 128、closed、B=8：
+#   8 行 × bucket(1517 + 128, 64) = 8 × 1664 = 1456 MiB，两边每步 lpad 都是 1664，
+#   只统计 decode 步的 step_ms，作为 0005 的代价基线（C4）。
+# 门禁：本臂只做基线；0005 的 step_ms ≤1.15× 健康、>1.5× 撤回吞吐结论（C4）。
+#
+# 选 prompt 的规则：E2 用 bench/prompts.json 的 `long` 桶（l01–l08，共 8 条，Qwen tokenizer
+# 实测 1051–1549 token），由 [workload].prompt_ids 显式锁定；runner 会按该顺序过滤
+# PromptSet，并把过滤后的子集写入 prompt_sha256（同时记录 prompt_ids 与原集 hash）。
+# 0004/0005 必须引用**同一份** prompt 集、同一组 prompt_ids、同 budget、同 seed，
+# 否则 prompt_sha256 / trace_sha256 不同，配对判 invalid（D5）。
+
+schema = 1
+
+[exp]
+id = "W4-0004"
+stage = "W4"
+type = "scenario"
+slug = "seat-b8-cost"
+title = "E2 代价基线（seat）：8 条最长 / B=8 / budget 128"
+hypothesis = ["seat_decode_step_cost_is_the_cost_baseline_for_paged"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+prompt_ids = ["l01", "l02", "l03", "l04", "l05", "l06", "l07", "l08"]   # long 桶，顺序即 trace 顺序
+max_new_tokens = 128
+arrival = "closed"               # 8 条一起就绪 = 一步 wave，没有准入/排队噪声
+requests = 8                     # = max_batch：8 行全忙，lpad 恒为 1664
+budgets = [128]
+batch_sizes = [1]                # 并发度是 [engine].max_batch（P-20）
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 8
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"             # 基线臂不判；0005 对它求比值
+criteria = []

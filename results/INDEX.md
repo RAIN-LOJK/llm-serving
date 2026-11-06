@@ -32,5 +32,6 @@
 | W4-0001 | W4 | microbench | E0 数值门：paged 64 token 贪心输出与 golden 逐 id 全等 | Qwen/Qwen3-0.6B | paged | tok_s 30 | unreviewed | completed | 2026-11-06 | 9dc5211 |
 | W4-0002 | W4 | fill | E1 容量（seat）：W3-like / fill-only / B=9 | Qwen/Qwen3-0.6B | continuous | peak_concurrency 9 | unreviewed | completed | 2026-11-06 | 6652ef4 |
 | W4-0003 | W4 | fill | E1 容量（paged）：W3-like max-2048 / fill-only / 800 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 28 | unreviewed | completed | 2026-11-06 | 0d800b9 |
+| W4-0004 | W4 | scenario | E2 代价基线（seat）：8 条最长 / B=8 / budget 128 | Qwen/Qwen3-0.6B | continuous | tok_s 356 | unreviewed | completed | 2026-11-06 | 1a97b6f |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
