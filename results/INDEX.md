@@ -29,5 +29,6 @@
 | W3-0017 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=1 参照（ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 47.8 | pass | completed | 2026-11-03 | 295a8df |
 | W3-0018 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=8（P1，ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 361 | pass | completed | 2026-11-03 | d9e505a |
 | W3-0019 | W3 | microbench | E1 批处理摊薄 host：ctx511 / B=32（P2，ctx512 EOS 后的替代） | Qwen/Qwen3-0.6B | continuous | tok_s 1.18e+03 | pass | completed | 2026-11-03 | 7a70e19 |
+| W4-0001 | W4 | microbench | E0 数值门：paged 64 token 贪心输出与 golden 逐 id 全等 | Qwen/Qwen3-0.6B | paged | tok_s 30 | unreviewed | completed | 2026-11-06 | 9dc5211 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

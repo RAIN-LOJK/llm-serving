@@ -1,0 +1,5 @@
+run_id: W4-0001
+status: completed
+device_class: measure-cuda
+rows: 65 (errors: 0)
+summary: results/W4/0001-paged-numeric-gate/summary.json
