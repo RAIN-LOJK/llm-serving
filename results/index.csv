@@ -32,15 +32,15 @@ W4-0006,W4,scenario,E3 同预算系统吞吐（seat，可选）：frozen 32 / po
 W4-0007,W4,scenario,E3 同预算系统吞吐（paged，可选）：frozen 32 / poisson / B=64 / 820 块,Qwen/Qwen3-0.6B,paged,tok_s 321,invalid,completed,2026-11-06,b7be3b4,results/W4/0007-paged-saturate
 W4-0008,W4,scenario,E3 同预算系统吞吐（paged，800 块）：frozen 32 / poisson / B=64,Qwen/Qwen3-0.6B,paged,tok_s 325,inconclusive,completed,2026-11-06,c301b26,results/W4/0008-paged-saturate-800
 W4-0009,W4,scenario,E3′ 同预算系统吞吐（paged，prefill 修复后，800 块）：frozen 32 / poisson / B=64,Qwen/Qwen3-0.6B,paged,tok_s 358,pass,completed,2026-11-06,b8fa5c1,results/W4/0009-paged-saturate-fixed
-W45-0001,W45,microbench,E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等,Qwen/Qwen3-0.6B,paged,tok_s 27.6,unreviewed,completed,2026-11-06,ab4aef1,results/W45/0001-paged-packed-numeric-gate
-W45-0002,W45,fill,E1 容量（seat）：W3-like / fill-only / B=9 / serial,Qwen/Qwen3-0.6B,continuous,peak_concurrency 9,unreviewed,completed,2026-11-06,0b04ae7,results/W45/0002-seat-fill
-W45-0003,W45,fill,E1 容量（paged）：W3-like / fill-only / 800 块 / serial,Qwen/Qwen3-0.6B,paged,peak_concurrency 28,unreviewed,completed,2026-11-06,5a9b4e1,results/W45/0003-paged-fill
-W45-0004,W45,scenario,E2 decode 基线（seat）：8 条最长 / B=8 / budget 128,Qwen/Qwen3-0.6B,continuous,tok_s 340,unreviewed,completed,2026-11-06,3fcca5e,results/W45/0004-seat-b8-cost
-W45-0005,W45,scenario,E2 decode 内核（paged）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 285,unreviewed,completed,2026-11-06,c19a5f3,results/W45/0005-paged-b8-cost
-W45-0006,W45,scenario,E3 prefill A/B（serial）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 39.1,unreviewed,completed,2026-11-06,7021e02,results/W45/0006-static-serial-prefill
-W45-0007,W45,scenario,E3 prefill A/B（packed）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 148,unreviewed,completed,2026-11-06,dd9206c,results/W45/0007-static-packed-prefill
-W45-0008,W45,scenario,E4 端到端（seat）：W4 trace / packed prefill / B=9,Qwen/Qwen3-0.6B,continuous,tok_s 331,unreviewed,completed,2026-11-06,548a216,results/W45/0008-seat-saturate
-W45-0009,W45,scenario,E4 端到端（paged）：W4 trace / packed prefill + Triton decode / 800 块,Qwen/Qwen3-0.6B,paged,tok_s 679,unreviewed,completed,2026-11-06,bb30f0d,results/W45/0009-paged-saturate
-W45-0010,W45,scenario,E4b（可选）static / B=8 / mixed / packed prefill,Qwen/Qwen3-0.6B,continuous,tok_s 157,unreviewed,completed,2026-11-06,0141fce,results/W45/0010-static-b8-mixed
-W45-0011,W45,scenario,E4b（可选）continuous / B=8 / mixed / packed prefill,Qwen/Qwen3-0.6B,continuous,tok_s 293,unreviewed,completed,2026-11-06,b97c45d,results/W45/0011-continuous-b8-mixed
-W45-0012,W45,scenario,E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 329,unreviewed,completed,2026-11-06,f333483,results/W45/0012-paged-b8-cost-fixed
+W45-0001,W45,microbench,E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等,Qwen/Qwen3-0.6B,paged,tok_s 27.6,pass,completed,2026-11-06,ab4aef1,results/W45/0001-paged-packed-numeric-gate
+W45-0002,W45,fill,E1 容量（seat）：W3-like / fill-only / B=9 / serial,Qwen/Qwen3-0.6B,continuous,peak_concurrency 9,pass,completed,2026-11-06,0b04ae7,results/W45/0002-seat-fill
+W45-0003,W45,fill,E1 容量（paged）：W3-like / fill-only / 800 块 / serial,Qwen/Qwen3-0.6B,paged,peak_concurrency 28,pass,completed,2026-11-06,5a9b4e1,results/W45/0003-paged-fill
+W45-0004,W45,scenario,E2 decode 基线（seat）：8 条最长 / B=8 / budget 128,Qwen/Qwen3-0.6B,continuous,tok_s 340,pass,completed,2026-11-06,3fcca5e,results/W45/0004-seat-b8-cost
+W45-0005,W45,scenario,E2 decode 内核（paged）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 285,fail,completed,2026-11-06,c19a5f3,results/W45/0005-paged-b8-cost
+W45-0006,W45,scenario,E3 prefill A/B（serial）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 39.1,pass,completed,2026-11-06,7021e02,results/W45/0006-static-serial-prefill
+W45-0007,W45,scenario,E3 prefill A/B（packed）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 148,pass,completed,2026-11-06,dd9206c,results/W45/0007-static-packed-prefill
+W45-0008,W45,scenario,E4 端到端（seat）：W4 trace / packed prefill / B=9,Qwen/Qwen3-0.6B,continuous,tok_s 331,pass,completed,2026-11-06,548a216,results/W45/0008-seat-saturate
+W45-0009,W45,scenario,E4 端到端（paged）：W4 trace / packed prefill + Triton decode / 800 块,Qwen/Qwen3-0.6B,paged,tok_s 679,pass,completed,2026-11-06,bb30f0d,results/W45/0009-paged-saturate
+W45-0010,W45,scenario,E4b（可选）static / B=8 / mixed / packed prefill,Qwen/Qwen3-0.6B,continuous,tok_s 157,pass,completed,2026-11-06,0141fce,results/W45/0010-static-b8-mixed
+W45-0011,W45,scenario,E4b（可选）continuous / B=8 / mixed / packed prefill,Qwen/Qwen3-0.6B,continuous,tok_s 293,pass,completed,2026-11-06,b97c45d,results/W45/0011-continuous-b8-mixed
+W45-0012,W45,scenario,E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 329,pass,completed,2026-11-06,f333483,results/W45/0012-paged-b8-cost-fixed

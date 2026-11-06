@@ -179,7 +179,7 @@ def _latency(
     ttft = percentiles(_values(request_rows, "ttft_ms"))
     queue = percentiles(_values(request_rows, "queue_ms"))
     prefill = percentiles(_values(request_rows, "prefill_ms"))
-    # W4.5 (docs/w4.5-plan.md §4.4): a serial row has no pack_wait field, and its wait is
+    # W4.5 (D7 TTFT row): a serial row has no pack_wait field, and its wait is
     # structurally zero; anything else is used as written. ``prefill_shared_ms`` is the
     # per-group shared prefill -- identical to ``prefill_ms`` for a serial request, but
     # reported separately because a packed group pays it once for every member.

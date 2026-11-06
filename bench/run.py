@@ -137,7 +137,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 f"[engine].impl='paged' (got {kv_blocks!r})"
             )
 
-    # ---- W4.5 attention-path contract (docs/w4.5-plan.md §7) ----------
+    # ---- W4.5 attention-path contract (D7) ----------------------------
     # These keys are additive: W0–W4 configs never write them, so their validation is
     # unchanged. `prefill` is the temporary E3 control arm, not a production fallback;
     # `packed` without a scheduler arm would silently do nothing (there is no batch to

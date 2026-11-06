@@ -274,27 +274,33 @@
 
 > **W4 末检查点**：D1 已接受（2026-10-22）→ 主线先走 **W4.5**（注意力路径 v2），再进 W5；若 D1 为否，则直接跳 W8 打包（W0–W4 已是完整交付）。
 
-### W4.5 · 注意力路径 v2：packed prefill + block-table decode（代码完成，正式 run 待跑）
+### W4.5 · 注意力路径 v2：packed prefill + block-table decode（✅ 2026-11-06）
 
 - **为什么单开一格**：W4 的两个问题都是**路径级**——① decode 的 gather 是 dense `hand_baddbmm` 的必然代价（D6 / P-32），C4 1.671× 使 paged 只能报容量；② prefill 逐请求串行（`Scheduler` 对每个 admitted request 逐个 `prefill_into_*`），`ttft == queue + prefill` 只在串行下成立。只换 decode 内核 = `W4-0010`，不够开阶段；**packed prefill 才是能力变化**。
 - **目标**：把 attention 路径从「逐请求 SDPA prefill + gather decode」升级为「**packed whole-prompt prefill + Triton block-table decode**」；seat/paged 两臂共用同一接口；不 chunk、不与 decode 混批。
 - **范围**：
   - **packed prefill**：FA2 `flash_attn_varlen_func`（不读 paged cache，因此不受 256 page 约束）、无 pad、`cu_seqlens`/`max_seqlen`；seat/paged 两臂；scheduler 按 `max_prefill_tokens` FIFO 打包，超 budget 的 prompt 单独 prefill。
-  - **paged decode**：自写 Triton kernel，直接吃 `(n_blocks, bs, H_kv, D)` + `block_table` + `seqlens`；bs16/32、GQA、D=128/256、bf16；保留新 token 的 slot 写入；删 gather / `lpad` / 零块 / mask-bias / `gather_*` 记账。
+  - **paged decode**：自写 Triton kernel，直接吃 `(n_blocks, bs, H_kv, D)` + `block_table` + `seqlens`；bs16/32、GQA、D=128/256、bf16；保留新 token 的 slot 写入；生产路径不读 gather / `lpad` / 零块 / mask-bias，控制臂保留到 W5 前清理。
   - **测量契约**：`queue_ms` / `pack_wait_ms` / `prefill_shared_ms` + 每请求归因；`ttft == queue + prefill` 降为**串行臂专用**。D7 冻结。
 - **门禁（Day 1–2，go/no-go）**：① FA2 varlen 在 0.6B（D=128、pack 2/4/8）对拍逐序列 SDPA，数值 / 无 pad / TTFT 过线；② Triton decode 对拍 dense oracle，B=8 / L=1664 的 `step_ms` ≤ seat。**两个都过才开阶段**；①/② 任一不过，按 §8 降级（decode 走 `W4-0010`，或只做 packed prefill），不硬写 prefill kernel。
-- **验收**（阈值在 `w4.5-plan` 预注册）：
+- **验收**（阈值在 `configs/thresholds.toml [W45.paged]` 预注册，收口时未改值）：
   - P1 packed == serial（token ids；logits 容差）；无 pad。
   - P2 mixed load 下 TTFT p99 / tok/s 改善 ≥ 预注册线。
   - **W4 的 C1/C2 不变**（同 bs16、800 块、28 并发、0.55%）；**W4 的 E3 必跑**；W3 的 C1 降为**可选 E4b**（static vs continuous 的 Poisson 回归，只报不判）。
   - C3：golden 64/64 + paged vs seat 容差；C4：paged decode ≤ seat（目标 ≤1.0×，接受 <1.15×）；E3：≥ seat。
-  - 删除 gather 路径与其记账；paged 在 CUDA 上必须走 kernel，MPS 显式 skip（不静默回退）。
+  - 生产路径不回退 gather；paged 在 CUDA 上必须走 kernel，MPS 显式 skip。serial/gather 控制臂保留到 W5 开工前清理（D7 后果 5），因为历史 run 的 `reproduce.sh` 仍依赖它们。
 - **不做**：chunked prefill、prefix cache、CUDA graph、抢占/swap、FA2 paged decode/bs256；hybrid GDN 的 packed prefill 留 W6（W4.5 只冻结接口）。
-- **文档/证据**：D7（测量契约 + 取代 D4/D6 的 attention 条款）、`docs/w4.5-plan.md`（临时，收口删除；生命周期见 plan §11）；D7 proposed；run `W45-0001…`（stage=`W45`；`RUN_ID_RE` 不接受点，人类可读名仍是 W4.5）待跑；dry run 已过，正式 run 需干净树。
+- **正式结果（2026-11-06，clean tree）**：
+  - E0 `W45-0001` golden **64/64**；E1 `W45-0002/0003` **9 vs 28 = 3.111×**，`kv_total 1601.97 ≤ 1640`；C2 frag **0.55%**。
+  - E2 `W45-0005` pre-fix **1.203× fail** → `W45-0012` post-fix **1.040× pass（接受线）**，但仍高于 1.0 目标；E2 8/8 token 全等。
+  - E3 `W45-0006/0007` TTFT p99 **3.760×**、p50 **0.512×**，两项 pass。
+  - E4 `W45-0008/0009` seat **330.53** vs paged **678.59 tok/s = 2.053×**，both saturated，paged 峰值 34、`kv_total=1400`；token 27/32 只作诊断。
+  - E4b `W45-0010/0011` static **157.15** vs continuous **292.80 tok/s = 1.863×**，both saturated；只报不判。
+- **文档/证据**：D7 **accepted**；`W45-0001…0012` 已审（0005 为 pre-fix fail，0012 supersedes）；临时执行计划已删除，结论见 D7 与本段。
   - 图：`figures/fig_w4_5_decode.png`（C1 1.203× → 1.040×）、`figures/fig_w4_5_prefill.png`（E3 p99 3.76×）；由 `scripts/plot_w45.py` 从已提交 summary 生成。
 - **时间盒/止损**：spike 1–2 天 + 实现 7–9 天 + 重跑 2–3 天 ≈ 2 周；超时先砍 prefill 保 decode，不让 W5/W6 买单。
 
-> W4.5 不改 W4 的 **C1 3.111× / C2 0.55%**；只让 C4 的 paged 臂、E3 与 TTFT 口径由新 run 取代。
+> W4.5 不改 W4 的 **C1 3.111× / C2 0.55%**；paged decode 从 W4 的 1.671× 负结果变为 `W45-0012` 的 **1.040×（接受线，非 1.0 目标）**。
 
 ### W5 · 混合层实现（一）：全注意力层改造
 
@@ -455,7 +461,7 @@ python scripts/exp_index.py --check
 | W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
 | W4 | 分页 KV | ✅ | C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（按预注册不报吞吐）；post-fix `0009` **1.074×** 为 record-only addendum；`W4-0001…0006/0008/0009`（0007 over-budget，0008 pre-fix/superseded） |
-| W4.5 | 注意力路径 v2：packed prefill + block-table decode | 🟡 | 代码与 dry run 完成（G1 1.93–3.98×；G2 0.089 ms；E0 64/64；E1 3.111×；E2 1.089×；E3 p99 3.49×；E4 590 vs 327 tok/s）；正式 `W45-0001…0011` 待跑；D7 proposed |
+| W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
@@ -488,10 +494,11 @@ python scripts/exp_index.py --check
 | 2026-11-06 | v16 | **E3 补跑（post-hoc record-only）**：按用户指示在 C4 失败后补跑，不改变 C4。`W4-0006` seat **333.44 tok/s** vs `W4-0008` paged 800 **325.19 tok/s = 0.975×**（同 trace、both saturated）；decode-only **1.103×**，但 prefill 3.39× 把整体拉回略负。`W4-0007` 820 块峰值 **1661.8 MiB > 1640**（R5，动态 36 活跃；summary 的 1455.16 是末步，不是峰值），只保留为 over-budget 记录；`W4-0008` 800 块峰值 **1626.8 ≤ 1640**，是有效同预算臂。E3 是 **post-hoc**，不进 C1–C4；W4 仍不报吞吐。docs 清理：`w4-handoff.md` 与两个容量 sweep JSON 删除，只保留三张图；新增 P-38。 |
 | 2026-11-06 | v17 | **post-fix：prefill slot mapping + E3′**。`PagedPool.write_prefill` 从 per-block 循环改成 slot mapping + 一次 advanced indexing（每层 K/V 各一次；E2 探索 551.8→176.8 ms，seat 163.0，1.08×；40/40 token 不变）。正式 `W4-0009`（800 块、同 `0006` trace）**358.18 tok/s** vs `0006` **333.44** = **1.074×**，both saturated，峰值 **1626.8 ≤ 1640**；decode-only 1.094×，E3 per-request prefill **76.4→23.0 ms**。`0007` 820 块峰值 1661.8>1640（R5）仅 over-budget record；`0008` 是 pre-fix 0.975×，由 `0009` `supersedes`。**C4 仍 1.671×**（只改 prefill，decode 未动），W4 的 C4 负结果/不报吞吐不变；0009 是 post-hoc post-fix 实验，不是 C4 pass。新增 P-39。 |
 | 2026-11-06 | v18 | **W4 评审收口**：9 个 verdict 已审（`0001–0006/0009` pass；`0007` invalid/over-budget；`0008` inconclusive/pre-fix/superseded）；§12 W4 → **✅**。最终结论：C1 **3.111×**、C2 **0.55%**、C3 全等；C4 **1.671×** 负结果，按预注册**不报吞吐**；post-fix `0009` **1.074×** 为 record-only addendum，不改变 C4。 |
-| 2026-11-06 | v19 | **W4.5 立项**：W4 的 gather decode（C4 1.671×）与逐请求 prefill 是路径级问题 → packed whole-prompt prefill（FA2 varlen、无 pad、seat/paged 两臂）+ Triton block-table decode（bs16/32、GQA、D=128/256），删 gather/lpad/零块/mask-bias。门禁：FA2 varlen 在 0.6B 对拍逐序列 SDPA + Triton decode ≤ seat；不过则 decode 走 `W4-0010`、直接 W5。不做 chunked prefill/prefix cache/CUDA graph/bs256；hybrid GDN packed prefill 留 W6。测量契约（queue/pack_wait/prefill_shared）与 `docs/w4.5-plan.md` 待写（D7）。 |
-| 2026-11-06 | v20 | **W4.5 plan 落地**：`docs/w4.5-plan.md` 写入（E0–E4 + 可选 E4b、双 spike 门禁、测量契约、控制臂、配置/阈值、文档生命周期）；W3 C1 降为可选 E4b（只报不判），W4 E3 必跑；plan 收口删除，D7/PITFALLS/ROADMAP 持久。 |
+| 2026-11-06 | v19 | **W4.5 立项**：W4 的 gather decode（C4 1.671×）与逐请求 prefill 是路径级问题 → packed whole-prompt prefill（FA2 varlen、无 pad、seat/paged 两臂）+ Triton block-table decode（bs16/32、GQA、D=128/256），删 gather/lpad/零块/mask-bias。门禁：FA2 varlen 在 0.6B 对拍逐序列 SDPA + Triton decode ≤ seat；不过则 decode 走 `W4-0010`、直接 W5。不做 chunked prefill/prefix cache/CUDA graph/bs256；hybrid GDN packed prefill 留 W6。测量契约（queue/pack_wait/prefill_shared）与临时执行计划待写（D7）。 |
+| 2026-11-06 | v20 | **W4.5 plan 落地**：临时执行计划写入（E0–E4 + 可选 E4b、双 spike 门禁、测量契约、控制臂、配置/阈值、文档生命周期）；W3 C1 降为可选 E4b（只报不判），W4 E3 必跑；plan 收口删除，D7/PITFALLS/ROADMAP 持久。 |
 | 2026-11-06 | v21 | **W4.5 命名对齐 run 契约**：`bench/run.py::RUN_ID_RE` 只接受 `[A-Z]\d+`，点不合法 → stage/id 用 **`W45`**（`results/W45/`、`W45-NNNN`、`[exp].stage="W45"`、阈值段 `[W45]`）；人类可读名仍是 W4.5，plan 已同步。 |
 | 2026-11-06 | v22 | **W4.5 代码完成 + dry run 校准**：`model/attention/varlen.py`（FA2/SDPA varlen）、`model/packed.py`、`model/triton_decode.py`、`serve/engine.py::prefill_group`、`serve/scheduler.py` 的 packed admission 与 `pack_wait/prefill_shared` 记账、bench plumbing 与 `[W45.paged]` 阈值、W45 配置 0001–0011 全部落地；快速门禁 627 passed。dry run（dirty，仅校准）：G1 1.93–3.98×、G2 0.089 ms、E0 64/64、E1 3.111×、E2 1.089–1.097×、E3 p99 3.49×/p50 0.558×、E4 590 vs 327 tok/s、E4b 1.86×（record-only）。**C3 口径修正**：E4 跨调度器 token 一致率（75.8%）只作诊断，精确门禁只判 E0/E2；D7 proposed，P-40…P-45 落地。正式 `W45-0001…0011` 需干净树重跑。 |
+| 2026-11-06 | v23 | **W4.5 正式收口**：`W45-0001…0012` 全部干净树跑完并审。E0 **64/64**；E1 **9/28 = 3.111×**；E2 pre-fix `W45-0005` **1.203× fail** → post-fix `W45-0012` **1.040× pass**（接受线，1.0 目标未达；frag 0.55%、8/8 token）；E3 p99 **3.760×**/p50 **0.512×**；E4 **330.53 → 678.59 tok/s = 2.053×**（both saturated，paged 峰值 34、kv_total 1400）；E4b **157.15 → 292.80 = 1.863×**（record-only）。E4/E4b token 27/32、24/32 只作诊断。D7 accepted；`[W45.paged]` calibrated（basis `W45-0012`，阈值未改）；plan 删除；图 `figures/fig_w4_5_decode.png`、`figures/fig_w4_5_prefill.png`；serial/gather 控制臂保留到 W5 开工前清理。 |
 
 ---
 
@@ -520,7 +527,7 @@ python scripts/exp_index.py --check
 | W7 | LightLLM `common/state_cache_manager.py` + `qwen3next_mem_manager.py` | 同上 | 唯一把「KV 块池 + 线性常数状态池」放进同一 manager 的开源实现：常数状态池的句柄与生命周期 | 其调度器与 kernel |
 | W7 | vLLM V1 `v1/core/kv_cache_coordinator.py` | `github.com/vllm-project/vllm` | 多 cache type 的协调抽象（概念） | 整个 V1 引擎（分布式 / CUDA graph / 后端全家桶） |
 
-> W4 的实现口径（总预算 / 容量 / 碎片 / ±1 门禁）见 `docs/decisions.md` **D6**；W4.5 的测量契约与 attention 条款见 **D7**（proposed，正式 run 前确认）。
+> W4 的实现口径（总预算 / 容量 / 碎片 / ±1 门禁）见 `docs/decisions.md` **D6**；W4.5 的测量契约与 attention 条款见 **D7**（accepted，2026-11-06 收口）。
 
 两件已核实、可省弯路的事：
 

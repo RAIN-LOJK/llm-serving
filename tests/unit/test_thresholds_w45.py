@@ -76,11 +76,12 @@ def _check(name, ours, baseline=None):
 # --------------------------------------------------------------------------- config
 
 
-def test_real_w45_section_is_provisional_and_complete():
+def test_real_w45_section_is_calibrated_and_complete():
     table = thresholds.load()
     section = table["W45"]["paged"]
-    assert section["status"] == "target"
-    assert section["basis_run"] == ""
+    assert section["status"] == "calibrated"
+    assert section["basis_run"] == "W45-0012"
+    # Calibration records the observed point; the pre-registered values do not move.
     for name, value in W45.items():
         assert section[name] == value, name
     # W4's own section is untouched by the W4.5 addition.

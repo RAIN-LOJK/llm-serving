@@ -1,8 +1,8 @@
 {
   "run_id": "W45-0009",
-  "verdict": "unreviewed",
-  "reviewer": null,
-  "reviewed_at": null,
-  "decision_id": null,
-  "notes": ""
+  "verdict": "pass",
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-06",
+  "decision_id": "D7",
+  "notes": "E4 paged：678.59 vs 330.53 = 2.053x，both saturated，kv_total=1400；token 诊断 27/32。"
 }

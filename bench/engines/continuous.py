@@ -80,7 +80,7 @@ class ContinuousEngine:
         # keeps every W3 scenario row on the original path (``run_fill_trace`` is only
         # entered when a fill config asks for it).
         self.fill = bool(fill)
-        # W4.5 control arm (docs/w4.5-plan.md §4.1/§5). ``prefill`` is the temporary
+        # W4.5 control arm (D7 control-arm clause). ``prefill`` is the temporary
         # serial/packed switch, ``max_prefill_tokens`` the per-step packing budget. The
         # engine (serve/) consumes both; the adapter only records what was asked for so
         # provenance cannot drift from the config. ``decode`` is recorded the same way;
@@ -386,7 +386,7 @@ def _request_row(
 ) -> dict[str, Any]:
     """One request row in the field names ``bench/scenario.py`` reads (D5).
 
-    W4.5 adds the packed-prefill attribution (``docs/w4.5-plan.md`` §4.4)::
+    W4.5 adds the packed-prefill attribution (D7 TTFT row)::
 
         queue_ms          = t_admitted - t_arrival       (W3: t_prefill_start - t_arrival)
         pack_wait_ms      = t_prefill_start - t_admitted  (0.0 without a scheduler stamp)

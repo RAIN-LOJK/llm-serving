@@ -84,14 +84,17 @@ basis_run = ""
 state_estimate_error_max = 0.20
 
 [W45.paged]
-# W4.5 (docs/decisions.md D7). These are **provisional targets, not measurements**.
-# Frozen after the E0/E2 dry run (2026-11-06) and before the first formal run;
-# after that do not relax them (a failed line is a negative result, not a retune).
+# W4.5 (docs/decisions.md D7). Targets, not measurements; calibrated 2026-11-06.
+# The lines were frozen after the E0/E2 dry run and did **not** change at closeout.
 # `capacity_speedup_min` / `fragmentation_max` carry W4's C1/C2 over unchanged (same
 # direction as `max_concurrency_speedup_min` / `fragmentation_max`; the alias exists so
 # the W4.5 configs can cite their own section).
-status = "target"
-basis_run = ""
+# Formal evidence: W45-0012 C1 1.040x pass (pre-fix W45-0005 1.203x fail; 1.0 target
+# not met); W45-0003 C1 capacity 3.111x; W45-0007 E3 p99 3.760x / p50 0.512x;
+# W45-0009 E4 678.59 vs 330.53 tok/s (record-only, both saturated); E4/E4b token
+# agreement is diagnostic only.
+status = "calibrated"
+basis_run = "W45-0012"
 # C4: paged block-table decode step_ms / seat decode step_ms at the largest common
 # decode-only active bucket (prefill steps excluded; W4 D6's C4 scope).
 decode_step_ratio_max = 1.15

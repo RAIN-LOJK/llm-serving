@@ -157,7 +157,7 @@ class FillScheduler(Scheduler):
             "retired": self._retired_this_step,
             "step_ms": step_ms,
             "prefill_ms": prefill_ms,
-            # W4.5 step attribution (docs/w4.5-plan.md §4.4). A group is one packed
+            # W4.5 step attribution (D7 TTFT row). A group is one packed
             # prefill forward; a serial fill pass has no packed groups, so it reports
             # one group (zero when nothing was admitted) and pack_wait ~0.
             "prefill_groups": prefill_groups,

@@ -346,7 +346,7 @@
 ## D7 · W4.5 注意力路径 v2：packed prefill + block-table decode 的口径
 
 - **日期**：2026-11-06
-- **状态**：proposed（口径已按 dry run 校准；正式 run 前由用户确认后转 accepted）
+- **状态**：accepted（2026-11-06；正式 run 与收口已完成）
 - **取代/关系**：
   - **部分取代 D4**：W4.5 的 seat/paged 两臂 prefill 改为 packed varlen（FA2 on CUDA /
     SDPA-per-segment on CPU），paged decode 改为 Triton block-table kernel；D4 的
@@ -363,25 +363,30 @@
   「整 prompt 打包的 varlen prefill + 直接读块表的 decode」，因此必须先冻结：打包/准入
   策略、TTFT 的归属、控制臂、C3 的适用范围，以及哪些数字可以跨臂比较。
 
-- **证据（dry run，dirty，仅用于校准；正式证据须干净树重跑）**：
-  - G1 `scripts/bench_prefill_pack.py --spike fa2`：B=2/4/8 的 packed/serial
+- **证据（正式 run，clean tree，2026-11-06；按 run id 引用）**：
+  - G1 `scripts/bench_prefill_pack.py --spike fa2`（校准）：B=2/4/8 的 packed/serial
     `prefill_ms` = 1.93× / 3.47× / 3.98×；token ids 全等；`max|Δ|` = 0.30 / 0.44 / 0.50
     （bf16，Qwen3 logits 的 |max|≈28，属于 kernel 归约顺序差异，不是接线错）。
-  - G2 `scripts/bench_decode_kernel.py --spike triton`：0.6B anchor（B=8, L=1664, D=128）
-    单次 kernel p50 0.089 ms；对 dense oracle 的 bf16 `max|Δ|` = 2.44e-4。
+  - G2 `scripts/bench_decode_kernel.py --spike triton`（校准）：0.6B anchor（B=8, L=1664,
+    D=128）单次 kernel p50 0.089 ms；这是**同一层反复读、L2 热**的数，不能外推 28 层冷读；
+    集成判据只看 E2 的 `step_ms`（P-47）。对 dense oracle 的 bf16 `max|Δ|` = 2.44e-4。
   - `W45-0001`：packed + Triton，s01 64 token，golden **64/64**（match_rate=1.0）。
   - `W45-0002/0003`：E1 容量 **9 vs 28 = 3.111×**；`kv_total = 1601.97 ≤ 1640`。
-  - `W45-0004/0005`：E2 `step_ms` paged/seat = **1.097×**（active=8，27.293 / 24.888 ms）；
-    8/8 first-repeat prompt token hash 全等；frag 0.0055。
-  - `W45-0006/0007`：E3 TTFT p99 **3.491×**（208.02 / 59.59 ms），p50 **0.558×**
-    （58.24 / 104.37 ms）。
-  - `W45-0008/0009`：E4 seat **327.37 tok/s**、paged **590.04 tok/s**（1.80×），两臂
-    `saturated=true`，paged `kv_total=1400`；paged/seat 的逐请求 token 一致率
-    **75.8%（31/128 不同）**、token 级 **78.9%**，见下面 C3 条款，**不作为门禁**。
-  - 同组对照（两臂相同 packed group、相同 prompt/预算、128 步）：seat vs paged gather
-    **8/8 全等**；seat vs paged Triton 3/8 prompt 翻转，首个翻转的 top-2 margin 为
-    0.0 / 0.0625 / 0.0，单步 kernel 差 2.44e-4。翻转发生在 bf16 的 near-tie 上，
-    不是块表/位置/页掩码错误。
+  - `W45-0004/0005/0012`：E2 pre-fix `W45-0005` 27.379 / 22.749 = **1.203× fail**；
+    post-fix `W45-0012` 23.651 / 22.749 = **1.040× pass（接受线）**，但仍高于 1.0 目标；
+    frag 0.0055；E2 8/8 prompt token hash 全等。**不得再用 dry run 的 1.089×**：那次
+    seat 分母是含离群值的 24.888 ms，正式 seat 是 22.749 ms。
+  - `W45-0006/0007`：E3 TTFT p99 **3.760×**（207.378 / 55.149 ms），p50 **0.512×**
+    （53.859 / 105.143 ms）；两项均 pass。
+  - `W45-0008/0009`：E4 seat **330.53 tok/s**、paged **678.59 tok/s** = **2.053×**，
+    两臂 `saturated=true`；paged 峰值 34、`kv_total=1400 MiB`。paged/seat 的逐请求
+    token hash 一致率 **27/32（84.4%）**，只作诊断，见下面 C3 条款。
+  - `W45-0010/0011`（E4b，可选）：static **157.15 tok/s**、continuous **292.80
+    tok/s** = **1.863×**，两臂 `saturated=true`；p99 30.29 → 9.82 s；token hash
+    24/32（75.0%）只作诊断。E4b 只报不判。
+  - C3 的同组证据：E2（closed、同 packed group）seat vs paged Triton 8/8；E0 golden
+    64/64。E4/E4b 的 group 组成不同，bf16 near-tie 会翻转 greedy id；首个翻转的
+    top-2 margin 为 0.0 / 0.0625 / 0.0、单步 kernel 差 2.44e-4，不是块表/位置/页掩码错误。
 
 - **判据（引用 `configs/thresholds.toml` 的 `[W45.paged]`，本决策不复制数值）**：
 
@@ -423,10 +428,13 @@
      同时给出一致率和首个翻转的 top-2 margin，不能只报一个百分比。
   4. **`decode="gather"` 是 oracle**：paged 生产路径在 CUDA 上必须走 Triton；`auto` 只按
      device 解析，不因 Triton 缺失而静默切 gather（缺失时构造/调用直接 `RuntimeError`）。
-  5. **阶段结束删除**：`[engine].prefill` 开关与 serial 生产分支；`PagedPool.gather`、
-     `lpad`、`zero_block`、`mask-bias`、`gather_*` 记账从生产路径移到
-     `tests/reference/`（oracle 保留）。`max_prefill_tokens` 保留。删除前先 `grep` 确认
-     没有生产引用，并跑完整快速门禁。
+  5. **控制臂的生命周期（收口时保留）**：`[engine].prefill="serial"` 与
+     `decode="gather"` 只作 W4.5 控制臂/oracle；W4.5 的正式配置使用 packed + Triton，
+     代码的 `serial` 默认仅保留给历史 run/控制臂，`auto` 不会回退到 serial/gather。
+     **本次收口保留它们**，因为 `W45-0002/0003/0006` 与 W4 历史配置的 `reproduce.sh` 仍依赖这些路径；在 W5 开工前、确认不再需要历史复现后，再把
+     `PagedPool.gather`、`lpad`、`zero_block`、`mask-bias`、`gather_*` 记账移到
+     `tests/reference/`，并删除 serial 生产分支。`max_prefill_tokens` 保留。删除前先
+     `grep` 确认没有生产引用，并跑完整快速门禁。
   6. **新坑（收口时编号，候选 P-40…P-45）**：
      - P-40 packed 的 TTFT 是共享时间，p50 可能变差、p99 可能变好；只报均值会掩盖；
      - P-41 FA2 的 256 page 约束只在 `block_table` 路径触发，varlen prefill 不受影响，
@@ -439,11 +447,12 @@
 
 - **复盘点**：
   - 正式 E4 两臂是否都 `saturated=true`；paged tok/s 是否 ≥ seat；`kv_total ≤1640`；
-  - E2 的 1.097× 是否稳定在 1.15× 以内；若 >1.15×，先加 split-K/瓦片，不调阈值；
-  - E4 的 token 一致率与首个翻转 margin 是否与 dry run 同量级；若出现 early-token
+  - E2 的正式值：pre-fix 1.203× fail，post-fix 1.040× pass（接受线）；未再调阈值。
+    若未来复测回到 >1.15×，先查 host 派发/写入路径，再考虑 split-K/瓦片；
+  - E4 的 token 一致率与首个翻转 margin 是否与正式 run 同量级；若出现 early-token
     大面积翻转（不是 near-tie），按 kernel bug 查，不引用吞吐；
   - E4b（可选）continuous/static 比值是否被 packed 稀释；
-  - 收口时删除 `docs/w4.5-plan.md`，本决策、PITFALLS、ROADMAP、`results/W45/` 保留。
+  - 临时执行计划已删除；本决策、PITFALLS、ROADMAP、`results/W45/` 保留。
 
 ---
 

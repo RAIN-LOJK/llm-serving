@@ -1,14 +1,15 @@
 # serve/ · 推理引擎
 
 > 状态：`engine.py` / `scheduler.py` 已完成 W3（连续批 C1 **2.01×**，C2/C3 pass）；
-> W4 的 paged 池已跑完核心 run + E3（C1 **3.111×**、C2 **0.55%**、C3 全等；
-> C4 **1.671×** 负结果；E3 pre-fix 0.975×，post-fix `0009` **1.074×**），
-> 口径见 `docs/decisions.md` **D6**；`state_pool.py`(W7) 待实现。本文件只固定模块边界，避免把调度/缓存逻辑塞回 `llm_utils/`。
+> W4 的 paged 池（C1 **3.111×**、C2 **0.55%**、C3 全等；C4 1.671× 负结果）和
+> W4.5 的 packed prefill + Triton block-table decode（C1 **1.040× 接受线**、E3 p99
+> **3.760×**、E4 **2.053×**）已落地，口径见 **D6/D7**；`state_pool.py`(W7) 待实现。
+> 本文件只固定模块边界，避免把调度/缓存逻辑塞回 `llm_utils/`。
 
 | 模块 | 职责 | 阶段 |
 |---|---|---|
-| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `prefill_into_blocks` / `release_request` / `paged_stats`）。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 |
-| `scheduler.py` | 请求状态机、准入/退出、static 与 continuous 两条策略的 step 主循环；准入前问引擎的可选 `can_admit`（拿不到块则队头留队列，不跳过） | W3 / W4 |
+| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `prefill_into_blocks` / `release_request` / `paged_stats`）；W4.5 的 `prefill_group` 与 `decode=auto|triton|gather`。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 / W4.5 |
+| `scheduler.py` | 请求状态机、准入/退出、static 与 continuous 两条策略的 step 主循环；W4.5 的 packed admission 与 `pack_wait/prefill_shared` 归因；准入前问引擎的可选 `can_admit`（拿不到块则队头留队列，不跳过） | W3 / W4 / W4.5 |
 | `block_manager.py` | 分页 KV 的块分配器：free list、原子预留、整张块表归还、`FragStats`（internal frag / reservation slack / seat row slack，时间加权） | W4 |
 | `state_pool.py` | 线性层状态池 + KV 块统一句柄与生命周期 | W7 |
 
@@ -39,6 +40,27 @@ W4 分页路径（`docs/decisions.md` D6）
   `serve/scheduler.py` 用显式 `paged` 属性判定，不靠 `hasattr(engine, "slab")`（未开席位池时该属性会 raise）。
 - **两套名字不共用**：W3 席位退出用 `freeze_seat`（冻结游标、保留预留，P-26 原语义），
   W4 请求退出用 `release_request`（归还块、幂等）。不要互相复用。
+
+W4.5 注意力路径 v2（`docs/decisions.md` D7）
+---
+
+- **prefill**：一个 packed group 走一次 varlen forward（CUDA `flash_attn_varlen_func`，
+  CPU/MPS 逐段 SDPA）；无 pad、request-major、请求内 RoPE，只有每组 last token 过 `lm_head`。
+  打包策略是 FIFO 填到 `max_prefill_tokens` 或 `max_batch`，不拆 prompt、不 chunk；超预算的
+  队头单独成组（P-44）。
+- **paged decode**：`PagedKV(decode_impl="triton")` 直接读
+  `(n_blocks, bs, n_kv_head, head_dim)` + int32 block table + int32 seqlen；没有 gather /
+  `lpad` / 零块 / mask-bias。`PagedDecodePlan` 每容器做一次全量契约校验，之后每层只查 query
+  布局；新 token 走 `write_slots`（每步算一次 device slot map，`index_copy_` 写）。
+- **seat decode** 仍是 `hand_baddbmm` + `KvSlab`；W4.5 的正式配置使用 packed + Triton，
+  代码的 `prefill="serial"` 默认只保留给历史 run/控制臂，`decode="gather"` 只作 oracle，
+  **都不是生产回退**。生产 paged 在 CUDA 上必须走 Triton；`auto` 只按 device 解析，缺
+  Triton 时直接报错（D7）。
+- **正式结果**：`W45-0001` golden **64/64**；E1 **9/28 = 3.111×**；E2 pre-fix `W45-0005`
+  **1.203× fail** → post-fix `W45-0012` **1.040× pass（接受线，非 1.0 目标）**；
+  E3 p99 **3.760×** / p50 **0.512×**；E4 `W45-0008/0009` **330.53 → 678.59 tok/s =
+  2.053×**（both saturated；paged 峰值 34、kv_total 1400）。E4/E4b 的 token 一致率只作诊断
+  （D7 C3 条款）。
 
 **W4 实测（`W4-0001…0009`；0007 over-budget，0008 pre-fix）**：同 1640 MiB 总预算、
 W3-like trace，seat **9** vs paged **28**（**3.111×**）；uniform-2048 负对照 1.00×（模拟）；
