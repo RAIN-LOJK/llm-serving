@@ -52,7 +52,7 @@
   1664 时 1456），是**流量**；`workspace_mb = 52.42 MiB` 是**占用**，两者不混（P-35）。
 - `decode_event_ms` 的差值（paged − seat）= **14.17 ms**；`gather_ms` 的 9.44 ms 是
   `perf_counter` 的 host 派发时间，不是 GPU 时间。事件窗口里还有约 4.7 ms 的 gather GPU
-  工作没被 `gather_ms` 单独计到（见 `docs/fig_w4_step.png` 的脚注）。
+  工作没被 `gather_ms` 单独计到（见 `figures/fig_w4_step.png` 的脚注）。
 - 实现里 `gather` 先 `index_select` 到中间 buffer，再 `permute + copy_` 到 workspace；
   `gather_read_mb` 只记源/目的各一遍，中间 buffer 的额外读写未计入，所以上表 4.16 GiB
   是**记账值**，不是实测 DRAM 流量。

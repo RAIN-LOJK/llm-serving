@@ -2,7 +2,7 @@
 """Plot the W0 carrier probe: per-sequence state, prefill, and decode vs context.
 
 Reads one run's ``summary.json`` (default: ``results/W0/0001-carrier-probe``) and writes
-``docs/fig_w0_crossover.png``. Numbers come from the run directory, never from this file;
+``figures/fig_w0_crossover.png``. Numbers come from the run directory, never from this file;
 the analytic account lives in ``docs/carrier.md``.
 
 Usage::
@@ -55,7 +55,7 @@ def _crossover(groups: dict[tuple[str, int], dict]) -> float | None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", default="results/W0/0001-carrier-probe", help="run directory")
-    parser.add_argument("--out", default="docs/fig_w0_crossover.png", help="output PNG")
+    parser.add_argument("--out", default="figures/fig_w0_crossover.png", help="output PNG")
     args = parser.parse_args()
 
     run_dir = Path(args.run)

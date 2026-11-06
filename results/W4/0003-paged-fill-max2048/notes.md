@@ -29,7 +29,7 @@
   → **`sim=28 expected=28 delta=0 gate=PASS(±1)`**。
 - `trace_sha256 = 2c047181...`、`prompt_sha256 = 7548f3a6...`，与 `W4-0002` 相同。
 - 负对照：同一模拟器在 1640 MiB 下 uniform-2048 为 **6 vs 6 = 1.00×**（只报不判）；
-  见 `docs/fig_w4_capacity.png`。
+  见 `figures/fig_w4_capacity.png`。
 
 ## 结论（含“什么时候不划算”）
 
@@ -38,7 +38,7 @@
 - 收益不是「分页创造了显存」，而是把 seat 每行 72.4% 的空闲行宽换成了按请求的块。
   长度越均匀收益越小：uniform-2048 是 **1.00×** 的负对照，不是失败线。
 - 预算越松、长度越均匀、请求数越少，比值都会下降；C1 只是 1640 MiB 这条竖线，
-  报告主图是 `docs/fig_w4_capacity.png`。
+  报告主图是 `figures/fig_w4_capacity.png`。
 
 ## 限制与偏差
 

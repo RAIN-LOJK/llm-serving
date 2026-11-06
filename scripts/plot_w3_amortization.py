@@ -3,7 +3,7 @@
 
 Reads **only** each E1 run's ``summary.json`` (never ``metrics.jsonl``) from
 ``results/W3/0017-...`` through ``results/W3/0019-...`` plus ``W3-0006`` /
-``W3-0007`` and writes ``docs/fig_w3_amortization.png``. The original ctx512
+``W3-0007`` and writes ``figures/fig_w3_amortization.png``. The original ctx512
 cells (``0003-0005``) emitted EOS after 3 tokens and are superseded by
 ``0017-0019`` at ctx511 (see PITFALLS P-31); 511 is 1 token below 512.
 
@@ -44,7 +44,7 @@ a marker, a data line or its panel edge.
 Usage::
 
     python scripts/plot_w3_amortization.py
-    python scripts/plot_w3_amortization.py --results results --out docs/fig_w3_amortization.png
+    python scripts/plot_w3_amortization.py --results results --out figures/fig_w3_amortization.png
     python scripts/plot_w3_amortization.py --debug        # per-label boxes + audit dump
     python scripts/plot_w3_amortization.py --show
 """
@@ -913,7 +913,7 @@ def build_figure(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", default="results", help="results root (the W3 stage is joined)")
-    parser.add_argument("--out", default="docs/fig_w3_amortization.png", help="output PNG")
+    parser.add_argument("--out", default="figures/fig_w3_amortization.png", help="output PNG")
     parser.add_argument(
         "--debug",
         action="store_true",

@@ -150,7 +150,7 @@
 - Qwen3.5-0.8B 在 4090 上跑不动 → 退 2B 或纯注意力
 - **判定（2026-10-22）**：P1 实测 7.80×（8k）/ 8.90×（32k）→ **接受移植**，见 `docs/decisions.md` D1。
 
-**产出**：`docs/carrier.md`、`docs/fig_w0_crossover.png`（`scripts/plot_w0_crossover.py` 生成）、
+**产出**：`docs/carrier.md`、`figures/fig_w0_crossover.png`（`scripts/plot_w0_crossover.py` 生成）、
 `results/W0/0001-carrier-probe/`（summary + metrics）、`docs/decisions.md` D1
 
 ---
@@ -265,7 +265,7 @@
     E3 per-request prefill 中位数 **76.4 → 23.0 ms**（seat 21.4）。prefill 修复把旧的
     0.975× 翻成 +7.4%，但 **C4 仍是 1.671×**（本次只改 prefill，decode 未动），
     所以 W4 的 C4 负结果/不报吞吐不变；0009 是 post-hoc post-fix 实验，不是 C4 pass。
-  - 图：`docs/fig_w4_capacity.png`、`docs/fig_w4_memory.png`、`docs/fig_w4_step.png`。
+  - 图：`figures/fig_w4_capacity.png`、`figures/fig_w4_memory.png`、`figures/fig_w4_step.png`。
 - **C4 口径偏差**：plan 假设两边 `lpad=1664`；实机 paged 的 `lpad` 是**本步最长活跃长度**，
   实际为 1536/1600/1664。按 1664 子集复核仍为 1.673×，所以结论不依赖该偏差；
   后续引用必须写实际桶，不能写「全程 1664」。
@@ -291,6 +291,7 @@
   - 删除 gather 路径与其记账；paged 在 CUDA 上必须走 kernel，MPS 显式 skip（不静默回退）。
 - **不做**：chunked prefill、prefix cache、CUDA graph、抢占/swap、FA2 paged decode/bs256；hybrid GDN 的 packed prefill 留 W6（W4.5 只冻结接口）。
 - **文档/证据**：D7（测量契约 + 取代 D4/D6 的 attention 条款）、`docs/w4.5-plan.md`（临时，收口删除；生命周期见 plan §11）；D7 proposed；run `W45-0001…`（stage=`W45`；`RUN_ID_RE` 不接受点，人类可读名仍是 W4.5）待跑；dry run 已过，正式 run 需干净树。
+  - 图：`figures/fig_w4_5_decode.png`（C1 1.203× → 1.040×）、`figures/fig_w4_5_prefill.png`（E3 p99 3.76×）；由 `scripts/plot_w45.py` 从已提交 summary 生成。
 - **时间盒/止损**：spike 1–2 天 + 实现 7–9 天 + 重跑 2–3 天 ≈ 2 周；超时先砍 prefill 保 decode，不让 W5/W6 买单。
 
 > W4.5 不改 W4 的 **C1 3.111× / C2 0.55%**；只让 C4 的 paged 臂、E3 与 TTFT 口径由新 run 取代。

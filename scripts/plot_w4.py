@@ -10,14 +10,14 @@ Inputs (never edited here):
 * ``results/W4/0003.../metrics.jsonl`` -- replayed by the allocator simulator
 
 The capacity sweep is regenerated into a temporary directory on every run by
-calling ``scripts/sim_paged_capacity.py``; no capacity JSON is stored in ``docs/``.
+calling ``scripts/sim_paged_capacity.py``; no capacity JSON is stored in ``figures/``.
 
-Outputs:
+Outputs (``figures/`` by default):
 
-* ``docs/fig_w4_capacity.png`` -- same-total-budget capacity ratio, with the measured
+* ``figures/fig_w4_capacity.png`` -- same-total-budget capacity ratio, with the measured
   W4-0003 point and the uniform-2048 negative control;
-* ``docs/fig_w4_memory.png``   -- E2 same-concurrency memory cost and E1 capacity/GiB;
-* ``docs/fig_w4_step.png``     -- E2 decode-step decomposition and the ratio by lpad.
+* ``figures/fig_w4_memory.png``   -- E2 same-concurrency memory cost and E1 capacity/GiB;
+* ``figures/fig_w4_step.png``     -- E2 decode-step decomposition and the ratio by lpad.
 
 Every number is read from the run artifacts; the script does not recompute model
 timings. Text is English because the machine has no CJK font in matplotlib.
@@ -138,7 +138,7 @@ def _capacity_rows(results: Path, tmp: Path) -> tuple[list[dict[str, Any]], list
     """Regenerate the synthetic sweep and the real-trace replay, then read both.
 
     The JSONs are intermediates, not deliverables: they live only for the duration of
-    ``main``'s temp directory. ``docs/`` keeps the PNGs, not the sweep data.
+    ``main``'s temp directory. ``figures/`` keeps the PNGs, not the sweep data.
     """
     synthetic_path = tmp / "synthetic.json"
     trace_path = tmp / "trace.json"
@@ -475,13 +475,11 @@ def plot_step(results: Path, out: Path) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--results", default="results", help="results root (default: results)")
-    parser.add_argument("--docs", default="docs", help="docs root (default: docs)")
-    parser.add_argument("--out-dir", default=None, help="figure directory (default: docs)")
+    parser.add_argument("--out-dir", default="figures", help="figure directory (default: figures)")
     args = parser.parse_args(argv)
 
     results = Path(args.results)
-    docs = Path(args.docs)
-    out_dir = Path(args.out_dir) if args.out_dir else docs
+    out_dir = Path(args.out_dir)
 
     required = [
         results / RUNS["seat_fill"] / "summary.json",

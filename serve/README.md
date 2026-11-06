@@ -48,4 +48,4 @@ vs paged 800 **325.19 = 0.975×**；修复 prefill（slot mapping）后 `W4-0009
 1.074×**（both saturated，峰值 1626.8 ≤1640；decode-only 1.094×；E3 per-request prefill
 76.4→23.0 ms）。**C4 仍是 1.671×**：只改 prefill，decode 未动，所以 0009 是 post-hoc
 post-fix 实验，不是 C4 pass。同并发多付 workspace 52.42 MiB（+3.6%）。详见
-`ROADMAP.md` §5 W4、`results/W4/`、`docs/fig_w4_{capacity,memory,step}.png`。
+`ROADMAP.md` §5 W4、`results/W4/`、`figures/fig_w4_{capacity,memory,step}.png`。

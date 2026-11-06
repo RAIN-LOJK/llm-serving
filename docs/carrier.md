@@ -86,7 +86,7 @@ KV + 线性状态 + 卷积窗口），`peak_mem_mb` / `mem_delta_mb` 作辅助�
 
 ### 3.1 交叉图
 
-![W0 crossover](fig_w0_crossover.png)
+![W0 crossover](../figures/fig_w0_crossover.png)
 
 复现：`python scripts/plot_w0_crossover.py`（读 `results/W0/0001-carrier-probe/summary.json`）。
 
