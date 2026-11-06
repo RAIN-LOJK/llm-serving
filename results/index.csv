@@ -34,3 +34,4 @@ W4-0008,W4,scenario,E3 同预算系统吞吐（paged，800 块）：frozen 32 / 
 W4-0009,W4,scenario,E3′ 同预算系统吞吐（paged，prefill 修复后，800 块）：frozen 32 / poisson / B=64,Qwen/Qwen3-0.6B,paged,tok_s 358,pass,completed,2026-11-06,b8fa5c1,results/W4/0009-paged-saturate-fixed
 W45-0001,W45,microbench,E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等,Qwen/Qwen3-0.6B,paged,tok_s 27.6,unreviewed,completed,2026-11-06,ab4aef1,results/W45/0001-paged-packed-numeric-gate
 W45-0002,W45,fill,E1 容量（seat）：W3-like / fill-only / B=9 / serial,Qwen/Qwen3-0.6B,continuous,peak_concurrency 9,unreviewed,completed,2026-11-06,0b04ae7,results/W45/0002-seat-fill
+W45-0003,W45,fill,E1 容量（paged）：W3-like / fill-only / 800 块 / serial,Qwen/Qwen3-0.6B,paged,peak_concurrency 28,unreviewed,completed,2026-11-06,5a9b4e1,results/W45/0003-paged-fill
