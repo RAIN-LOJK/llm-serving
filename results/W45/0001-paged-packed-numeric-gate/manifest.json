@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "run_id": "W45-0001",
+  "stage": "W45",
+  "type": "microbench",
+  "slug": "paged-packed-numeric-gate",
+  "title": "E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等",
+  "hypothesis": [
+    "packed_prefill_and_block_table_decode_are_golden_equivalent"
+  ],
+  "supersedes": null,
+  "status": "completed",
+  "started_at": "2026-11-06T13:33:04+00:00",
+  "finished_at": "2026-11-06T13:33:18+00:00",
+  "duration_s": 14.421,
+  "operator": "root",
+  "git": {
+    "commit": "ab4aef1152adc1583993f1eedf904033dbf65412",
+    "branch": "w4-paged-kv",
+    "dirty": false,
+    "describe": "ab4aef1"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W45/0001-paged-packed-numeric-gate.toml",
+  "config_sha256": "3b30dafecd5eb8b2649f3292eca5b41f154de6230892156e145cbbaacc721662",
+  "prompt": {
+    "path": "bench/prompts.json",
+    "version": "v0-2026-10",
+    "sha256": "3dd470c789d0e1b273d096b539b0acf609c9f06448027bdf117460b8721e0f4b",
+    "n_prompts": 1,
+    "prompt_set_sha256": "7548f3a6c7e6f601b8100e0798e9c8bc60b33a0db9c251537692395f1ce3a663",
+    "n_prompts_in_set": 32,
+    "prompt_ids": [
+      "s01"
+    ]
+  },
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "paged",
+    "device": "cuda",
+    "max_batch": 1,
+    "block_size": 16,
+    "kv_blocks": 64,
+    "prefill": "packed",
+    "max_prefill_tokens": 8192,
+    "decode": "triton",
+    "resolved_device": "cuda",
+    "vocab_size": 151936,
+    "dtype": "bfloat16",
+    "attn": {
+      "prefill": "flash-attn-varlen",
+      "decode": "paged-triton"
+    }
+  },
+  "workload": {
+    "kind": "prompts",
+    "prompts": "bench/prompts.json",
+    "max_new_tokens": 64,
+    "arrival": "closed",
+    "requests": 1,
+    "prompt_ids": [
+      "s01"
+    ],
+    "budgets": [
+      64
+    ],
+    "batch_sizes": [
+      1
+    ]
+  },
+  "measure": {
+    "warmup": 0,
+    "repeats": 1,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "threshold",
+    "criteria": [
+      "golden_token_match_min"
+    ],
+    "golden": "tests/golden/qwen3-0-6b/0001"
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W45/0001-paged-packed-numeric-gate.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "scheduler": {
+    "policy": "continuous",
+    "max_batch": 1,
+    "prefill": "packed",
+    "max_prefill_tokens": 8192,
+    "seats": "paged_blocks",
+    "block_size": 16,
+    "kv_blocks": 64,
+    "free_rows": "not_applicable",
+    "decode": "triton"
+  },
+  "trace": {
+    "arrival": "closed",
+    "rate": null,
+    "burstiness": 1.0,
+    "requests": 1,
+    "budgets": [
+      64
+    ],
+    "seed": 0,
+    "sha256": "07ca5f6575000a7d783a053ba7e60bf9cfcbf4510bf8fc4a056836d43340480d",
+    "shuffle": false
+  },
+  "_scenario_summaries": [
+    {
+      "throughput": {
+        "n_traces": 1,
+        "tok_s": {
+          "n": 1,
+          "median": 27.55422982809904,
+          "p95": 27.55422982809904,
+          "min": 27.55422982809904,
+          "max": 27.55422982809904,
+          "mean": 27.55422982809904,
+          "cv": 0.0
+        },
+        "tok_s_active": {
+          "n": 1,
+          "median": 31.369650191810802,
+          "p95": 31.369650191810802,
+          "min": 31.369650191810802,
+          "max": 31.369650191810802,
+          "mean": 31.369650191810802,
+          "cv": 0.0
+        },
+        "decode_only_tok_s": {
+          "n": 1,
+          "median": 31.617571592823648,
+          "p95": 31.617571592823648,
+          "min": 31.617571592823648,
+          "max": 31.617571592823648,
+          "mean": 31.617571592823648,
+          "cv": 0.0
+        },
+        "req_s": {
+          "n": 1,
+          "median": 0.4305348410640475,
+          "p95": 0.4305348410640475,
+          "min": 0.4305348410640475,
+          "max": 0.4305348410640475,
+          "mean": 0.4305348410640475,
+          "cv": 0.0
+        },
+        "makespan_s": {
+          "n": 1,
+          "median": 2.322692,
+          "p95": 2.322692,
+          "min": 2.322692,
+          "max": 2.322692,
+          "mean": 2.322692,
+          "cv": 0.0
+        },
+        "offered_rate": null,
+        "achieved_rate": {
+          "n": 1,
+          "median": 0.4305348410640475,
+          "p95": 0.4305348410640475,
+          "min": 0.4305348410640475,
+          "max": 0.4305348410640475,
+          "mean": 0.4305348410640475,
+          "cv": 0.0
+        },
+        "saturated": false,
+        "queue_depth_at_last_arrival": {
+          "n": 1,
+          "median": 0.0,
+          "p95": 0.0,
+          "min": 0.0,
+          "max": 0.0,
+          "mean": 0.0,
+          "cv": 0.0
+        },
+        "peak_concurrency": 1.0,
+        "analytic_straggler_ratio": null
+      },
+      "latency": {
+        "ttft_ms": {
+          "p50": 282.50387869775295,
+          "p95": 282.50387869775295,
+          "p99": 282.50387869775295
+        },
+        "queue_ms": {
+          "p50": 0.054795295000076294,
+          "p95": 0.054795295000076294,
+          "p99": 0.054795295000076294
+        },
+        "prefill_ms": {
+          "p50": 282.4451569467783,
+          "p95": 282.4451569467783,
+          "p99": 282.4451569467783
+        },
+        "pack_wait_ms": {
+          "p50": 0.003926455974578857,
+          "p95": 0.003926455974578857,
+          "p99": 0.003926455974578857
+        },
+        "prefill_shared_ms": {
+          "p50": 282.4451569467783,
+          "p95": 282.4451569467783,
+          "p99": 282.4451569467783
+        },
+        "queue_share_p99": 0.0001939629829249213,
+        "decomposed": true
+      },
+      "steps": {
+        "by_active": [
+          {
+            "active": 0,
+            "n": 1,
+            "step_ms": 27.626167982816696,
+            "prefill_ms": 0.0,
+            "decode_event_ms": 27.38585662841797,
+            "host_gap_ms": 0.24031135439872742,
+            "prefill_groups": 0.0,
+            "pack_wait_ms": 0.0
+          },
+          {
+            "active": 1,
+            "n": 62,
+            "step_ms": 36.99463182279179,
+            "prefill_ms": 4.555567047528682,
+            "decode_event_ms": 32.20653260138727,
+            "host_gap_ms": 0.2325321738758395,
+            "prefill_groups": 0.016129032258064516,
+            "pack_wait_ms": 6.332993507385254e-05
+          }
+        ]
+      },
+      "consistency": {
+        "decomposed_rate": 1.0,
+        "ttft_minus_queue_prefill_max_ms": 0.0
+      },
+      "memory": {
+        "kv_mb": 112.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 112.0,
+        "seat_unused_mb": null,
+        "frag_internal": 0.10618879554758465,
+        "reservation_slack": 0.0982142857142857,
+        "seat_row_slack": null,
+        "capacity_per_gib": 9.142857142857142,
+        "bytes_per_active_request": 117440512.0
+      },
+      "capacity": {
+        "peak_concurrency": 1,
+        "kv_mb": 112.0,
+        "workspace_mb": 0.0,
+        "kv_total_mb": 112.0,
+        "block_size": 16,
+        "kv_blocks": 64,
+        "max_batch": 1,
+        "frag_internal": 0.10618879554758465,
+        "reservation_slack": 0.0982142857142857,
+        "seat_unused_mb": null,
+        "capacity_per_gib": 9.142857142857142,
+        "workload_sha256": "07ca5f6575000a7d783a053ba7e60bf9cfcbf4510bf8fc4a056836d43340480d",
+        "workspace_estimated": false
+      }
+    }
+  ],
+  "n_rows": 65,
+  "n_errors": 0,
+  "summary": "summary.json"
+}

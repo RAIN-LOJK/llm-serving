@@ -38,5 +38,6 @@
 | W4-0007 | W4 | scenario | E3 同预算系统吞吐（paged，可选）：frozen 32 / poisson / B=64 / 820 块 | Qwen/Qwen3-0.6B | paged | tok_s 321 | invalid | completed | 2026-11-06 | b7be3b4 |
 | W4-0008 | W4 | scenario | E3 同预算系统吞吐（paged，800 块）：frozen 32 / poisson / B=64 | Qwen/Qwen3-0.6B | paged | tok_s 325 | inconclusive | completed | 2026-11-06 | c301b26 |
 | W4-0009 | W4 | scenario | E3′ 同预算系统吞吐（paged，prefill 修复后，800 块）：frozen 32 / poisson / B=64 | Qwen/Qwen3-0.6B | paged | tok_s 358 | pass | completed | 2026-11-06 | b8fa5c1 |
+| W45-0001 | W45 | microbench | E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等 | Qwen/Qwen3-0.6B | paged | tok_s 27.6 | unreviewed | completed | 2026-11-06 | ab4aef1 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
