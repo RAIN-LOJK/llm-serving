@@ -1,0 +1,58 @@
+# W45-0008 · E4 端到端（seat）：W4 E3 trace / packed prefill / B=9
+# W4.5 口径见 ROADMAP.md §5 W4.5。复制 W4-0006 的 workload，只把 prefill 换成 packed；
+# 与 W45-0009 同 trace、同 λ、同 budgets，两臂都须 saturated=true。
+# 运行：python -m bench.run --config configs/experiments/W45/0008-seat-saturate.toml
+#
+# 基线 W4-0006 是 W4 的 seat 臂（不同 commit、不同 prefill 内核），只作跨 commit 参考；
+# 正式比值用 W45-0009 / W45-0008 这一对（同 commit、同 packed prefill）。
+# 门禁：tok/s ≥ 基线、kv_total ≤1640、gather 流量 0；不调参掩盖。
+
+schema = 1
+
+[exp]
+id = "W45-0008"
+stage = "W45"
+type = "scenario"
+slug = "seat-saturate"
+title = "E4 端到端（seat）：W4 trace / packed prefill / B=9"
+hypothesis = ["packed_prefill_seat_is_the_end_to_end_baseline"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 128
+arrival = "poisson"
+rate = 30.0
+requests = 128
+budgets = [16, 32, 64, 128]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 9
+prefill = "packed"
+max_prefill_tokens = 8192
+
+[baseline]
+run_id = "W4-0006"
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

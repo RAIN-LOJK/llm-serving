@@ -39,4 +39,5 @@ W45-0004,W45,scenario,E2 decode 基线（seat）：8 条最长 / B=8 / budget 12
 W45-0005,W45,scenario,E2 decode 内核（paged）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 285,unreviewed,completed,2026-11-06,c19a5f3,results/W45/0005-paged-b8-cost
 W45-0006,W45,scenario,E3 prefill A/B（serial）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 39.1,unreviewed,completed,2026-11-06,7021e02,results/W45/0006-static-serial-prefill
 W45-0007,W45,scenario,E3 prefill A/B（packed）：static B=8 mixed / 1 token,Qwen/Qwen3-0.6B,continuous,tok_s 148,unreviewed,completed,2026-11-06,dd9206c,results/W45/0007-static-packed-prefill
+W45-0008,W45,scenario,E4 端到端（seat）：W4 trace / packed prefill / B=9,Qwen/Qwen3-0.6B,continuous,tok_s 331,unreviewed,completed,2026-11-06,548a216,results/W45/0008-seat-saturate
 W45-0012,W45,scenario,E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块,Qwen/Qwen3-0.6B,paged,tok_s 329,unreviewed,completed,2026-11-06,f333483,results/W45/0012-paged-b8-cost-fixed

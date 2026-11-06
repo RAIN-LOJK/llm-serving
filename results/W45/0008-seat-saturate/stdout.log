@@ -1,0 +1,5 @@
+run_id: W45-0008
+status: completed
+device_class: measure-cuda
+rows: 2799 (errors: 0)
+summary: results/W45/0008-seat-saturate/summary.json
