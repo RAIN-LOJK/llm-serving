@@ -1,0 +1,66 @@
+# W45-0012 · E2 decode 内核（paged，C1 修复后）：同 0005 workload / 832 块
+# W4.5 口径见 ROADMAP.md §5 W4.5 与 docs/decisions.md D7。
+# 0005 保留为修复前 fail 证据（27.379 vs 22.749 = 1.203×）；本 run supersedes W45-0005。
+# 修复（01e5512）：decode 写入改 slot map + write_slots；PagedKV 复用 per-container
+# PagedDecodePlan，28 层只在首次做全量契约校验。seat 路径未改，故基线仍是 W45-0004。
+#
+# 运行：python -m bench.run --config configs/experiments/W45/0012-paged-b8-cost-fixed.toml
+#
+# 832 = 8 × ceil(1664 / 16)；E2 的 8 条 long 上界是 1517 + 128 = 1645。
+# 门禁：decode_step_ratio_max ≤1.15（目标 ≤1.0）；paged 8/8 token 与 seat 相同；
+# gather_read_mb / gather_write_mb = 0；workspace 低于 W4-0005 的 52.42 MiB。
+# 0005 的 fail 结果不可改写；本 run 通过后才把 C1 证据切到 0012。
+
+schema = 1
+
+[exp]
+id = "W45-0012"
+stage = "W45"
+type = "scenario"
+slug = "paged-b8-cost-fixed"
+title = "E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块"
+hypothesis = ["block_table_decode_removes_gather_and_matches_seat_step_cost"]
+supersedes = "W45-0005"
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+prompt_ids = ["l01", "l02", "l03", "l04", "l05", "l06", "l07", "l08"]
+max_new_tokens = 128
+arrival = "closed"
+requests = 8
+budgets = [128]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cuda"
+max_batch = 8
+block_size = 16
+kv_blocks = 832
+prefill = "packed"
+max_prefill_tokens = 8192
+decode = "triton"
+
+[baseline]
+run_id = "W45-0004"
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "threshold"
+criteria = ["decode_step_ratio_max", "fragmentation_max", "paged_vs_seat_token_match_min"]
