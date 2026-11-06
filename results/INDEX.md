@@ -41,5 +41,6 @@
 | W45-0001 | W45 | microbench | E0 数值门：packed prefill + Triton decode 的 s01 64 token 与 golden 全等 | Qwen/Qwen3-0.6B | paged | tok_s 27.6 | unreviewed | completed | 2026-11-06 | ab4aef1 |
 | W45-0002 | W45 | fill | E1 容量（seat）：W3-like / fill-only / B=9 / serial | Qwen/Qwen3-0.6B | continuous | peak_concurrency 9 | unreviewed | completed | 2026-11-06 | 0b04ae7 |
 | W45-0003 | W45 | fill | E1 容量（paged）：W3-like / fill-only / 800 块 / serial | Qwen/Qwen3-0.6B | paged | peak_concurrency 28 | unreviewed | completed | 2026-11-06 | 5a9b4e1 |
+| W45-0004 | W45 | scenario | E2 decode 基线（seat）：8 条最长 / B=8 / budget 128 | Qwen/Qwen3-0.6B | continuous | tok_s 340 | unreviewed | completed | 2026-11-06 | 3fcca5e |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
