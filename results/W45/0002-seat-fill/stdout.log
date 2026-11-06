@@ -1,0 +1,5 @@
+run_id: W45-0002
+status: completed
+device_class: measure-cuda
+rows: 111 (errors: 0)
+summary: results/W45/0002-seat-fill/summary.json
