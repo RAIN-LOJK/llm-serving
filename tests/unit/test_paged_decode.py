@@ -1,6 +1,6 @@
 """W4 paged decode through the engine: compressed batch, sparse seats, block reuse.
 
-These tests pin ``serve/engine.py``'s paged arm (docs/w4-plan.md §2/§3, D6) against the
+These tests pin ``serve/engine.py``'s paged arm (docs/decisions.md D6) against the
 per-sequence ``KVcache`` reference the seat path is already checked against:
 
 * a multi-step paged decode produces the same tokens as one ``KVcache`` per sequence;

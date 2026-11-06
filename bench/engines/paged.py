@@ -1,4 +1,4 @@
-"""The paged-KV arm for W4 (``docs/w4-plan.md`` D6).
+"""The paged-KV arm for W4 (``docs/decisions.md`` D6).
 
 ``PagedEngine`` is the W4 counterpart of :class:`bench.engines.continuous.ContinuousEngine`:
 same trace path, same ``serve/scheduler.py`` admission loop, same three row kinds. The

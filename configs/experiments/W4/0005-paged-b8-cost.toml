@@ -1,5 +1,5 @@
 # W4-0005 · E2 代价（paged 臂）：8 条最长 / B=8 / budget 128 / 832 块
-# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# W4 口径见 docs/decisions.md D6（plan 已在 W4 收口时删除）。
 # 运行：python -m bench.run --config configs/experiments/W4/0005-paged-b8-cost.toml
 #
 # 用途：plan §4.4 的 E2 paged 臂。与 0004 同一 workload（同 prompt 集 / budget / seed），

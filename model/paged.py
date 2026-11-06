@@ -4,7 +4,7 @@ The W3 slab (``model/slab.py``) reserves ``max_len`` columns per row, so one lon
 pins the whole row width. Paged KV reserves ``ceil(tokens / block_size)`` physical blocks
 per request instead and maps logical columns to physical ones through a **block table** --
 a plain Python list ``block_table[j // bs]`` -> physical block id, column ``j % bs``
-(docs/w4-plan.md §2, D6). That mapping is the whole point: the same bytes, allocated per
+(docs/decisions.md D6). That mapping is the whole point: the same bytes, allocated per
 request's own bound, and no KV is ever moved after allocation.
 
 What lives here

@@ -1,5 +1,5 @@
 # W4-0001 · E0 数值门：paged vs golden（1 请求 / 64 token）
-# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# W4 口径见 docs/decisions.md D6（plan 已在 W4 收口时删除）。
 # 运行：python -m bench.run --config configs/experiments/W4/0001-paged-numeric-gate.toml
 #
 # 用途：plan §4.4 的 E0。只 prefill + decode 64 token，核对 paged 输出的 token id 与

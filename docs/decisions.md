@@ -257,7 +257,7 @@
 ## D6 · W4 分页口径（预算 / 容量 / 碎片 / 判据）
 
 - **日期**：2026-11-06
-- **状态**：accepted（口径冻结；`docs/w4-plan.md` 的两处偏差在定稿前已修正，见「与 plan 的偏差」）
+- **状态**：accepted（口径冻结；W4 plan v2（已删除，见 git history）的两处偏差在定稿前已修正，见「与 plan 的偏差」）
 - **取代/关系**：不改 **D4**（注意力路径：prefill=逐序列 SDPA / decode=hand_baddbmm），
   也不改 **D5**（trace / 席位 / 饱和口径）。D6 只定 W4 新增的三件事：**总预算怎么算、容量怎么量、
   碎片怎么判**。D5 的「席位回收留给 W4 块池」由本决策兑现。
@@ -307,7 +307,7 @@
   | **fill-only** | 只 prefill + 预留，不 decode；synthetic prompt 的 EOS 不影响容量 |
   | **EOS** | E2/E3 用 frozen prompt，先查 `out_tokens` 中位数 == budget；E1 不 decode，不受 P-31 影响 |
 
-- **与 plan（`docs/w4-plan.md` v2）的两处偏差，已在定稿前修正**：
+- **与 plan（W4 plan v2（已删除，见 git history））的两处偏差，已在定稿前修正**：
 
   1. **E1 seat 臂的 `max_batch`：6 → 9。** plan §4.1 假设「最长 prompt = 2048」，
      行宽 2240。实际 `bench/prompts.json` 的最长 prompt 是 **1517**（l05），

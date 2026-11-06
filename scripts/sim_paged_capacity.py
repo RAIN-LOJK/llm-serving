@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic W4 capacity simulation: seat rows vs paged blocks (``simulated``).
 
-This is the A · capacity half of ``docs/w4-plan.md`` §4.1. It runs **no model, no
+This is the A · capacity half of ``docs/decisions.md`` D6. It runs **no model, no
 weights, no arrivals and no Poisson trace**: given a total budget (KV + workspace,
 D6), a request-length distribution and a block size, it asks two questions.
 
@@ -37,7 +37,7 @@ measurement; the report must label it ``simulated``. Real fill runs
 Usage::
 
     python scripts/sim_paged_capacity.py
-    python scripts/sim_paged_capacity.py --out docs/fig_w4_capacity.png
+    python scripts/sim_paged_capacity.py --out /tmp/fig_w4_capacity_sim.png
     python scripts/sim_paged_capacity.py --json /tmp/capacity.json --block-sizes 16,32
     python scripts/sim_paged_capacity.py --budgets 1200,1456,1640,2400 --workspace-mb 240
     python scripts/sim_paged_capacity.py --trace results/W3/0011-continuous-b8-mixed/metrics.jsonl
@@ -346,7 +346,7 @@ def seat_row_width(requests: list[tuple[int, int]]) -> int:
 
     The ``+ 1`` mirrors ``ContinuousEngine.run_trace`` (``need = prompt + budget + 1``)
     and the engine's 64-column bucket, so 2048 + 128 becomes 2240 and 1517 + 128
-    becomes 1664 (``docs/w4-plan.md`` §4.1 / §4.2).
+    becomes 1664 (``docs/decisions.md`` D6).
     """
     if not requests:
         raise ValueError("a distribution needs at least one request")

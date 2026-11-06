@@ -48,7 +48,7 @@ The module depends on the standard library only; the engine is duck-typed
 ``vocab_size`` / ``device`` / ``eos_token_id`` / ``max_position``), so the unit
 tests can use a fake engine without torch.
 
-W4 paged arm (``docs/w4-plan.md`` D6)
+W4 paged arm (``docs/decisions.md`` D6)
 -------------------------------------
 The same step applies to a paged engine, through optional hooks only -- nothing is
 imported and no branch is taken when they are absent:

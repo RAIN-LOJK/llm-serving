@@ -236,7 +236,25 @@
 - 容量比值随预算单调下降（真实 trace、预算反解：1200/1456/1640/2400 MiB → 4.33×/3.50×/**3.22×**/3.54×；
   ≥2400 后 paged 撞到请求数或 `max_batch`，不再是显存受限），所以**报告主图是容量曲线**，C1 只是 1640 那条竖线。
 - E1 实机门禁：`sim_paged_capacity.py --trace <本 run 的 metrics.jsonl> --paged-blocks 800 --expect-concurrency <实机数>`，
-  期望 28 ±1（预算反解的 29 不是配置块数下的答案）。
+  期望 28 ±1（预算反解的 29 不是配置块数下的答案）；实测 **28（delta 0）**。
+- **W4 实测（2026-11-06，代码 commit `9dc5211`）**：
+  - **C1 pass · 3.111×**：`W4-0002` seat **9** 行 vs `W4-0003` paged **28** 条
+    （同 trace `2c0471…`、同预算上限、800 块 bs16）；paged `kv_total = 1601.97 MiB ≤ 1640`
+    （其中 workspace 201.97 MiB 是 fill 的公式估算，不是实测）；同 trace 模拟门禁 `28±0`。
+    uniform-2048 负对照 **1.00×**（模拟，只报不判）。
+  - **C2 pass · 0.55%**：`W4-0005` internal frag 0.55%（target 5%）；reservation slack
+    按 D6 时间加权 5.01%（只报不判；runner summary 的 0.68% 是末步瞬时值）。
+  - **C3 pass · 全等**：`W4-0001` E0 对 golden **64/64**；`W4-0005` 的 40/40 request
+    `token_ids` 与 `W4-0004` 逐 id 相同（8 prompt × 5 repeats）。
+  - **C4 负结果 · 1.671×**：paged decode step **35.63 ms** vs seat **21.32 ms**；
+    `lpad=1664` 子集 1.673×，逐重复 1.661–1.676。>1.5× → **撤回吞吐结论**；
+    **E3 未跑**（plan §4.3 只在 A/B 都通过时跑）。同并发多付 workspace **52.42 MiB（+3.6%）**，
+    这是代价，不是 C1 的收益。**prefill 也不便宜**：paged 551.8 ms vs seat 163.0 ms（**3.39×**），
+    使 makespan 比 1.773×；C4 仍只按 decode step 判，但它是「不报吞吐」的第二个理由。
+  - 图：`docs/fig_w4_capacity.png`、`docs/fig_w4_memory.png`、`docs/fig_w4_step.png`。
+- **C4 口径偏差**：plan 假设两边 `lpad=1664`；实机 paged 的 `lpad` 是**本步最长活跃长度**，
+  实际为 1536/1600/1664。按 1664 子集复核仍为 1.673×，所以结论不依赖该偏差；
+  后续引用必须写实际桶，不能写「全程 1664」。
 - **注**：原条款的 `ctx=2048` 被读成 uniform，测不到「按最坏长度预留」的浪费，与同段论点矛盾；
   改法见 §13 v14。
 
@@ -395,7 +413,7 @@ python scripts/exp_index.py --check
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
 | W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
-| W4 | 分页 KV | 🟡 | 代码落地，正式 run 待跑（口径见 D6） |
+| W4 | 分页 KV | 🟡 | 实验完成：C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（撤回吞吐）；`W4-0001…0005`，待人工评审 |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
@@ -424,6 +442,7 @@ python scripts/exp_index.py --check
 | 2026-11-01 | v12 | **W2 收尾（slab 生命周期）**：`W2-0006` 判 pass 后发现 slab 记账有两处缺陷——① 三桶缓存让 `memory_match_ratio` 的分母含账外内存（已在 `ce0af17` 改单一 slab）；② 交接时 slab 整块分配、且随请求保留，同一份 KV 两次同时在场。②修完才彻底：逐层分配 + 逐层拷 + 逐层释放 + 请求结束释放 slab（`d8361d4`），ctx1517 峰值 1534.6→1348.0 MB、ratio 0.859→0.978；**两处必须同时改**（各自单独无效，2×2 实测）。代价是每请求重建 28 层、TTFT 21.25→21.85 ms。代码变更使 `W2-0006` 不再描述 shipped 状态 → 新开 **`W2-0007`**（`supersedes`）作为 W3 配对基线：四条判据 pass、decode 1.013×、TTFT 0.92–0.95×、memory 0.992（全区间 0.979–0.992）、CV 1.12%/0.44%；`[W2.bench].basis_run` → `W2-0007`。**留待 W3**：真实 serving 的 KV 必须跨请求复用（每并发槽一块），届时 `memory_match_ratio` 的分子需覆盖所有活跃槽的预留，否则重演 `W2-0004` 的错配 |
 | 2026-11-03 | v13 | **W3 完成**：C1 **2.01×**（`W3-0011`/`W3-0010`，B=8 mixed，同 trace `33bc2397…`）、C2 pass、C3 0 mismatch；E1 P1 7.94×/7.90×、P2 3.78×；P3 uniform 1.023×（负结果）；B=32 mixed 1.606×（低于 P4 的 1.8–2.2×，record-only）；E0 四条判据 pass。**发现 synthetic ctx512 EOS**（`W3-0003–0005` invalid，ctx511 重跑，P-31）；R1 的 `step_ms` 含 prefill，判读改为稳态 decode 步；D5 改 accepted，`[W3.continuous]` 标 calibrated（basis `W3-0011`）。 |
 | 2026-11-06 | v14 | **W4 口径冻结（D6）**：原验收的 `ctx=2048` 被读成 uniform，测不到「按最坏长度预留」的浪费 → 改为**同总预算（KV + workspace = 1640 MiB）+ W3-like 混合长度**下的 fill-only peak concurrency ≥1.5×；**uniform 2048 降为负对照**（只报不判）；internal frag ≤5%（reservation slack 只报）；B=8 `lpad=1664` 的 `step_ms` 只记录、>1.5× 撤回吞吐结论。定稿前修正 plan 两处：E1 seat `max_batch` 6→**9**（实际最长 prompt 1517 → 行宽 1664 → 182 MiB/行），E3 paged `kv_blocks` 840→**820**（840 块在 24 活跃行时 1646 MiB 超预算）。**±1 门禁改为对同一真实 trace 重跑模拟**（合成分布比实机量的是 workload 建模差异）；并且模拟必须用**与配置相同的 `kv_blocks`**（`--paged-blocks`），否则预算反解出的块数会让 delta 恰好卡在 ±1 边界——E1 的预期因此是 **28±1（800 块）**，不是预算反解的 29，比值 **3.11×**（预言线 ≥1.5× 仍大幅成立）。 |
+| 2026-11-06 | v15 | **W4 实验收口**：`W4-0001` E0 对 golden **64/64**；`W4-0002/0003` E1 seat **9** vs paged **28** = **3.111×**（同 trace、800 块，`kv_total 1601.97 ≤1640`，同 trace 模拟门禁 28±0）；`W4-0004/0005` E2 同并发 decode step **21.32 → 35.63 ms = 1.671×**（`lpad=1664` 子集 1.673×，逐重复 1.661–1.676），internal frag **0.55%**，40/40 token id 全等，workspace **52.42 MiB（+3.6%）**。**C4 >1.5× → 撤回吞吐结论，E3 不跑**（plan §4.3）；W4 以「容量成立、代价负结果」收口。口径偏差：paged `lpad` 实为 1536/1600/1664，不是全程 1664；按 1664 子集复核结论不变。`[W4.paged]` 标 calibrated（basis `W4-0003`）；`docs/w4-plan.md` 收口删除，新增 P-37。 |
 
 ---
 

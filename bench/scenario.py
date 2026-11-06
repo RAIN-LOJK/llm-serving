@@ -223,7 +223,7 @@ def _memory(
 ) -> dict[str, Any]:
     """W4 (D6) memory ledger, derived from the rows the arm already writes.
 
-    Field meanings are frozen in ``docs/w4-plan.md`` §5:
+    Field meanings are frozen in ``docs/decisions.md`` D6:
 
     * ``kv_mb`` -- the KV pool's reservation (``kv_pool_mb`` when the row carries the
       total-budget split, otherwise the W3 ``kv_mb``);

@@ -1,4 +1,4 @@
-"""Fill-only execution for W4 capacity probes (``docs/w4-plan.md`` §4.1 / D6).
+"""Fill-only execution for W4 capacity probes (``docs/decisions.md`` D6).
 
 A fill run answers one question: **how many requests fit at the same time** under a
 memory budget. It must therefore prefill and reserve, but never decode -- decoding
@@ -44,7 +44,7 @@ __all__ = [
     "run_fill_trace",
 ]
 
-#: D6 total budget (KV + workspace) for W4, in MiB (``docs/w4-plan.md`` §2 / §4).
+#: D6 total budget (KV + workspace) for W4, in MiB (``docs/decisions.md`` D6).
 W4_TOTAL_BUDGET_MB = 1640.0
 
 #: The seat arm buckets each row to 64 columns (``serve/engine.py::SLAB_GRANULARITY``).

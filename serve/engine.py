@@ -164,7 +164,7 @@ class MiniLLMEngine:
         # for the lifetime of the scheduler. Separate from ``_current_slab`` so the
         # single-request ``generate`` path keeps the W2 slab semantics bit for bit (E0a).
         self._pool_slab: KvSlab | None = None
-        # W4 paged pool (docs/w4-plan.md D6): physical blocks + block tables, alongside the
+        # W4 paged pool (docs/decisions.md D6): physical blocks + block tables, alongside the
         # seat slab and never mixed with it. ``open_paged_pool`` fills these in.
         self._paged_pool: PagedPool | None = None
         self._blocks: BlockManager | None = None
@@ -536,7 +536,7 @@ class MiniLLMEngine:
         return logits
 
     # --------------------------------------------------------------- W4 paged pool
-    # Physical blocks instead of one row per seat (docs/w4-plan.md D6). A request reserves
+    # Physical blocks instead of one row per seat (docs/decisions.md D6). A request reserves
     # ``ceil((prompt + budget) / block_size)`` blocks at admission and gets all of them back
     # on release; there is no eviction and no mid-request allocation. Prefill writes each
     # layer's KV straight into the blocks as it computes it, so -- like the seat path -- no

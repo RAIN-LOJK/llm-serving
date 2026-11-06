@@ -1,0 +1,5 @@
+run_id: W4-0005
+status: completed
+device_class: measure-cuda
+rows: 680 (errors: 0)
+summary: results/W4/0005-paged-b8-cost/summary.json

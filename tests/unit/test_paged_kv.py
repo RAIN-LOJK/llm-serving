@@ -1,4 +1,4 @@
-"""W4 paged KV: the physical block pool and the decode container (docs/w4-plan.md §2/§3/§6).
+"""W4 paged KV: the physical block pool and the decode container (docs/decisions.md D6).
 
 These tests pin the contract that ``serve/`` will rely on later:
 

@@ -1,7 +1,6 @@
 """``serve/block_manager.py``: the W4 paged-KV allocator and its accounting.
 
-The allocator is the piece the capacity simulation imports directly (``docs/w4-plan.md``
-§4.1), so these tests pin the properties the simulator relies on: deterministic block
+The allocator is the piece the capacity simulation imports directly (``docs/decisions.md`` D6), so these tests pin the properties the simulator relies on: deterministic block
 ids, an atomic reservation (a failed ``reserve`` must not consume anything), a free
 list that recycles, and counters maintained by the code. ``FragStats`` is checked
 against hand-computed numbers; the metric definition is frozen in D6 (§2).

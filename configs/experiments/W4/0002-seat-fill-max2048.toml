@@ -1,5 +1,5 @@
 # W4-0002 · E1 容量（seat 臂）：W3-like / fill / B=9
-# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# W4 口径见 docs/decisions.md D6（plan 已在 W4 收口时删除）。
 # 运行：python -m bench.run --config configs/experiments/W4/0002-seat-fill-max2048.toml
 #
 # 用途：plan §4.4 的 E1 seat 臂。只 prefill + 预留、不 decode（type="fill"），

@@ -62,8 +62,14 @@ throughput_speedup_min = 1.30
 ttft_p99_decomposed = true
 
 [W4.paged]
-status = "target"
-basis_run = ""
+# Calibrated 2026-11-06 against W4-0003 (capacity; baseline W4-0002) and W4-0005 (frag).
+# Measured: C1 3.111x (28 vs 9, 800 blocks, kv_total 1601.97 MiB <= 1640);
+# C2 internal frag 0.55% (target 5%); C3 40/40 E2 token ids identical + E0 64/64 golden.
+# C4 is record-only and did NOT pass: paged decode step 35.63 ms vs seat 21.32 ms = 1.671x
+# (>1.5x withdraws any throughput conclusion; E3 was not run). The C1 target stays 1.50:
+# calibration records the observed point, it does not lower the pre-registered line.
+status = "calibrated"
+basis_run = "W4-0003"
 max_concurrency_speedup_min = 1.50
 fragmentation_max = 0.05
 

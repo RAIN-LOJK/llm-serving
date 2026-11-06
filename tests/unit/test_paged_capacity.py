@@ -1,6 +1,6 @@
 """``scripts/sim_paged_capacity.py``: the W4 capacity simulation against hand arithmetic.
 
-The simulator is the deterministic half of ``docs/w4-plan.md`` §4.1: no model, no
+The simulator is the deterministic half of ``docs/decisions.md`` D6: no model, no
 weights, no arrivals. These tests pin the pieces the report leans on -- the seat row
 model, the paged fill-only capacity, the Appendix C workspace formula, and the D6 rule
 that workspace is paid out of the *same* total budget as KV (P-36).
@@ -53,7 +53,7 @@ def test_bucket_width_rounds_up_to_64():
 
 
 def test_seat_row_width_matches_plan_anchors():
-    # docs/w4-plan.md §4.1: W3-like max-2048 -> row width 2240 (2048+128+1 bucketed).
+    # docs/decisions.md D6: W3-like max-2048 -> row width 2240 (2048+128+1 bucketed).
     assert seat_row_width(build_requests("w3-like-max-2048")) == 2240
     # §4.2: 8 longest frozen prompts (1517) + budget 128 -> 1664.
     assert seat_row_width([(1517, 128)] * 8) == 1664
