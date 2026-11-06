@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "run_id": "W4-0007",
+  "stage": "W4",
+  "type": "scenario",
+  "slug": "paged-saturate",
+  "title": "E3 同预算系统吞吐（paged，可选）：frozen 32 / poisson / B=64 / 820 块",
+  "hypothesis": [
+    "paged_system_throughput_at_equal_budget_beats_seat"
+  ],
+  "supersedes": null,
+  "status": "aborted",
+  "started_at": "2026-11-06T05:43:47+00:00",
+  "finished_at": "2026-11-06T05:46:48.101927+00:00",
+  "duration_s": 181.102,
+  "operator": "root",
+  "git": {
+    "commit": "c8cbe530f987adf8e0bf803655a290fbcf68bf77",
+    "branch": "w4-paged-kv",
+    "dirty": false,
+    "describe": "c8cbe53"
+  },
+  "device_class": "measure-cuda",
+  "packages": {
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "tokenizers": "0.23.3",
+    "safetensors": "0.8.0",
+    "numpy": "2.4.4",
+    "matplotlib": "3.10.5",
+    "pytest": "9.1.1",
+    "flash-linear-attention": "0.5.2",
+    "causal-conv1d": "1.7.0"
+  },
+  "config_path": "configs/experiments/W4/0007-paged-saturate.toml",
+  "config_sha256": "1a27127976f0f1106eb7e3ae17e08e60b269d2ca6028a23a376a3347cedded25",
+  "prompt": {
+    "path": "bench/prompts.json",
+    "version": "v0-2026-10",
+    "sha256": "7548f3a6c7e6f601b8100e0798e9c8bc60b33a0db9c251537692395f1ce3a663",
+    "n_prompts": 32
+  },
+  "models": [
+    {
+      "name": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "dtype": "bfloat16",
+      "trust_remote_code": false
+    }
+  ],
+  "engine": {
+    "impl": "paged",
+    "device": "cuda",
+    "max_batch": 64,
+    "block_size": 16,
+    "kv_blocks": 820
+  },
+  "workload": {
+    "kind": "prompts",
+    "prompts": "bench/prompts.json",
+    "max_new_tokens": 128,
+    "arrival": "poisson",
+    "rate": 30.0,
+    "requests": 128,
+    "budgets": [
+      16,
+      32,
+      64,
+      128
+    ],
+    "shuffle": false
+  },
+  "measure": {
+    "warmup": 1,
+    "repeats": 3,
+    "timer": "auto",
+    "memory": [
+      "torch_peak",
+      "driver"
+    ]
+  },
+  "accept": {
+    "mode": "record_only",
+    "criteria": []
+  },
+  "command": "/root/miniconda3/bin/python -m bench.run --config configs/experiments/W4/0007-paged-saturate.toml",
+  "artifacts": [
+    "config.toml",
+    "env.json",
+    "metrics.jsonl",
+    "summary.json",
+    "notes.md",
+    "verdict.json",
+    "reproduce.sh",
+    "stdout.log"
+  ],
+  "error": "aborted by tool call; 2/3 measured traces, no summary"
+}

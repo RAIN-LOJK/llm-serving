@@ -1,0 +1,3 @@
+aborted by the harness tool call (SIGKILL) while running the 3rd measured trace.
+No summary.json was produced; this directory is kept as an aborted run per the run contract.
+Do not use it as E3 evidence; the paged arm is rerun as W4-0008.
