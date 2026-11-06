@@ -48,6 +48,7 @@
 | W45-0008 | W45 | scenario | E4 端到端（seat）：W4 trace / packed prefill / B=9 | Qwen/Qwen3-0.6B | continuous | tok_s 331 | unreviewed | completed | 2026-11-06 | 548a216 |
 | W45-0009 | W45 | scenario | E4 端到端（paged）：W4 trace / packed prefill + Triton decode / 800 块 | Qwen/Qwen3-0.6B | paged | tok_s 679 | unreviewed | completed | 2026-11-06 | bb30f0d |
 | W45-0010 | W45 | scenario | E4b（可选）static / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 157 | unreviewed | completed | 2026-11-06 | 0141fce |
+| W45-0011 | W45 | scenario | E4b（可选）continuous / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 293 | unreviewed | completed | 2026-11-06 | b97c45d |
 | W45-0012 | W45 | scenario | E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 329 | unreviewed | completed | 2026-11-06 | f333483 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
