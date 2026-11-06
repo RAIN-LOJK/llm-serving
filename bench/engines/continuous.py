@@ -43,6 +43,9 @@ class TraceResult:
     trace_row: dict[str, Any] = field(default_factory=dict)
     summary: dict[str, Any] = field(default_factory=dict)
     repeat: int = 0
+    #: Which arm produced the rows. ``_flatten_scenario`` stamps it onto every row; the
+    #: default keeps every W3 continuous row byte-for-byte what it was.
+    impl: str = "continuous"
 
 
 class ContinuousEngine:
@@ -62,6 +65,7 @@ class ContinuousEngine:
         policy: str = "continuous",
         vocab_size: int = 1024,
         seed: int = 0,
+        fill: bool = False,
     ) -> None:
         self.name = name
         self.revision = revision
@@ -69,6 +73,10 @@ class ContinuousEngine:
         self.device = "cpu" if device in {"", "auto"} else device
         self.max_batch = int(max_batch)
         self.policy = str(policy)
+        # W4 E1 (`[exp].type = "fill"`): prefill + reserve only, no decode. The default
+        # keeps every W3 scenario row on the original path (``run_fill_trace`` is only
+        # entered when a fill config asks for it).
+        self.fill = bool(fill)
         self.model_path = model_path
         self._vocab = int(vocab_size)
         self._seed = int(seed)
@@ -141,6 +149,12 @@ class ContinuousEngine:
     # ------------------------------------------------------------------------- trace
     def run_trace(self, trace: Trace, *, repeat: int = 0) -> TraceResult:
         """Run every arrival of ``trace`` through the scheduler and aggregate the rows."""
+        if self.fill:
+            # W4 E1: same pool/clock/trace plumbing, but the step loop stops after
+            # admission. Lives in ``fill.py`` so the scenario path below stays untouched.
+            from bench.engines.fill import run_fill_trace
+
+            return run_fill_trace(self, trace, repeat=repeat)
         if self._engine is None:
             raise RuntimeError("call load() before run_trace()")
         engine = self._engine

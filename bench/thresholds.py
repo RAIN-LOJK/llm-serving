@@ -221,6 +221,171 @@ def _decode_ratio(
     return (statistics.median(ratios) if ratios else None), len(ratios), problems
 
 
+# ------------------------------------------------------------------------ W4 capacity (D6)
+
+#: A capacity pairing fixes the device class and dtype. ``max_batch`` is deliberately
+#: absent: D6 lets the paged arm run a much wider pool than the seat arm, and the two
+#: arms are compared on allocator capacity, not on pool width. ``kv_total_mb`` is the
+#: shared total budget (KV + workspace); the baseline reports it as the upper bound and
+#: our arm must fit inside it.
+_CAPACITY_KEYS = ("dtype", "device_class")
+
+
+def _block(summary: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+    return summary.get(name) or {}
+
+
+def _ledger_value(summary: Mapping[str, Any], name: str) -> Any:
+    """``capacity.<name>`` with a ``memory.<name>`` fallback (both blocks are planned)."""
+    value = _block(summary, "capacity").get(name)
+    if value is None:
+        value = _block(summary, "memory").get(name)
+    return value
+
+
+def _peak_concurrency(summary: Mapping[str, Any]) -> Any:
+    """Allocator capacity: the max simultaneous admissions of a fill-only run.
+
+    Never the dynamic peak in ``throughput.peak_concurrency`` -- that one is E3's
+    observed occupancy and answers a different question (D6).
+    """
+    return _block(summary, "capacity").get("peak_concurrency")
+
+
+def _workload_id(summary: Mapping[str, Any]) -> Any:
+    """Length-distribution identity; optional, so both arms may legitimately omit it."""
+    protocol = summary.get("protocol") or {}
+    value = protocol.get("workload_sha256")
+    return value if value is not None else _block(summary, "capacity").get("workload_sha256")
+
+
+def _capacity_mismatches(summary: Mapping[str, Any], baseline: Mapping[str, Any]) -> list[str]:
+    """Pairing check for C1: same device/dtype, same workload, same total budget.
+
+    A missing ``dtype``/``device_class`` proves nothing, so it is itself a mismatch. The
+    budget check only compares the two ``kv_total_mb`` values when both arms report one:
+    ours must not exceed the baseline's shared upper bound (equal is fine). ``max_batch``
+    is never compared here -- D6 allows the paged arm a wider pool.
+    """
+    ours = summary.get("protocol") or {}
+    theirs = baseline.get("protocol") or {}
+    problems: list[str] = []
+    for key in _CAPACITY_KEYS:
+        mine, reference = ours.get(key), theirs.get(key)
+        if mine is None or reference is None:
+            problems.append(f"{key}: missing from an arm ({mine!r} vs baseline {reference!r})")
+        elif mine != reference:
+            problems.append(f"{key}: {mine!r} vs baseline {reference!r}")
+
+    mine_id, reference_id = _workload_id(summary), _workload_id(baseline)
+    if mine_id is not None or reference_id is not None:
+        # Reported by one arm only is still a mismatch: comparability is unproven.
+        if mine_id != reference_id:
+            problems.append(f"workload_sha256: {mine_id!r} vs baseline {reference_id!r}")
+
+    mine_total = _ledger_value(summary, "kv_total_mb")
+    reference_total = _ledger_value(baseline, "kv_total_mb")
+    if mine_total is not None and reference_total is not None:
+        try:
+            if float(mine_total) > float(reference_total):
+                problems.append(
+                    f"kv_total_mb: {mine_total!r} exceeds baseline {reference_total!r} "
+                    "(both arms must fit the same total budget)"
+                )
+        except (TypeError, ValueError):
+            problems.append(f"kv_total_mb: {mine_total!r} vs baseline {reference_total!r}")
+    return problems
+
+
+def _check_capacity_speedup(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any] | None, limit: float
+) -> dict[str, Any]:
+    """C1: fill-only allocator capacity, ours / baseline, under one total budget."""
+    if not baseline:
+        return {"status": "pending", "reason": "no paired baseline summary"}
+    mine, reference = _peak_concurrency(summary), _peak_concurrency(baseline)
+    if mine is None or reference is None:
+        return {"status": "pending", "reason": "capacity.peak_concurrency missing from an arm"}
+
+    problems = _capacity_mismatches(summary, baseline)
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "arms are not comparable; fix the pair before reading a capacity ratio",
+        }
+    try:
+        mine_value, reference_value = float(mine), float(reference)
+    except (TypeError, ValueError):
+        return {"status": "pending", "reason": "capacity.peak_concurrency is not numeric"}
+    if reference_value <= 0.0:
+        return {"status": "pending", "reason": "baseline capacity.peak_concurrency is not positive"}
+
+    ratio = mine_value / reference_value
+    entry: dict[str, Any] = {
+        "status": "pass" if ratio >= limit else "fail",
+        "value": round(ratio, 3),
+        "target": limit,
+        "ours_peak_concurrency": mine_value,
+        "baseline_peak_concurrency": reference_value,
+        "reason": "fill-only allocator capacity (peak_concurrency) ours / baseline "
+        "under the same total budget; max_batch may differ",
+    }
+    for key, value in (
+        ("kv_total_mb", _ledger_value(summary, "kv_total_mb")),
+        ("baseline_kv_total_mb", _ledger_value(baseline, "kv_total_mb")),
+        ("block_size", _ledger_value(summary, "block_size")),
+    ):
+        if value is not None:
+            entry[key] = value
+    return entry
+
+
+def _check_fragmentation(summary: Mapping[str, Any], limit: float) -> dict[str, Any]:
+    """C2: judge **internal** frag only. The two slack measures are reported, not judged."""
+    raw = _ledger_value(summary, "frag_internal")
+    if raw is None:
+        return {
+            "status": "pending",
+            "reason": "summary has no capacity.frag_internal (or memory.frag_internal)",
+        }
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return {"status": "pending", "reason": "frag_internal is not numeric"}
+
+    entry: dict[str, Any] = {
+        "status": "pass" if value <= limit else "fail",
+        "value": round(value, 4),
+        "target": limit,
+        "reason": "internal frag only (unwritten tail of the last block); "
+        "reservation slack / seat row slack reported, not judged",
+    }
+    for key in ("reservation_slack", "seat_row_slack"):
+        slack = _ledger_value(summary, key)
+        if slack is None:
+            continue
+        try:
+            entry[key] = round(float(slack), 4)
+        except (TypeError, ValueError):
+            entry[key] = slack
+    return entry
+
+
+def _step_cost_ratio(summary: Mapping[str, Any]) -> float | None:
+    """C4's B=8 matched-``lpad`` step ratio, when a summary happens to carry it."""
+    for container in (summary, _block(summary, "steps")):
+        raw = container.get("step_cost_ratio") if isinstance(container, Mapping) else None
+        if isinstance(raw, Mapping):
+            raw = raw.get("median", raw.get("value"))
+        if raw is not None:
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _memory_ratio(summary: Mapping[str, Any]) -> tuple[float | None, float | None, list[dict[str, Any]]]:
     """Share of the observed peak that the formula account explains, per context.
 
@@ -267,6 +432,19 @@ def evaluate(
     results: list[dict[str, Any]] = []
     for raw in criteria:
         name = str(raw)
+        if name == "step_cost_ratio":
+            # W4 C4 is record-only and has no threshold key: report the ratio if the
+            # summary carries it, but never turn it into a pass/fail line.
+            entry: dict[str, Any] = {
+                "name": name,
+                "status": "pending",
+                "reason": "C4 is record-only (no pass line); >1.5x retracts the throughput claim",
+            }
+            ratio = _step_cost_ratio(summary)
+            if ratio is not None:
+                entry["value"] = round(ratio, 3)
+            results.append(entry)
+            continue
         found = lookup(name, thresholds)
         if found is None:
             results.append({"name": name, "status": "pending", "reason": "no such threshold key"})
@@ -378,7 +556,12 @@ def evaluate(
                     }
                 )
         elif name == "max_concurrency_speedup_min":
-            entry.update({"status": "pending", "reason": "needs the W4 block manager run"})
+            # W4 C1: fill-only allocator capacity under one total budget (D6). Paired on
+            # device/dtype/workload/budget, deliberately *not* on ``max_batch``.
+            entry.update(_check_capacity_speedup(summary, baseline, float(limit)))
+        elif name == "fragmentation_max":
+            # W4 C2: internal frag only; the direction is ``<= limit``.
+            entry.update(_check_fragmentation(summary, float(limit)))
         else:
             entry.update({"status": "pending", "reason": "no evaluator for this criterion yet"})
         results.append(entry)

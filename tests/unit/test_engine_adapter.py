@@ -16,12 +16,12 @@ def test_factory_wires_minillm():
 
 
 def test_factory_keeps_unknown_impls_loud():
-    # `continuous` is wired now (W3); the arms that are still unwired must keep failing
-    # with the stage that owns them rather than silently degrading.
-    with pytest.raises(NotImplementedError, match="W4"):
-        build_engine({"name": "x"}, {"impl": "paged"})
+    # `continuous` is wired (W3) and `paged` is wired (W4); the arm that is still unwired
+    # must keep failing with the stage that owns it rather than silently degrading.
     with pytest.raises(NotImplementedError, match="W7"):
         build_engine({"name": "x"}, {"impl": "hybrid"})
+    with pytest.raises(ValueError, match="unknown engine impl"):
+        build_engine({"name": "x"}, {"impl": "bogus"})
 
 
 def test_factory_wires_continuous():

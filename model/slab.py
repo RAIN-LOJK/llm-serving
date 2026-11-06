@@ -56,11 +56,42 @@ import torch
 
 from model.attention.hand_baddbmm import additive_bias
 
-__all__ = ["KvSlab"]
+__all__ = ["KvSlab", "as_decode_container", "DECODE_CONTAINER_FLAG"]
+
+#: A decode container opts in by carrying ``decode_container = True``. ``model/layers.py``
+#: and ``model/minillm.py`` route on this attribute instead of ``isinstance(KvSlab)``, so
+#: W4's ``PagedKV`` (``model/paged.py``) takes the same decode path without either module
+#: importing it -- and an unrecognised past (``KVcache`` or anything else) keeps the
+#: growing-cache path instead of being silently treated as a slab.
+DECODE_CONTAINER_FLAG = "decode_container"
+
+_DECODE_HOOKS = ("build_mask", "write", "get", "advance", "pos", "bias", "batch", "max_len")
+
+
+def as_decode_container(past):
+    """Return ``past`` if it is a decode container (the slab protocol), else ``None``.
+
+    The flag is checked first, so a ``KVcache`` -- or any object without it -- never takes
+    this path. An object that claims the flag but is missing a hook (``bias``, ``pos``, ...)
+    raises instead of failing somewhere inside the layer loop: an incomplete container is a
+    caller bug, not a reason to fall back.
+    """
+    if past is None or not getattr(past, DECODE_CONTAINER_FLAG, False):
+        return None
+    missing = [name for name in _DECODE_HOOKS if not hasattr(past, name)]
+    if missing:
+        raise TypeError(
+            f"container {type(past).__name__} sets {DECODE_CONTAINER_FLAG}=True but is missing "
+            f"decode hook(s) {missing}; implement the KvSlab protocol or drop the flag"
+        )
+    return past
 
 
 class KvSlab:
     """One fixed KV buffer per layer, written by column instead of concatenated."""
+
+    #: Decode-container protocol marker checked by ``as_decode_container`` (see above).
+    decode_container = True
 
     def __init__(
         self,

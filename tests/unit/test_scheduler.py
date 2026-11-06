@@ -640,3 +640,259 @@ def test_queued_counts_only_arrived_requests():
     assert max(row["queued"] for row in rows) <= 1, rows
     # Without the fix every row would report the full future remainder (4, 3, 2, 1).
     assert max(row["queued"] + row["pending"] for row in rows) <= 4, rows
+
+
+# ---------------------------------------------------------------- W4 paged admission
+class PagedFakeEngine(FakeEngine):
+    """Fake engine with the W4 hooks: block admission, block prefill, block release.
+
+    Pure Python (like ``FakeEngine``): blocks are integers, a request holds
+    ``ceil((prompt + budget) / block_size)`` of them, and the bookkeeping is the same
+    all-or-nothing ledger the real ``BlockManager`` implements. Seats are still handed to
+    ``prefill_into_blocks`` so the decode path can scatter logits back by seat number.
+    """
+
+    impl = "paged"
+    paged = True
+
+    def __init__(self, clock, max_batch, *, n_blocks, block_size=4, **kwargs):
+        super().__init__(clock, max_batch, **kwargs)
+        self.n_blocks = int(n_blocks)
+        self.block_size = int(block_size)
+        self.free_blocks = list(range(self.n_blocks))
+        self.held: dict[int, list[int]] = {}
+        self.seats: dict[int, int] = {}
+        self.released: list[int] = []
+        self.can_admit_calls: list[tuple[int, int]] = []
+        self.blocks_prefills: list[tuple[int, tuple[int, ...], int]] = []
+
+    def _needed(self, prompt_len, budget):
+        return max(1, -(-(int(prompt_len) + int(budget)) // self.block_size))
+
+    @property
+    def paged_max_batch(self):
+        return self.slab.batch
+
+    def can_admit(self, prompt_len, budget):
+        self.can_admit_calls.append((int(prompt_len), int(budget)))
+        if len(self.held) >= self.slab.batch:
+            return False
+        return self._needed(prompt_len, budget) <= len(self.free_blocks)
+
+    def prefill_into_blocks(self, request_id, prompt_ids, *, seat=None, budget=None):
+        needed = self._needed(len(prompt_ids), 0 if budget is None else budget)
+        if needed > len(self.free_blocks):
+            raise RuntimeError("cannot reserve blocks")
+        if seat is None or not 0 <= int(seat) < self.slab.batch:
+            raise IndexError(f"bad seat {seat} for prefill_into_blocks")
+        if request_id in self.held:
+            raise ValueError(f"request {request_id} already admitted")
+        self.clock.advance(self.prefill_s)
+        ids = self.free_blocks[:needed]
+        del self.free_blocks[:needed]
+        self.held[request_id] = ids
+        self.seats[request_id] = int(seat)
+        prompt = tuple(prompt_ids)
+        self.prefill_calls.append(prompt)
+        self.blocks_prefills.append((request_id, prompt, int(seat)))
+        self.occupied.add(int(seat))
+        self.seat_prompt[int(seat)] = prompt
+        self.writes[int(seat)] = 0
+        self.activations.append((int(seat), prompt))
+        self.occupied_seen = max(self.occupied_seen, len(self.occupied))
+        return [self._one_hot(self._first_token(list(prompt)))]
+
+    def release_request(self, request_id):
+        ids = self.held.pop(request_id, None)
+        if ids is None:
+            return
+        self.free_blocks.extend(ids)
+        self.free_blocks.sort()
+        seat = self.seats.pop(request_id, None)
+        self.released.append(request_id)
+        if seat is not None:
+            self.occupied.discard(seat)
+
+    def freeze_seat(self, slot):  # must never be used by the paged arm
+        raise AssertionError(f"the paged arm must release blocks, not freeze seat {slot}")
+
+    def decode_batch(self, tokens, slab=None):
+        # The real paged engine compresses seats itself; accept the seat-indexed list.
+        assert slab is None, "the paged arm has no seat slab to hand over"
+        return super().decode_batch(tokens, self.slab)
+
+
+def _paged_scheduler(engine, max_batch, policy="continuous", clock=None):
+    return _scheduler(engine, max_batch, policy=policy, clock=clock)
+
+
+def test_paged_waits_for_blocks_and_keeps_ttft_identity():
+    """A request that cannot reserve blocks stays queued; its wait is queue time."""
+    clock = FakeClock()
+    # 4 blocks x 4 tokens. Each request needs ceil((4 + 4) / 4) = 2 blocks, so the first two
+    # take the whole pool and the third must wait for a release.
+    engine = PagedFakeEngine(clock, max_batch=3, n_blocks=4, block_size=4)
+    sched = _paged_scheduler(engine, max_batch=3)
+    first = Request(id=0, prompt_ids=[10, 1, 2, 3], budget=4, arrival_ts=0.0)
+    second = Request(id=1, prompt_ids=[11, 4, 5, 6], budget=4, arrival_ts=0.0)
+    third = Request(id=2, prompt_ids=[12, 7, 8, 9], budget=4, arrival_ts=0.0)
+    for req in (first, second, third):
+        sched.submit(req)
+
+    # Step 0: req 0 takes 2 of 4 blocks, req 1 takes 2 -> 0 free; req 2 is refused.
+    row = sched.step()
+    assert row["admitted"] == 2 and row["queued"] == 1
+    assert third.state == "queued" and third.t_admitted is None
+    assert engine.can_admit_calls[:3] == [(4, 4), (4, 4), (4, 4)]
+
+    # The block ledger is never oversold: admitted requests hold <= n_blocks blocks.
+    assert sum(len(ids) for ids in engine.held.values()) <= engine.n_blocks
+
+    result = _by_id(sched.run())
+    assert all(req.state == "finished" for req in result.values())
+    for req in result.values():
+        queue_ms = (req.t_prefill_start - req.t_arrival) * 1000.0
+        prefill_ms = (req.t_first - req.t_prefill_start) * 1000.0
+        ttft_ms = (req.t_first - req.t_arrival) * 1000.0
+        assert ttft_ms == pytest.approx(queue_ms + prefill_ms, abs=1e-9)
+    # Waiting for blocks is queue time, not prefill time: only the head request queued.
+    assert result[2].t_prefill_start > result[2].t_arrival
+    assert (result[2].t_first - result[2].t_prefill_start) == pytest.approx(
+        engine.prefill_s, abs=1e-12
+    )
+    # Every request was released exactly once and every block came back.
+    assert sorted(engine.released) == [0, 1, 2]
+    assert engine.free_blocks == list(range(engine.n_blocks))
+
+
+def test_paged_admission_never_oversells_within_one_step():
+    """Two admissions in one step must not both pass ``can_admit`` on stale capacity."""
+    clock = FakeClock()
+    # 3 blocks x 4: each request needs 2 blocks, so only one fits, even with max_batch 3.
+    engine = PagedFakeEngine(clock, max_batch=3, n_blocks=3, block_size=4)
+    sched = _paged_scheduler(engine, max_batch=3)
+    requests = [_request(i, budget=4, prompt_len=4) for i in range(3)]
+    for req in requests:
+        sched.submit(req)
+
+    row = sched.step()
+
+    assert row["admitted"] == 1, "block capacity (not max_batch) must cap the step"
+    assert len(engine.held) == 1
+    assert len(engine.released) + len(engine.held) == 1
+    assert sum(len(ids) for ids in engine.held.values()) <= engine.n_blocks
+    # A refused head is not popped: it is still first in line next step.
+    assert [req.id for req in sched.queued] == [1, 2]
+    assert row["queued"] == 2
+    assert row["active"] <= 3
+
+    rows = [row]
+    while sched.queued or sched.active:
+        rows.append(sched.step())
+        assert rows[-1]["active"] <= 3
+    assert all(req.state == "finished" for req in requests)
+    assert engine.free_blocks == list(range(engine.n_blocks))
+
+
+def test_paged_fifo_head_blocks_smaller_requests():
+    """FIFO: when the head cannot fit, a smaller request behind it is not jumped ahead."""
+    clock = FakeClock()
+    # 3 blocks x 4. The head needs 3 blocks (12 slots), the follower needs 1 (4 slots).
+    engine = PagedFakeEngine(clock, max_batch=2, n_blocks=3, block_size=4)
+    sched = _paged_scheduler(engine, max_batch=2)
+    big = Request(id=0, prompt_ids=list(range(20, 24)), budget=8, arrival_ts=0.0)
+    small = Request(id=1, prompt_ids=[30, 31, 32, 33], budget=0, arrival_ts=0.0)
+    sched.submit(big)
+    sched.submit(small)
+
+    # Hold one block out of the pool so the 3-block head cannot fit, while the 1-block
+    # follower could: the scheduler must stop at the head, not skip it.
+    engine.free_blocks.remove(0)
+    row = sched.step()
+
+    assert row["admitted"] == 0, "the follower must not be admitted past an unfitting head"
+    assert big.state == "queued" and small.state == "queued"
+    assert engine.held == {}
+    assert [req.id for req in sched.queued] == [0, 1]
+
+    # Put the block back; now the head fits and is admitted first.
+    engine.free_blocks.insert(0, 0)
+    row = sched.step()
+    assert row["admitted"] >= 1
+    assert engine.blocks_prefills[0][0] == 0, "the FIFO head must be admitted first"
+
+
+def test_paged_release_uses_release_request_not_freeze():
+    """Retirement calls ``release_request`` and still recycles the scheduler's seat."""
+    clock = FakeClock()
+    engine = PagedFakeEngine(clock, max_batch=2, n_blocks=8, block_size=4)
+    sched = _paged_scheduler(engine, max_batch=2)
+    for i in range(4):
+        sched.submit(_request(i, budget=2, arrival=i * 0.01))
+
+    result = sched.run()
+
+    assert all(req.state == "finished" for req in result)
+    assert sorted(engine.released) == [0, 1, 2, 3]
+    assert engine.free_blocks == list(range(8))
+    # Blocks were prefilled through the paged hook, never the seat one.
+    assert [call[0] for call in engine.blocks_prefills] == [0, 1, 2, 3]
+    assert all(call[2] in (0, 1) for call in engine.blocks_prefills)
+
+
+def test_paged_step_rows_carry_pool_stats_without_renaming_seat_fields():
+    """The paged hook appends its account; the seat row keeps every field and name."""
+    clock = FakeClock()
+    engine = PagedFakeEngine(clock, max_batch=2, n_blocks=8, block_size=4)
+
+    recorded: list[dict] = []
+
+    class WithStats(PagedFakeEngine):
+        def paged_stats(self):
+            stats = {
+                "lpad": 64,
+                "blocks_in_use": sum(len(v) for v in self.held.values()),
+                "written_blocks": 1,
+                "frag_internal": 0.25,
+                "reservation_slack": 0.5,
+                "kv_alloc_mb": 0.125,
+                "kv_live_mb": 0.0625,
+                "workspace_mb": 0.5,
+            }
+            recorded.append(stats)
+            return stats
+
+    engine.__class__ = WithStats
+    sched = _paged_scheduler(engine, max_batch=2)
+    sched.submit(_request(0, budget=2))
+    row = sched.step()
+
+    seat_fields = {
+        "step", "active", "queued", "pending", "admitted", "retired",
+        "step_ms", "prefill_ms", "decode_event_ms", "host_gap_ms",
+    }
+    assert seat_fields <= set(row)
+    for key in ("lpad", "blocks_in_use", "written_blocks", "frag_internal",
+                "reservation_slack", "kv_alloc_mb", "kv_live_mb", "workspace_mb"):
+        assert key in row, f"missing paged stats field {key}"
+    assert row["host_gap_ms"] == pytest.approx(
+        row["step_ms"] - row["decode_event_ms"] - row["prefill_ms"], abs=1e-9
+    )
+
+
+def test_paged_pool_shape_is_checked_once():
+    """The paged pool's row cap must equal the scheduler's ``max_batch``."""
+    clock = FakeClock()
+    engine = PagedFakeEngine(clock, max_batch=2, n_blocks=8, block_size=4)
+
+    class WrongCap(PagedFakeEngine):
+        @property
+        def paged_max_batch(self):
+            return 3
+
+    engine.__class__ = WrongCap
+    sched = _paged_scheduler(engine, max_batch=2)
+    sched.submit(_request(0, budget=2))
+
+    with pytest.raises(ValueError, match="max_batch"):
+        sched.run()

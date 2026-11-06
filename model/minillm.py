@@ -5,7 +5,7 @@ from transformers import PreTrainedModel
 
 from model.config import MiniLLMConfig
 from model.layers import RMSNorm, TransformerBlock, rope_cos_sin
-from model.slab import KvSlab
+from model.slab import as_decode_container
 
 
 class MiniLLM(PreTrainedModel):
@@ -66,7 +66,10 @@ class MiniLLM(PreTrainedModel):
         B, T = tokens.shape
         x = self.token_embedding(tokens)
 
-        slab = past_keys_values if isinstance(past_keys_values, KvSlab) else None
+        # Explicit protocol dispatch (``model.slab.as_decode_container``): a ``KvSlab`` and
+        # W4's ``PagedKV`` both carry ``decode_container = True`` and take the decode path;
+        # a plain ``KVcache`` (or anything unrecognised) keeps the growing-cache path.
+        slab = as_decode_container(past_keys_values)
         if slab is None:
             past_len = 0 if past_keys_values is None else past_keys_values.past_len(0)
             cos, sin = rope_cos_sin(self.head_dim, self.rope_theta, past_len, T, x.device, x.dtype)

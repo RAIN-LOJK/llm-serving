@@ -254,6 +254,95 @@
 
 ---
 
+## D6 · W4 分页口径（预算 / 容量 / 碎片 / 判据）
+
+- **日期**：2026-11-06
+- **状态**：accepted（口径冻结；`docs/w4-plan.md` 的两处偏差在定稿前已修正，见「与 plan 的偏差」）
+- **取代/关系**：不改 **D4**（注意力路径：prefill=逐序列 SDPA / decode=hand_baddbmm），
+  也不改 **D5**（trace / 席位 / 饱和口径）。D6 只定 W4 新增的三件事：**总预算怎么算、容量怎么量、
+  碎片怎么判**。D5 的「席位回收留给 W4 块池」由本决策兑现。
+- **背景**：W3 的席位是「一块 `KvSlab`、每行按 trace 最坏长度预留、退出 freeze 不回收」（P-26），
+  所以并发上限是 `floor(预算 / 行宽)`,与负载无关。W4 要证明的是 vLLM 的核心论点：
+  **浪费来自「按最坏长度预留」，换成「按每条请求的上界预留」后，同预算能装下更多并发**。
+  不先把「预算包含什么、容量取哪个数、碎片指什么」冻结，C1 的比值就会把 workspace、
+  行粒度浪费、workload 顺序混在一起，得到无法归因也无法复现的数。
+
+- **判据**（引用 `configs/thresholds.toml` 的 `[W4.paged]`，本决策不复制数值）：
+
+  | # | 判据 | 口径 | 失败线 |
+  |---|---|---|---|
+  | C1 | 同预算容量 | 总预算 **1640 MiB**（KV + workspace），W3-like 混合长度，fill-only 最大同时准入（paged 用配置的 `kv_blocks=800`） | ≥1.50×；<1.20× 记负结果 |
+  | C2 | 碎片 | **internal frag**（只算最后一块没写满），时间加权 | ≤5% |
+  | C3 | 数值 | paged vs seat 逐 token 一致；E0 对 golden | 全等 |
+  | C4 | 代价 | B=8、两边 `lpad=1664` 的 decode `step_ms` | 只记录；>1.5× 撤回吞吐结论 |
+
+- **证据（定稿前，均为解析/模拟，不是实测）**：
+  - `scripts/sim_paged_capacity.py`：W3-like @1640/bs16 → seat 6 / paged 26（合成分布，固定 budget=128）；
+  - **真实 trace 重算**（`results/W3/0011` 的 prompt 长度 + seed 0 的 budget 抽样）
+    → seat **9**（行宽 1664、182 MiB/行）；
+  - **E1 配置的固定块数**（`--trace ... --paged-blocks 800`）→ paged **28** → **3.11×**，`kv_total ≈1595 MiB`；
+    预算反解（≈822 块）则是 29 条 → 3.22×。E1 的实机门禁比的是**前者**（28 ±1）；
+  - uniform-2048 负对照 6 vs 6 = **1.00×**（paged 不多装，与设计一致）；
+  - internal frag：bs16 ≈1.4%、bs32 ≈2.7%（与 plan P3 的预测吻合）。
+
+- **决定**：
+
+  | 项 | 定义 |
+  |---|---|
+  | **总预算** | `kv_total_mb = kv_mb + workspace_mb`，W4 固定 **1640 MiB**；seat 与 paged 同一**上限**，实际用量分别记 |
+  | **seat 单位** | 一块 `KvSlab` 的 `max_batch` 行，行宽 = `bucket(trace 最大 prompt + budget + 1, 64)`；每行按最坏长度预留 |
+  | **paged 单位** | 每层 `(n_blocks, bs, n_kv_head, head_dim)`；`kv_blocks` 由配置给定，须满足 `kv_mb + workspace ≤ 1640` |
+  | **块表** | 每请求一张逻辑→物理映射；第 `j` 个 token 在 `blocks[j//bs]` 的第 `j%bs` 列；**块分配后不移动** |
+  | **准入** | 一次性预留 `ceil((prompt + budget) / bs)` 块；同一 step 的多次准入必须原子；无抢占 ⇒ 不允许中途分配失败 ⇒ 无死锁 |
+  | **退出** | 立即归还全部块；`release_request` 幂等；下一请求可直接复用 |
+  | **decode gather** | 每步按块表把**活跃行**搬成 `(n_active, H_kv, lpad, D)`，`lpad = bucket(本步最长活跃长度, 64)`；不足 `lpad` 的行用**专用零块**补齐，逻辑列 mask 关掉；然后走现有 `hand_baddbmm`（一层一次，D4 不变） |
+  | **解码批** | 只压缩到活跃行；logits 散回 `(max_batch, vocab)`；`max_batch` 只是调度上限，不再是显存上限 |
+  | **容量口径** | fill-only 下最大同时准入请求数（allocator capacity），**不是**动态峰值；动态峰值只作 E3 诊断 |
+  | **±1 门禁** | 模拟必须读**同一条真实 trace** 的 `(prompt_len, budget)` 序列、并用**与配置相同的 `kv_blocks`**（`--paged-blocks`）再与实机比较；用合成分布比实机、或用预算反解的块数比固定块数是无效门禁（前者量 workload 建模差异，后者让 delta 恰好卡在 ±1 边界） |
+  | **internal frag** | `1 − 已写 token / (已写块 × bs)`，时间加权；**C2 只判这个** |
+  | **reservation slack** | `1 − (prompt + generated) / (reserved_blocks × bs)`；时间加权；单独报，不判 |
+  | **seat row slack** | `1 − live / row_width`；与 reservation slack 同表，作为「seat 的浪费」对照 |
+  | **代价** | B=8、两边 `lpad=1664`、只统计 decode 步的 `step_ms`；`decode_event_ms` 只作诊断，不当 GPU 时间 |
+  | **gather 记账** | `gather_read_mb` / `gather_write_mb` 是**流量**（`n_layer × n_active × lpad × kv_bytes_per_token_per_layer`）；`workspace_mb` 是**占用**；两者不混 |
+  | **fill-only** | 只 prefill + 预留，不 decode；synthetic prompt 的 EOS 不影响容量 |
+  | **EOS** | E2/E3 用 frozen prompt，先查 `out_tokens` 中位数 == budget；E1 不 decode，不受 P-31 影响 |
+
+- **与 plan（`docs/w4-plan.md` v2）的两处偏差，已在定稿前修正**：
+
+  1. **E1 seat 臂的 `max_batch`：6 → 9。** plan §4.1 假设「最长 prompt = 2048」，
+     行宽 2240。实际 `bench/prompts.json` 的最长 prompt 是 **1517**（l05），
+     `bucket(1517 + 128 + 1, 64) = 1664`，每行 **182 MiB**，1640 MiB 能放 **9 行**。
+     若照 6 跑，C1 会从 3.22× 虚高到 4.67×——多出来的部分是「把 seat 的 `max_batch` 人为设小」，
+     不是分页收益。原则：**两臂的 `max_batch` 都必须让显存先于它成为约束**。
+  2. **E3 paged 臂的 `kv_blocks`：840 → 820。** 840 块 = 1470 MiB，24 活跃行时 workspace
+     176 MiB，合计 **1646 MiB > 1640**。820 块 + 26 活跃行 ≈ **1624 MiB**。
+     （E1 的 800 块是保守值，不是预算上限：它给 workspace 留 45 MiB 余量。）
+
+- **后果**：
+  1. **容量比值随预算单调下降，必须报曲线**：真实 trace（预算反解）下 1200/1456/1640/2400/4096 MiB 对应
+     4.33×/3.50×/**3.22×**/3.54×/2.86×（≥2400 后 paged 撞到请求数或 `max_batch`，不再是显存受限）。原因是 seat 每 182 MiB 稳定加 1 行，而 paged 会撞到
+     trace 的请求数（32）或 `max_batch`（64）。C1 判的是 1640 那个切片，**报告主图是曲线**。
+  2. **uniform-2048 不是判据**：seat 的 9 行正好覆盖均匀长度，paged 还要付 workspace，
+     预测 0.8–1.0×；报告必须给出，但不拿它判 1.5×。
+  3. **`memory_match_ratio` 的口径沿用 D5/P-30**：paged 臂的分母是 `kv_total_mb`（池 + workspace），
+     不是「本请求份额」。
+  4. **C4 不进硬验收**：它是「能不能报吞吐」的门槛，不是容量判据；避免 host/GPU 抖动把容量结论一起拖死。
+  5. **P-26 由此关闭（不是作废）**：`freeze_seat` 保留「冻结游标、保留预留」的原语义给 W3 席位路径；
+     paged 路径用 `release_request` 归还块，两条路径不共用函数名。
+  6. **W4 不做**：抢占/swap/recompute、chunked prefill、prefix cache、CUDA graph、
+     flash-attn/paged-attention kernel（换 kernel 会同时废掉 D4 与 W2/W3 的全部基线）。
+  7. **新增坑**：P-32…P-36（见 `PITFALLS.md`），核心是「gather 宽 = 最大活跃长度」「零块 + 逻辑 mask」
+     「RoPE 表长 ≠ lpad」「`kv_mb` 必须同时报三个数」「固定 KV 预算而不计 workspace 会读出假比值」。
+
+- **复盘点**：
+  - E1 实机 `peak_concurrency` 与「同 trace 模拟」是否在 ±1 内；
+  - E2 的 `step_ms` 比值是否 ≤1.15×（健康线）、是否 >1.5×（撤回吞吐结论）；
+  - E3（可选）两臂是否都 `saturated`；
+  - `kv_total_mb` 实测是否 ≤1640（超了下一 run 降 `kv_blocks`，不静默改预算）；
+  - W4 结束后回看：分页是否让 slab 的 64 列桶粒度失去意义（D4 的复盘点之一）。
+
+---
+
 ## 模板
 
 ```markdown

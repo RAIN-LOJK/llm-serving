@@ -362,11 +362,11 @@ def test_aggregate_threads_budgets_into_straggler_ratio():
 
 def test_aggregate_returns_the_four_spec_blocks():
     summary = _summary()
-    assert set(summary) == {"throughput", "latency", "steps", "consistency"}
+    assert set(summary) == {"throughput", "latency", "steps", "consistency", "memory"}
     assert set(summary["throughput"]) == {
         "n_traces", "tok_s", "tok_s_active", "decode_only_tok_s", "req_s", "makespan_s",
         "offered_rate", "achieved_rate", "saturated", "queue_depth_at_last_arrival",
-        "analytic_straggler_ratio",
+        "analytic_straggler_ratio", "peak_concurrency",
     }
     assert set(summary["latency"]) == {
         "ttft_ms", "queue_ms", "prefill_ms", "queue_share_p99", "decomposed",

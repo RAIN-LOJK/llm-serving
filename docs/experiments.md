@@ -66,7 +66,7 @@ schema = 1
 [exp]
 id = "W0-0001"                 # <stage>-<4位序号>
 stage = "W0"
-type = "probe"                 # probe | microbench | scenario | smoke
+type = "probe"                 # probe | microbench | scenario | fill | smoke
 slug = "carrier-probe"         # 目录名用，英文/数字/连字符
 title = "双载体：显存/延迟 vs 上下文"
 hypothesis = ["P1", "P2", "P3"]
@@ -85,6 +85,7 @@ batch_sizes = [1]
 
 [engine]
 impl = "hf"                    # dummy | hf | minillm | continuous | paged | hybrid
+# type = "fill"（W4）: 只 prefill + 预留、不 decode；容量 = fill-only 下最大同时准入数（D6）
 device = "auto"                # auto | cuda | mps | cpu
 max_batch = 1
 

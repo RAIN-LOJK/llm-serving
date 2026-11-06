@@ -23,7 +23,7 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 try:
     import tomllib
@@ -40,7 +40,7 @@ from bench import loadgen
 from bench.loadgen import PromptSet, synthetic_ids
 
 SCHEMA_VERSION = 1
-TYPES = {"probe", "microbench", "scenario", "smoke"}
+TYPES = {"probe", "microbench", "scenario", "smoke", "fill"}
 IMPLS = {"dummy", "hf", "minillm", "continuous", "paged", "hybrid"}
 TIMERS = {"auto", "perf_counter", "cuda_event"}
 RUN_ID_RE = re.compile(r"^(?P<stage>[A-Z]\d+)-(?P<seq>\d{4})$")
@@ -119,6 +119,22 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         errors.append("[engine].device must be auto/cuda/mps/cpu (or cuda:N)")
     if int(engine.get("max_batch", 1)) < 1:
         errors.append("[engine].max_batch must be >= 1")
+    # ---- W4 paged contract (docs/decisions.md D6) --------------------
+    # Only the new `impl="paged"` path gains required fields; the closed W0/W2/W3 paths
+    # are untouched (P-28: never add a mandatory key to a closed path).
+    if engine.get("impl") == "paged":
+        block_size = engine.get("block_size")
+        if not isinstance(block_size, int) or isinstance(block_size, bool) or block_size not in {16, 32}:
+            errors.append(
+                "[engine].block_size is required and must be 16 or 32 when [engine].impl='paged' "
+                f"(got {block_size!r})"
+            )
+        kv_blocks = engine.get("kv_blocks")
+        if not isinstance(kv_blocks, int) or isinstance(kv_blocks, bool) or kv_blocks < 1:
+            errors.append(
+                "[engine].kv_blocks is required and must be an integer >= 1 when "
+                f"[engine].impl='paged' (got {kv_blocks!r})"
+            )
 
     workload = cfg.get("workload") or {}
     if not isinstance(workload, dict):
@@ -142,19 +158,54 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             errors.append("[workload].prompts is required for kind='prompts'")
         elif not Path(str(prompts)).exists():
             errors.append(f"[workload].prompts not found: {prompts}")
+    # ---- optional prompt subset (W4 E2) -----------------------------
+    # `prompt_ids` narrows a frozen PromptSet to a named subset (e.g. the `long` bucket).
+    # It is only meaningful for kind='prompts'; on a synthetic workload it would steer
+    # nothing, so writing it there is a config error rather than a silent no-op (P-28:
+    # closed paths are unchanged because they never write the key).
+    prompt_ids = workload.get("prompt_ids")
+    if kind == "synthetic" and "prompt_ids" in workload:
+        errors.append(
+            "[workload].prompt_ids is only valid when kind='prompts' "
+            "(it would be silently ignored for kind='synthetic')"
+        )
+    if kind == "prompts" and prompt_ids is not None:
+        if not isinstance(prompt_ids, list) or not prompt_ids:
+            errors.append("[workload].prompt_ids must be a non-empty list of prompt ids")
+        elif any(not isinstance(pid, str) or not pid for pid in prompt_ids):
+            errors.append("[workload].prompt_ids entries must be non-empty strings")
+        else:
+            prompts = workload.get("prompts")
+            if prompts and Path(str(prompts)).exists():
+                try:
+                    known = {p.id for p in PromptSet.load(prompts).prompts}
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    errors.append(
+                        f"[workload].prompts could not be parsed: {prompts} "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+                else:
+                    missing = [pid for pid in prompt_ids if pid not in known]
+                    if missing:
+                        errors.append(f"[workload].prompt_ids not found in {prompts}: {missing}")
     if workload.get("arrival", "closed") not in {"closed", "poisson"}:
         errors.append("[workload].arrival must be 'closed' or 'poisson'")
 
     # ---- W3 scenario contract (docs/decisions.md D5) ----------------
+    # W4 (D6): `impl="paged"` is a scheduler arm too -- the paged pool replaces the seat
+    # slabs, but the trace path and the `[scheduler]` knob are the same, so it joins the
+    # scenario predicate. Closed W0/W2/W3 configs never write `paged`, so their results
+    # are unchanged.
     policy = str((cfg.get("scheduler") or {}).get("policy", "")) if "scheduler" in cfg else ""
-    scenario = workload.get("arrival") == "poisson" or engine.get("impl") == "continuous"
+    scenario = workload.get("arrival") == "poisson" or engine.get("impl") in {"continuous", "paged"}
+    scheduler_impls = {"continuous", "paged"}
     if "scheduler" in cfg and not isinstance(cfg.get("scheduler"), dict):
         errors.append("[scheduler] must be a table")
-    if "scheduler" in cfg and engine.get("impl") != "continuous":
+    if "scheduler" in cfg and engine.get("impl") not in scheduler_impls:
         # A knob that changes nothing is worse than no knob: it would be recorded in the
         # manifest as if it had steered the run.
-        errors.append("[scheduler] is only valid with [engine].impl='continuous'")
-    if engine.get("impl") == "continuous" and policy not in {"static", "continuous"}:
+        errors.append("[scheduler] is only valid with [engine].impl='continuous' or 'paged'")
+    if engine.get("impl") in scheduler_impls and policy not in {"static", "continuous"}:
         errors.append("[scheduler].policy must be 'static' or 'continuous'")
     if workload.get("arrival") == "poisson":
         if wk_type := cfg.get("exp", {}).get("type"):
@@ -171,13 +222,18 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     requests = workload.get("requests")
     if scenario:
         if not isinstance(requests, int) or requests < 1:
-            errors.append("[workload].requests must be >= 1 on the scenario path (poisson or impl='continuous')")
+            errors.append(
+                "[workload].requests must be >= 1 on the scenario path "
+                "(poisson or impl='continuous'/'paged')"
+            )
         elif engine.get("impl") == "continuous" and workload.get("arrival") == "closed":
             # One request per seat is the E1 shape (a batch probe, not a queue), but a closed
             # trace longer than the pool is a legitimate *capacity* probe: every request is
             # already waiting at t=0, so the seats stay full until the trace drains and
             # ``req_s`` measures sustained throughput rather than one wave's tail. Fewer
             # requests than seats would leave the pool partly idle and measure neither.
+            # (Paged arms are exempt: there ``max_batch`` is a scheduling limit, not a
+            # memory bound -- a fill probe with ``requests < max_batch`` is legal.)
             if int(requests) < int(engine.get("max_batch", 1)):
                 errors.append(
                     "[workload].requests must be >= [engine].max_batch for a closed batch "
@@ -185,6 +241,18 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 )
     if requests is not None and (not isinstance(requests, int) or requests < 1):
         errors.append("[workload].requests must be >= 1")
+    # W4 `type="fill"` (D6): a capacity probe that only prefills and reserves blocks, so it
+    # needs a request count even when it rides the closed path. `kind` stays whatever the
+    # global rule above allows (prompts or synthetic); nothing else changes for other types.
+    if cfg.get("exp", {}).get("type") == "fill":
+        if not isinstance(requests, int) or requests < 1:
+            errors.append("[workload].requests must be >= 1 when [exp].type='fill'")
+        # Fill-only is a scheduler capability (admission + reservation): a per-request
+        # arm has no trace to run it on, so the config would silently fail at run time.
+        if engine.get("impl") not in scheduler_impls:
+            errors.append(
+                "[exp].type='fill' requires [engine].impl='continuous' or 'paged'"
+            )
     if scenario and [int(b) for b in workload.get("batch_sizes", [1])] != [1]:
         errors.append(
             "[workload].batch_sizes must be [1] on the scenario path: concurrency is "
@@ -243,17 +311,60 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _select_prompts(prompt_set: PromptSet, prompt_ids: list[str] | None) -> list[Any]:
+    """Narrow a frozen PromptSet to ``prompt_ids``, preserving the given order.
+
+    Without ``prompt_ids`` the full set is returned untouched, so historical configs
+    (and every consumer's byte output) are unchanged. Validation already guarantees the
+    ids exist; this re-check keeps a programmatic caller from silently getting a subset
+    that does not match its config.
+    """
+    if not prompt_ids:
+        return list(prompt_set.prompts)
+    by_id = {prompt.id: prompt for prompt in prompt_set.prompts}
+    missing = [pid for pid in prompt_ids if pid not in by_id]
+    if missing:
+        raise ConfigError(f"[workload].prompt_ids not found in the prompt set: {missing}")
+    return [by_id[pid] for pid in prompt_ids]
+
+
+def _effective_prompt_sha256(prompt_set: PromptSet, prompt_ids: list[str] | None) -> str:
+    """The workload identity a paired run must match.
+
+    Full set -> the frozen ``PromptSet.sha256``. A subset -> a hash over the *frozen
+    set's* digest plus the sorted ids, so two different subsets can never share a hash
+    (nor can a subset collide with the full set). Order is deliberately excluded here:
+    the trace hash already covers arrival order.
+    """
+    if not prompt_ids:
+        return prompt_set.sha256
+    payload = prompt_set.sha256 + "\n" + json.dumps(
+        sorted(prompt_ids), ensure_ascii=False, separators=(",", ":")
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _prompt_info(cfg: dict[str, Any]) -> dict[str, Any] | None:
     workload = cfg.get("workload") or {}
     if workload.get("kind") != "prompts":
         return None
     prompt_set = PromptSet.load(workload["prompts"])
-    return {
+    prompt_ids = workload.get("prompt_ids")
+    info = {
         "path": str(workload["prompts"]),
         "version": prompt_set.version,
         "sha256": prompt_set.sha256,
         "n_prompts": len(prompt_set.prompts),
     }
+    if prompt_ids:
+        # Keep both identities side by side: `sha256` is the workload the run actually
+        # executed (the subset), `prompt_set_sha256` is the frozen file it came from.
+        info["sha256"] = _effective_prompt_sha256(prompt_set, prompt_ids)
+        info["n_prompts"] = len(prompt_ids)
+        info["prompt_set_sha256"] = prompt_set.sha256
+        info["n_prompts_in_set"] = len(prompt_set.prompts)
+        info["prompt_ids"] = list(prompt_ids)
+    return info
 
 
 def _device_class_for(device: str, snapshot: dict[str, Any]) -> str:
@@ -426,7 +537,8 @@ def _cases_for_model(
     else:
         if prompt_set is None:
             raise ConfigError("prompt workload requires a loaded prompt set")
-        for prompt in prompt_set.prompts:
+        selected = _select_prompts(prompt_set, workload.get("prompt_ids"))
+        for prompt in selected:
             ids = engine.encode(prompt.text)
             for batch in batches:
                 for row in range(batch):
@@ -449,11 +561,15 @@ def _scenario_execute(
     device_override: str | None,
     limit: int | None,
 ) -> list[dict[str, Any]]:
-    """W3 execution path: one scheduler over a trace per repeat (D5).
+    """W3/W4 execution path: one scheduler over a trace per repeat (D5 / D6).
 
     Rows are appended in the same ``metrics.jsonl`` stream as the per-request path, but
     they carry ``row_kind`` so old consumers (``overall``/``groups``/``stability``) can go
     on reading only ``row_kind="request"``.
+
+    ``[exp].type = "fill"`` (W4 E1) rides the same path: the adapter's ``fill`` flag
+    swaps the scheduler for the fill-only loop (prefill + reserve, no decode), so the
+    capacity probe still produces request/step/trace rows and a ``capacity`` block.
     """
     workload = cfg.get("workload") or {}
     prompt_set = PromptSet.load(workload["prompts"]) if workload.get("kind") == "prompts" else None
@@ -462,6 +578,7 @@ def _scenario_execute(
     repeats = _repeat_count(cfg)
     requests = int(workload["requests"])
     budgets = tuple(int(b) for b in (workload.get("budgets") or [max_new]))
+    fill_only = str((cfg.get("exp") or {}).get("type")) == "fill"
     rows: list[dict[str, Any]] = []
     metrics_path = run_dir / "metrics.jsonl"
     trace_summaries: list[dict[str, Any]] = []
@@ -476,6 +593,10 @@ def _scenario_execute(
                 engine_cfg["device"] = device_override
             if "scheduler" in cfg:
                 engine_cfg["_policy"] = str((cfg.get("scheduler") or {}).get("policy", "continuous"))
+            # W4 E1: only the scheduler arms can run a fill probe; the runner has already
+            # refused `type="fill"` on an arm without a trace path.
+            if fill_only:
+                engine_cfg["_fill"] = True
 
             engine = build_engine(model_cfg, engine_cfg)
             engine.load()
@@ -499,13 +620,7 @@ def _scenario_execute(
                     "sha256": trace.sha256,
                     "shuffle": trace.shuffle,
                 }
-                manifest["scheduler"] = {
-                    "policy": engine.policy,
-                    "max_batch": int(engine.max_batch),
-                    "seats": "one_kvslab_one_row_each",
-                    "prefill": "per_sequence",
-                    "free_rows": "masked_in_forward",
-                }
+                manifest["scheduler"] = _scheduler_manifest(engine, fill_only=fill_only)
                 manifest["trace"] = trace_meta
 
                 for _ in range(warmup):
@@ -552,6 +667,42 @@ def _scenario_execute(
     return rows
 
 
+def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
+    """``manifest["scheduler"]``: the arm's concurrency unit, policy and pool shape.
+
+    The paged arm's unit is a block table, not a seat row; it also records the block
+    geometry so a reader can turn ``kv_blocks``/``block_size`` into a budget. The seat
+    arm keeps exactly the W3 keys and values (P-28) except for the additive ``fill_only``.
+    """
+    impl = str(getattr(engine, "impl", ""))
+    entry: dict[str, Any] = {
+        "policy": engine.policy,
+        "max_batch": int(engine.max_batch),
+    }
+    if impl == "paged":
+        entry.update(
+            {
+                "seats": "paged_blocks",
+                "prefill": "per_sequence",
+                "block_size": int(getattr(engine, "block_size", 0)),
+                "kv_blocks": int(getattr(engine, "kv_blocks", 0)),
+                "free_rows": "not_applicable",
+            }
+        )
+    else:
+        # Same keys, same order, same values as W3.
+        entry.update(
+            {
+                "seats": "one_kvslab_one_row_each",
+                "prefill": "per_sequence",
+                "free_rows": "masked_in_forward",
+            }
+        )
+    if fill_only:
+        entry["fill_only"] = True
+    return entry
+
+
 def _build_trace(
     cfg: dict[str, Any],
     engine: Any,
@@ -577,8 +728,9 @@ def _build_trace(
     else:
         if prompt_set is None:
             raise ConfigError("prompt workload requires a loaded prompt set")
-        entries = [(prompt.id, engine.encode(prompt.text)) for prompt in prompt_set.prompts]
-        prompt_sha = prompt_set.sha256
+        selected = _select_prompts(prompt_set, workload.get("prompt_ids"))
+        entries = [(prompt.id, engine.encode(prompt.text)) for prompt in selected]
+        prompt_sha = _effective_prompt_sha256(prompt_set, workload.get("prompt_ids"))
 
     if arrival == "poisson":
         return loadgen.poisson_trace(
@@ -612,13 +764,19 @@ def _flatten_scenario(
     common = {
         "run_id": manifest["run_id"],
         "model": str(model_cfg.get("name", "—")),
-        "impl": "continuous",
+        # The arm that actually produced these rows (W4 adds `paged`); the manifest's
+        # `[engine].impl` is the same value, but reading it off the result means an
+        # `--engine` override or a future third arm cannot be mislabelled as W3's.
+        "impl": str(getattr(result, "impl", None) or manifest.get("engine", {}).get("impl") or "continuous"),
         "device": manifest["engine"].get("resolved_device"),
         "device_class": manifest["device_class"],
         "dtype": model_cfg.get("dtype"),
         "policy": str(manifest.get("scheduler", {}).get("policy")),
         "max_batch": int(manifest.get("scheduler", {}).get("max_batch", 1)),
     }
+    if manifest.get("scheduler", {}).get("seats") == "paged_blocks":
+        common["block_size"] = int(manifest["scheduler"].get("block_size", 0))
+        common["kv_blocks"] = int(manifest["scheduler"].get("kv_blocks", 0))
     # Memory fields belong to measured request outcomes only: the memory account in
     # bench/thresholds.py groups on request rows, and a step row's lifetime is not a run
     # peak (the per-request arm likewise writes these on its measured row alone).
@@ -648,7 +806,15 @@ def _execute(
 ) -> list[dict[str, Any]]:
     workload = cfg.get("workload") or {}
     engine_impl = str((cfg.get("engine") or {}).get("impl") or "")
-    if workload.get("arrival") == "poisson" or (engine_override or engine_impl) == "continuous":
+    exp_type = str((cfg.get("exp") or {}).get("type") or "")
+    # W4: `type="fill"` is a scheduler capacity probe (prefill + reserve, no decode), so
+    # it rides the scenario path even on a closed seat arm. `paged` joins the W3 predicate;
+    # both are additive -- closed W0/W2/W3 configs never write either.
+    if (
+        workload.get("arrival") == "poisson"
+        or (engine_override or engine_impl) in {"continuous", "paged"}
+        or exp_type == "fill"
+    ):
         return _scenario_execute(
             cfg, run_dir, manifest, snapshot, engine_override, device_override, limit
         )
@@ -890,6 +1056,12 @@ def _summary(
     scenario_blocks = _scenario_blocks(rows, manifest, trace_rows, request_rows, step_rows)
     if scenario_blocks is not None:
         protocol.update(scenario_blocks["protocol"])
+        # W4 C1 pairs on the workload identity. The trace hash already covers it, but
+        # it is recorded under `capacity.workload_sha256` as well so a summary whose
+        # `protocol` block is trimmed still carries the pairing key (D6).
+        capacity = scenario_blocks.get("capacity") or {}
+        if capacity and capacity.get("workload_sha256") is not None:
+            protocol.setdefault("workload_sha256", capacity["workload_sha256"])
 
     accept = cfg.get("accept") or {}
     baseline_id = str((cfg.get("baseline") or {}).get("run_id") or "")
@@ -915,6 +1087,10 @@ def _summary(
                     "latency": scenario_blocks["latency"],
                     "steps": scenario_blocks["steps"],
                     "consistency": scenario_blocks["consistency"],
+                    "memory": scenario_blocks["memory"],
+                    # W4 C1/C2 read `capacity`; absent -> those criteria stay pending
+                    # (the evaluator's own behaviour, not an error).
+                    "capacity": scenario_blocks.get("capacity"),
                 }
             )
         acceptance = thresholdmod.evaluate(
@@ -951,11 +1127,24 @@ def _summary(
                 "latency": scenario_blocks["latency"],
                 "steps": scenario_blocks["steps"],
                 "consistency": scenario_blocks["consistency"],
+                "memory": scenario_blocks["memory"],
             }
         )
-        tok_s = (scenario_blocks["throughput"].get("tok_s") or {}).get("median")
-        if tok_s is not None:
-            result["key_metric"] = {"name": "tok_s", "value": float(tok_s)}
+        capacity = scenario_blocks.get("capacity")
+        if capacity is not None:
+            result["capacity"] = capacity
+        fill_only = bool((manifest.get("scheduler") or {}).get("fill_only"))
+        if fill_only and capacity and capacity.get("peak_concurrency") is not None:
+            # A fill run generates nothing, so tok/s is 0 or meaningless; the E1 index
+            # row should show the capacity number instead.
+            result["key_metric"] = {
+                "name": "peak_concurrency",
+                "value": float(capacity["peak_concurrency"]),
+            }
+        else:
+            tok_s = (scenario_blocks["throughput"].get("tok_s") or {}).get("median")
+            if tok_s is not None:
+                result["key_metric"] = {"name": "tok_s", "value": float(tok_s)}
     return result
 
 
@@ -986,13 +1175,69 @@ def _scenario_blocks(
         "trace_sha256": hashes[0] if len(hashes) == 1 else None,
         "max_batch": int((manifest.get("scheduler") or {}).get("max_batch", 1)),
     }
+    # W4 (D6): the paged arm's scheduler unit and block geometry are pairing provenance.
+    # The seat arm never writes these keys, so its protocol block is unchanged.
+    scheduler = manifest.get("scheduler") or {}
+    if scheduler.get("seats") == "paged_blocks":
+        blocks["protocol"].update(
+            {
+                "block_size": scheduler.get("block_size"),
+                "kv_blocks": scheduler.get("kv_blocks"),
+            }
+        )
+    if scheduler.get("fill_only"):
+        blocks["protocol"]["fill_only"] = True
     blocks["consistency"].update(
         {
             "trace_sha256_consistent": len(hashes) <= 1,
             "n_trace_hashes": len(hashes),
         }
     )
+    # The adapter's summary is the only place a fill/closed run's allocator capacity is
+    # known: rows alone cannot tell "6 admitted" from "6 seats that happened to be busy".
+    # Repeats of one run are deterministic for a fill probe; if they ever disagree, the
+    # capacity criterion must not silently pick one, so it is left pending (None).
+    capacities = [
+        summary.get("capacity")
+        for summary in manifest.get("_scenario_summaries") or []
+        if isinstance(summary, Mapping) and summary.get("capacity") is not None
+    ]
+    blocks["capacity"] = _merged_capacity(capacities) if capacities else None
     return blocks
+
+
+def _merged_capacity(summaries: list[Any]) -> dict[str, Any] | None:
+    """One ``capacity`` block from the repeats' summaries.
+
+    Numbers are averaged over the repeats with the median (a fill probe is deterministic,
+    so this equals the single value; a scenario run's dynamic peak genuinely varies and
+    a median is the honest summary). Identity/provenance fields must agree exactly; a
+    field that disagrees is reported as ``None`` with ``capacity_inconsistent=True``
+    rather than an arbitrary pick.
+    """
+    import statistics
+
+    merged: dict[str, Any] = {}
+    keys = {key for summary in summaries for key in summary}
+    for key in sorted(keys):
+        values = [summary.get(key) for summary in summaries]
+        first = values[0]
+        if all(value == first for value in values[1:]):
+            # Identity/provenance and deterministic fill numbers: keep the exact value
+            # (an int stays an int so `block_size`/`kv_blocks` read as block counts).
+            merged[key] = first
+            continue
+        numbers = [
+            float(value)
+            for value in values
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        if len(numbers) == len(values):
+            merged[key] = statistics.median(numbers)
+        else:
+            merged[key] = None
+            merged["capacity_inconsistent"] = True
+    return merged
 
 
 # ---------------------------------------------------------------------------

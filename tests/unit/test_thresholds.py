@@ -330,3 +330,185 @@ def test_ttft_decomposed_reads_the_structural_flag():
 def test_ttft_decomposed_is_pending_without_the_block():
     entry = _evaluate("ttft_p99_decomposed", {"protocol": dict(SCENARIO_PROTOCOL)}, None)
     assert entry["status"] == "pending", entry
+
+
+# ------------------------------------------------------------- W4 paged criteria
+#
+# C1 compares *allocator capacity* (fill-only max simultaneous admissions) under one total
+# budget, so the pair is checked on device/dtype/workload/budget only -- ``max_batch`` is
+# the variable under test and may differ. C2 judges internal frag only; reservation and
+# seat-row slack are reported beside the value and must never flip the verdict.
+
+W4_TABLE = {"W4": {"paged": {"max_concurrency_speedup_min": 1.50, "fragmentation_max": 0.05}}}
+W4_PROTOCOL = {"dtype": "bfloat16", "device_class": "measure-cuda"}
+
+
+def capacity_summary(
+    peak=20,
+    kv_total_mb=1606.0,
+    *,
+    max_batch=64,
+    block_size=16,
+    frag=None,
+    reservation_slack=None,
+    seat_row_slack=None,
+    workload_sha256=None,
+    protocol=None,
+):
+    summary = {
+        "protocol": dict(W4_PROTOCOL if protocol is None else protocol, max_batch=max_batch),
+        "capacity": {
+            "peak_concurrency": peak,
+            "kv_total_mb": kv_total_mb,
+            "block_size": block_size,
+            "max_batch": max_batch,
+        },
+    }
+    if workload_sha256 is not None:
+        summary["protocol"]["workload_sha256"] = workload_sha256
+    for key, value in (
+        ("frag_internal", frag),
+        ("reservation_slack", reservation_slack),
+        ("seat_row_slack", seat_row_slack),
+    ):
+        if value is not None:
+            summary["capacity"][key] = value
+    return summary
+
+
+def _w4(name, ours, baseline, limit=None):
+    if limit is None:
+        limit = 1.50 if name == "max_concurrency_speedup_min" else 0.05
+    table = {"W4": {"paged": {name: limit}}}
+    return thresholds.evaluate([name], ours, table, baseline=baseline)[0]
+
+
+def test_capacity_speedup_passes_exactly_at_the_target():
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0, max_batch=6, block_size=None)
+    entry = _w4("max_concurrency_speedup_min", capacity_summary(peak=9), baseline)
+    assert entry["status"] == "pass", entry
+    assert entry["value"] == pytest.approx(1.5)
+    assert entry["ours_peak_concurrency"] == 9
+    assert entry["baseline_peak_concurrency"] == 6
+
+
+def test_capacity_speedup_fails_below_the_target():
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0)
+    entry = _w4("max_concurrency_speedup_min", capacity_summary(peak=8), baseline)
+    assert entry["status"] == "fail", entry
+    assert entry["value"] == pytest.approx(8 / 6, abs=1e-3)
+
+
+def test_capacity_speedup_allows_a_different_max_batch():
+    """D6: the paged arm's pool is wider than the seat arm's by construction."""
+    ours = capacity_summary(peak=20, max_batch=64)
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0, max_batch=6)
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "pass", entry
+    assert entry["value"] == pytest.approx(3.333, abs=1e-3)
+
+
+def test_capacity_speedup_invalid_when_ours_exceeds_the_budget():
+    ours = capacity_summary(peak=20, kv_total_mb=1700.0)
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0)
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "invalid", entry
+    assert any("kv_total_mb" in problem for problem in entry["problems"])
+
+
+def test_capacity_speedup_allows_ours_below_the_shared_budget():
+    ours = capacity_summary(peak=20, kv_total_mb=1456.0)
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0)
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "pass", entry
+
+
+def test_capacity_speedup_invalid_on_a_different_workload():
+    ours = capacity_summary(peak=20, workload_sha256="w3-like-max2048")
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0, workload_sha256="uniform-2048")
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "invalid", entry
+    assert any("workload_sha256" in problem for problem in entry["problems"])
+
+
+def test_capacity_speedup_invalid_on_a_dtype_mismatch():
+    ours = capacity_summary(peak=20)
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0, protocol={**W4_PROTOCOL, "dtype": "float32"})
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "invalid", entry
+    assert any("dtype" in problem for problem in entry["problems"])
+
+
+def test_capacity_speedup_pending_without_the_capacity_block():
+    ours = capacity_summary(peak=None)
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0)
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "pending", entry
+    assert "peak_concurrency" in entry["reason"]
+
+
+def test_capacity_speedup_never_reads_the_dynamic_peak():
+    """``throughput.peak_concurrency`` is E3's observed occupancy, not allocator capacity."""
+    ours = {
+        "protocol": dict(W4_PROTOCOL, max_batch=64),
+        "throughput": {"peak_concurrency": 20},
+    }
+    baseline = capacity_summary(peak=6, kv_total_mb=1638.0)
+    entry = _w4("max_concurrency_speedup_min", ours, baseline)
+    assert entry["status"] == "pending", entry
+
+
+def test_capacity_speedup_pending_without_a_baseline():
+    entry = _w4("max_concurrency_speedup_min", capacity_summary(peak=20), None)
+    assert entry["status"] == "pending", entry
+    assert "baseline" in entry["reason"]
+
+
+def test_fragmentation_passes_at_4_9_percent():
+    entry = _w4("fragmentation_max", capacity_summary(frag=0.049), None)
+    assert entry["status"] == "pass", entry
+    assert entry["value"] == pytest.approx(0.049)
+
+
+def test_fragmentation_passes_exactly_at_5_percent():
+    entry = _w4("fragmentation_max", capacity_summary(frag=0.05), None)
+    assert entry["status"] == "pass", entry
+
+
+def test_fragmentation_fails_at_5_1_percent():
+    entry = _w4("fragmentation_max", capacity_summary(frag=0.051), None)
+    assert entry["status"] == "fail", entry
+
+
+def test_fragmentation_ignores_a_large_reservation_slack():
+    """C2 is internal frag only: a 90% reservation slack must not fail a 1.4% frag run."""
+    summary = capacity_summary(frag=0.014, reservation_slack=0.90, seat_row_slack=0.26)
+    entry = _w4("fragmentation_max", summary, None)
+    assert entry["status"] == "pass", entry
+    assert entry["value"] == pytest.approx(0.014)
+    assert entry["reservation_slack"] == pytest.approx(0.90)
+    assert entry["seat_row_slack"] == pytest.approx(0.26)
+    assert "not judged" in entry["reason"]
+
+
+def test_fragmentation_falls_back_to_the_memory_block():
+    summary = {"memory": {"frag_internal": 0.03, "reservation_slack": 0.2}}
+    entry = _w4("fragmentation_max", summary, None)
+    assert entry["status"] == "pass", entry
+    assert entry["reservation_slack"] == pytest.approx(0.2)
+
+
+def test_fragmentation_pending_without_a_value():
+    entry = _w4("fragmentation_max", capacity_summary(), None)
+    assert entry["status"] == "pending", entry
+    assert "frag_internal" in entry["reason"]
+
+
+def test_step_cost_ratio_is_record_only_never_a_pass_line():
+    """C4 has no threshold key: the ratio may be echoed, but the status stays pending."""
+    summary = {"steps": {"step_cost_ratio": {"median": 1.08}}}
+    entry = thresholds.evaluate(["step_cost_ratio"], summary, W4_TABLE)[0]
+    assert entry["status"] == "pending", entry
+    assert entry["value"] == pytest.approx(1.08)
+    assert "record-only" in entry["reason"]
+    assert "1.5" in entry["reason"]

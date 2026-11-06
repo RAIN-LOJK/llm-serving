@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from typing import Optional
 from model.attention import DECODE_BACKEND, PREFILL_BACKEND
 from model.config import MiniLLMConfig
-from model.slab import KvSlab
+from model.slab import as_decode_container
 
 
 # ============================================================
@@ -137,10 +137,12 @@ class Attention(nn.Module):
                 cos=None, sin=None):
         B, T, C = x.shape  # (batch, seq_len, n_embd)
         # ``KvSlab.past_len`` reads a tensor back to the host (``.item()``), which is illegal
-        # inside a captured graph. In slab mode the cursor is only needed by the mask, and
-        # the slab owns that, so skip the read entirely.
-        slab = past_keys_values if isinstance(past_keys_values, KvSlab) else None
-        past_len = 0 if (slab is not None or past_keys_values is None) else past_keys_values.past_len(idx)
+        # inside a captured graph. In decode-container mode the cursor is only needed by the
+        # mask, and the container owns that, so skip the read entirely. The container is
+        # recognised by its explicit protocol flag (see ``model.slab``), not by class, so
+        # ``PagedKV`` takes the same path and a plain ``KVcache`` keeps the growing-cache one.
+        decode = as_decode_container(past_keys_values)
+        past_len = 0 if (decode is not None or past_keys_values is None) else past_keys_values.past_len(idx)
 
         # 1. Q/K/V 投影并 reshape 为多头形状
         q = self.q_norm(self.q_proj(x).view(B, T, self.n_head, self.head_dim))
@@ -148,7 +150,7 @@ class Attention(nn.Module):
         v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_dim)
         # 2. 对 Q/K 施加 RoPE（cos/sin 由模型层算好传入；直接调用本层时现算）
         if cos is None or sin is None:
-            if slab is not None:
+            if decode is not None:
                 raise ValueError(
                     "the KvSlab path needs per-row cos/sin from the model (rows sit at "
                     "different positions); do not call the layer directly with a slab"
@@ -160,22 +162,22 @@ class Attention(nn.Module):
         # 2b. Fixed-slab decode: write this token into the layer's buffer and attend over
         # the whole buffer with the slab's in-place mask, so there is no per-step ``cat``
         # and the tensor addresses never change (CUDA graph needs that).
-        if slab is not None:
+        if decode is not None:
             if T != 1:
                 raise ValueError(
                     "the KvSlab path is decode-only (T == 1); prefill keeps KVcache + flash "
                     "and hands over with KvSlab.fill_from()"
                 )
-            slab.write(idx, k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
-            k_all, v_all = slab.get(idx)
-            # The mask is identical for every layer, so the slab already turned it into the
-            # additive bias once at the step boundary (``build_mask``). Passing ``bias=``
+            decode.write(idx, k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
+            k_all, v_all = decode.get(idx)
+            # The mask is identical for every layer, so the container already turned it into
+            # the additive bias once at the step boundary (``build_mask``). Passing ``bias=``
             # avoids rebuilding the same (B*H_kv, G, L) tensor 28 times per step.
             y = self.backend_decode.decode(
                 q.transpose(1, 2),
                 k_all,
                 v_all,
-                bias=slab.bias,
+                bias=decode.bias,
                 dropout_p=self.attn_dropout.p if self.training else 0.0,
             )
             return self.resid_dropout(self.o_proj(y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)))

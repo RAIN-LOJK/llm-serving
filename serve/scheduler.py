@@ -47,11 +47,33 @@ The module depends on the standard library only; the engine is duck-typed
 (``prefill_into_seat`` / ``decode_batch`` / ``freeze_seat`` / ``slab`` /
 ``vocab_size`` / ``device`` / ``eos_token_id`` / ``max_position``), so the unit
 tests can use a fake engine without torch.
+
+W4 paged arm (``docs/w4-plan.md`` D6)
+-------------------------------------
+The same step applies to a paged engine, through optional hooks only -- nothing is
+imported and no branch is taken when they are absent:
+
+* **Admission asks before popping.** If the engine has ``can_admit(prompt_len, budget)``,
+  the FIFO head is offered to it *before* the queue pop. A refusal leaves the request
+  queued (so its wait is queue time and ``ttft == queue + prefill`` still holds) and
+  **stops** the admission pass -- a head that does not fit is never skipped (FIFO).
+* **Prefill goes into blocks.** If the engine has ``prefill_into_blocks``, the request is
+  admitted with ``prefill_into_blocks(req.id, prompt_ids, seat=seat, budget=budget)``
+  instead of ``prefill_into_seat(seat, ...)``; the upper-bound reservation needs the
+  budget, and the seat is what lets decode scatter logits back by seat number.
+* **Release frees blocks.** If the engine has ``release_request``, retirement calls it
+  instead of ``freeze_seat`` (D6: blocks go back to the free list; the seat number still
+  returns to the scheduler's free list).
+* **Seat-only bookkeeping is skipped.** ``_park_virgin_seats`` and ``_check_pool`` read
+  ``engine.slab``, which a paged engine does not have; they run only on the seat path.
+* **The step row gains the pool's account** when the engine has ``paged_stats()``; every
+  existing field keeps its name (the seat path's rows are bit-for-bit unchanged).
 """
 
 from __future__ import annotations
 
 import heapq
+import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -148,6 +170,9 @@ class Scheduler:
         self._step_origin: float | None = None
         self._virgin_seats: set[int] | None = set(range(self.max_batch))
         self._pool_checked = False
+        # True when the last admission pass stopped because the FIFO head could not reserve
+        # its blocks (a paged refresh that fails for any other reason is not this).
+        self._blocked_this_step = False
 
     # ------------------------------------------------------------ public
     def submit(self, req: Request) -> None:
@@ -180,9 +205,15 @@ class Scheduler:
         while self._queue or self._active:
             row = self.step()
             if not self._active and not row["admitted"] and not row["retired"]:
-                # Nothing ran and nothing can run: the queue head has not arrived and the
-                # clock is not moving (an injected sleep that does not advance time).
+                # Nothing ran and nothing can run. Either the queue head has not arrived and
+                # the clock is not moving (an injected sleep that does not advance time), or
+                # the head can never fit its block reservation (a pool too small for it).
                 # Failing is better than spinning forever.
+                if self._blocked_this_step:
+                    raise RuntimeError(
+                        "scheduler cannot make progress: the FIFO head cannot reserve its "
+                        "blocks and nothing is active to release any"
+                    )
                 raise RuntimeError(
                     "scheduler cannot make progress: "
                     f"{len(self._queue)} queued, none arrived, and sleep did not advance time"
@@ -202,6 +233,39 @@ class Scheduler:
         return list(self._rows)
 
     # ------------------------------------------------------------ seats
+    def _paged_mode(self) -> bool:
+        """Whether this engine is the W4 paged arm (explicit, never inferred from a try).
+
+        A paged engine advertises ``paged`` (bool or property) or ``impl = "paged"``. An
+        adapter that wraps the engine may expose neither, so the two hooks that only a
+        paged engine has (``prefill_into_blocks`` + ``paged_stats``) are the last, still
+        explicit, signal. The real engine's ``slab`` property raises when no seat pool is
+        open, so probing it with ``hasattr`` would either raise or misclassify -- the flag
+        is the contract.
+        """
+        flag = getattr(self.engine, "paged", None)
+        if callable(flag):
+            flag = flag()
+        if isinstance(flag, bool):
+            return flag
+        if getattr(self.engine, "impl", None) == "paged":
+            return True
+        return callable(getattr(self.engine, "prefill_into_blocks", None)) and callable(
+            getattr(self.engine, "paged_stats", None)
+        )
+
+    def _blocks_available(self, req: Request) -> bool:
+        """Ask the engine's admission hook, if any, **before** a seat is popped (W4).
+
+        Pure duck typing: a seat engine has no ``can_admit`` and this returns True, so the
+        W3 path is unchanged. A refusal must not be turned into an exception: the request
+        stays in the queue and its wait is queue time (``ttft == queue + prefill``).
+        """
+        can = getattr(self.engine, "can_admit", None)
+        if not callable(can):
+            return True
+        return bool(can(len(req.prompt_ids), req.budget))
+
     def _park_virgin_seats(self) -> None:
         """Freeze every seat that has never held a request, once, after the first step's
         admissions (seats claimed by that step are activated again anyway).
@@ -228,6 +292,7 @@ class Scheduler:
     def step(self) -> dict:
         self._admitted_this_step = 0
         self._retired_this_step = 0
+        self._blocked_this_step = False
         self._step_origin = self.now()
 
         admitted = self._admit()
@@ -244,9 +309,12 @@ class Scheduler:
         self._terminate()
 
         if self._active:
-            # Idle seats must be parked (and the pool shape checked) before the first
-            # forward that covers them.
-            self._park_virgin_seats()
+            # Idle seats must be parked before the first forward that covers them, and the
+            # pool shape is checked once. Parking reads ``engine.slab`` and exists only on
+            # the seat path; the paged pool has no idle rows, but its row cap is still
+            # checked (``_check_pool`` knows which arm it is on).
+            if not self._paged_mode():
+                self._park_virgin_seats()
             self._check_pool()
         decode_event_ms = self._decode()
         self._terminate()
@@ -271,9 +339,23 @@ class Scheduler:
             "decode_event_ms": decode_event_ms,
             "host_gap_ms": step_ms - decode_event_ms - prefill_ms,
         }
+        self._attach_paged_stats(row)
         self._step_no += 1
         self._rows.append(row)
         return row
+
+    def _attach_paged_stats(self, row: dict) -> None:
+        """Add the paged pool's account to a step row, when the engine reports one (W4).
+
+        The seat path appends nothing: no existing field is renamed or dropped. On the
+        paged arm the row carries what the plan's §5 step row lists -- ``lpad``, block
+        counts, the two fragmentation numbers and the three memory figures.
+        """
+        stats = getattr(self.engine, "paged_stats", None)
+        if not self._paged_mode() or not callable(stats):
+            return
+        for key, value in stats().items():
+            row.setdefault(key, value)
 
     # ------------------------------------------------------------ admission
     def _admit(self) -> list[Request]:
@@ -295,6 +377,11 @@ class Scheduler:
                 if self._queue and self._queue[0][0] > self.now():
                     break  # the injected sleep did not advance the clock: do not spin
                 continue
+            if not self._blocks_available(self._queue[0][2]):
+                # Can't reserve blocks for the FIFO head: leave it queued (its wait counts
+                # as queue time) and stop -- never skip it for a later, smaller request.
+                self._blocked_this_step = True
+                break
             admitted.append(self._start(heapq.heappop(self._queue)[2]))
         return admitted
 
@@ -324,6 +411,11 @@ class Scheduler:
         admitted: list[Request] = []
         now = self.now()
         while len(self._active) < self.max_batch and self._queue and self._queue[0][0] <= now:
+            if not self._blocks_available(self._queue[0][2]):
+                # FIFO: the wave stops at a member that cannot reserve its blocks; it is
+                # opened by a later step once other requests have released theirs.
+                self._blocked_this_step = True
+                break
             admitted.append(self._start(heapq.heappop(self._queue)[2]))
         return admitted
 
@@ -343,6 +435,17 @@ class Scheduler:
         if self._pool_checked:
             return
         self._pool_checked = True
+        if self._paged_mode():
+            # The paged pool has no slab; its shape contract is the row cap ``max_batch``.
+            # Check it once too, so a mismatch fails before any decode (not on the first
+            # request that happens to land on the missing seat).
+            batch = getattr(self.engine, "paged_max_batch", None)
+            if batch is not None and int(batch) != self.max_batch:
+                raise ValueError(
+                    f"engine's paged pool was opened with max_batch={batch} but the scheduler "
+                    f"runs max_batch={self.max_batch}; open the pool with the same max_batch"
+                )
+            return
         slab = self.engine.slab
         batch = getattr(slab, "batch", self.max_batch)
         if batch != self.max_batch:
@@ -381,10 +484,11 @@ class Scheduler:
         # queue time -- exactly the tail continuous batching is meant to compress.
         req.t_prefill_start = self.now()
         try:
-            # Prefill writes straight into the seat's row; there is no separate hand-off
-            # step, so a failure can only leave that row half-written and the engine
-            # freezes it before re-raising.
-            logits = self.engine.prefill_into_seat(seat, list(req.prompt_ids))
+            # Prefill writes straight into the seat's row (or, on the paged arm, into
+            # freshly reserved blocks); there is no separate hand-off step, so a failure
+            # can only leave that row half-written -- the engine rolls it back before
+            # re-raising (freeze for a seat, block release for the pool).
+            logits = self._prefill(req, seat)
             first = _row_argmax(logits)[0]
         except Exception as exc:  # noqa: BLE001 - one bad request must not kill the run
             req.t_first = req.t_finish = self.now()
@@ -396,6 +500,32 @@ class Scheduler:
         self._active.append(req)
         return req
 
+    def _prefill(self, req: Request, seat: int):
+        """Admission prefill: into blocks on the paged arm, into the seat row otherwise.
+
+        ``prefill_into_blocks`` gets the request id (the engine's block ledger key), the
+        seat (so decode can scatter logits back) and the budget (the reservation is an
+        upper bound over ``prompt + budget``, D6). The optional keywords are passed only if
+        the engine's signature declares them: a fake engine that predates ``budget`` or
+        ``seat`` keeps working, and this is decided by inspection, never by catching a
+        ``TypeError`` raised inside the call.
+        """
+        blocks = getattr(self.engine, "prefill_into_blocks", None)
+        if self._paged_mode() and callable(blocks):
+            try:
+                signature = inspect.signature(blocks)
+            except (TypeError, ValueError):  # pragma: no cover - builtins without signatures
+                signature = None
+            extra = {"seat": seat, "budget": req.budget} if signature is None else {}
+            if signature is not None:
+                accepted = signature.parameters
+                if "seat" in accepted:
+                    extra["seat"] = seat
+                if "budget" in accepted:
+                    extra["budget"] = req.budget
+            return blocks(req.id, list(req.prompt_ids), **extra)
+        return self.engine.prefill_into_seat(seat, list(req.prompt_ids))
+
     # ------------------------------------------------------------ decode
     def _decode(self) -> float:
         if not self._active:
@@ -405,7 +535,12 @@ class Scheduler:
             tokens[req.seat] = req.out[-1]
         t0 = self.now()
         try:
-            logits = self.engine.decode_batch(tokens, self.engine.slab)
+            if self._paged_mode():
+                # The paged engine compresses the active seats into its own batch; there is
+                # no seat slab to hand over.
+                logits = self.engine.decode_batch(tokens)
+            else:
+                logits = self.engine.decode_batch(tokens, self.engine.slab)
             ids = _row_argmax(logits)
             if len(ids) != self.max_batch:
                 raise ValueError(
@@ -449,10 +584,19 @@ class Scheduler:
         return None
 
     def _release(self, req: Request) -> None:
-        """Freeze the seat (its KV stays put, P-26) and return the row to the free list."""
+        """Retire the request's KV and return its row to the free list.
+
+        Seat arm: freeze the seat (its KV stays put, P-26). Paged arm: ``release_request``
+        returns the blocks to the free list; the seat number is still recycled here.
+        """
         seat = req.seat
         if seat is not None:
-            self.engine.freeze_seat(seat)
+            release = getattr(self.engine, "release_request", None)
+            if self._paged_mode() and callable(release):
+                # The real engine exposes both hooks; only the open arm's may run.
+                release(req.id)
+            else:
+                self.engine.freeze_seat(seat)
             heapq.heappush(self._free, seat)
         req.seat = None
         if req in self._active:

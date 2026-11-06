@@ -126,6 +126,9 @@ def _throughput(
     req_s = summarize(_values(trace_rows, "req_s"))
     makespan_s = summarize(_values(trace_rows, "makespan_s"))
     queue_depth = summarize(_values(trace_rows, "queue_depth_at_last_arrival"))
+    # W4 (D6): the observed occupancy of a run, not the allocator capacity of a fill
+    # probe -- ``capacity.peak_concurrency`` answers C1, this one is E3's dynamic peak.
+    peak_concurrency = summarize(_values(trace_rows, "peak_concurrency"))["median"]
 
     achieved_values = []
     for row in trace_rows:
@@ -165,6 +168,7 @@ def _throughput(
         "achieved_rate": achieved_rate,
         "saturated": saturated,
         "queue_depth_at_last_arrival": queue_depth,
+        "peak_concurrency": peak_concurrency,
         "analytic_straggler_ratio": analytic_straggler_ratio(budgets, max_batch),
     }
 
@@ -210,6 +214,95 @@ def _latency(
         "ttft_minus_queue_prefill_max_ms": max_error,
     }
     return latency, consistency
+
+
+def _memory(
+    step_rows: Sequence[Mapping[str, Any]],
+    trace_rows: Sequence[Mapping[str, Any]],
+    request_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """W4 (D6) memory ledger, derived from the rows the arm already writes.
+
+    Field meanings are frozen in ``docs/w4-plan.md`` §5:
+
+    * ``kv_mb`` -- the KV pool's reservation (``kv_pool_mb`` when the row carries the
+      total-budget split, otherwise the W3 ``kv_mb``);
+    * ``workspace_mb`` -- the gather workspace, a paged-only cost; the seat arm has 0;
+    * ``kv_total_mb`` -- ``kv_mb + workspace_mb``, the number capacity is judged against
+      (P-36: never KV alone);
+    * ``seat_unused_mb`` -- budget a seat arm cannot use because of row granularity;
+    * ``frag_internal`` / ``reservation_slack`` / ``seat_row_slack`` -- the paged ledger
+      and its seat analogue (only internal frag is judged, C2);
+    * ``capacity_per_gib`` -- ``peak_concurrency / (kv_total_mb / 1024)``;
+    * ``bytes_per_active_request`` -- ``kv_total_mb * MiB / peak_concurrency``.
+
+    Every value is ``None`` when no row carries the term, and a paged arm's unmeasured
+    workspace stays ``None`` rather than reading as "free".
+    """
+    def last(rows: Sequence[Mapping[str, Any]], key: str) -> float | None:
+        for row in reversed(rows):
+            value = _finite(row.get(key))
+            if value is not None:
+                return value
+        return None
+
+    pool = last(trace_rows, "kv_pool_mb")
+    if pool is None:
+        pool = last(trace_rows, "kv_mb")
+    workspace = last(trace_rows, "workspace_mb")
+    if workspace is None:
+        workspace = last(step_rows, "workspace_mb")
+    if workspace is None and pool is not None and not any(
+        "blocks_in_use" in row for row in step_rows
+    ):
+        # Structural, not inferred from data: a seat arm gathers nothing, so its gather
+        # workspace is exactly zero. A paged arm that failed to report one stays None
+        # (an unmeasured workspace must not read as "free").
+        workspace = 0.0
+    total = last(trace_rows, "kv_total_mb")
+    if total is None:
+        total = last(step_rows, "kv_total_mb")
+    if total is None and pool is not None and workspace is not None:
+        total = pool + workspace
+
+    peak = _finite01([row.get("peak_concurrency") for row in trace_rows])
+    if peak is None:
+        peak = max(
+            (int(row.get("active") or 0) for row in step_rows),
+            default=0,
+        ) or None
+
+    capacity_per_gib = (
+        peak / (total / 1024.0) if peak is not None and total is not None and total > 0 else None
+    )
+    bytes_per_active = (
+        total * 2**20 / peak if peak is not None and total is not None and peak > 0 else None
+    )
+
+    values = {
+        "kv_mb": pool,
+        "workspace_mb": workspace,
+        "kv_total_mb": total,
+        "seat_unused_mb": last(trace_rows, "seat_unused_mb"),
+        "frag_internal": last(step_rows, "frag_internal"),
+        "reservation_slack": last(step_rows, "reservation_slack"),
+        # The seat arm has no per-step block ledger; if a row ever carries one, use it.
+        "seat_row_slack": last(trace_rows, "seat_row_slack"),
+        "capacity_per_gib": capacity_per_gib,
+        "bytes_per_active_request": bytes_per_active,
+    }
+    return values
+
+
+def _finite01(values: Sequence[Any]) -> float | None:
+    """Median of the finite values (a tiny local helper; ``summarize`` is overkill)."""
+    vals = sorted(value for value in (_finite(v) for v in values) if value is not None)
+    if not vals:
+        return None
+    middle = len(vals) // 2
+    if len(vals) % 2:
+        return vals[middle]
+    return (vals[middle - 1] + vals[middle]) / 2.0
 
 
 def _steps(step_rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -274,4 +367,5 @@ def aggregate(
         "latency": latency,
         "steps": _steps(step_rows),
         "consistency": consistency,
+        "memory": _memory(step_rows, trace_rows, request_rows),
     }

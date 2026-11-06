@@ -1,0 +1,66 @@
+# W4-0001 · E0 数值门：paged vs golden（1 请求 / 64 token）
+# W4 口径见 docs/w4-plan.md（D6 定稿前不跑正式 run）。
+# 运行：python -m bench.run --config configs/experiments/W4/0001-paged-numeric-gate.toml
+#
+# 用途：plan §4.4 的 E0。只 prefill + decode 64 token，核对 paged 输出的 token id 与
+# tests/golden/qwen3-0-6b/0001 的 greedy_ids 全等（C3），并与之后的 seat 臂逐 id 相同。
+# 门禁：token 全等；不过不许跑任何性能 run（E1/E2/E3）。
+#
+# prompt：bench/prompts.json 的 s01（golden 集的第一条）。用 `prompt_ids = ["s01"]` 锁定，
+# 不靠 `--limit`——`impl="paged"` 会走 scenario 分发，`--limit` 在那条路径上不生效。
+# 1 请求 + max_batch=1：不引入调度/批次噪声，错的只会是块表、mask 或 gather。
+#
+# **跑完怎么核对 C3**：runner 不做 golden 比对（`record_only`），E0 的判据是人工/脚本核对：
+#   python scripts/check_paged_golden.py results/W4/0001-paged-numeric-gate
+# 它读该 run 的 `token_ids`，与 `tests/golden/qwen3-0-6b/0001` 的 `greedy_ids[0][:64]`
+# 逐 id 比对；不等就退出码 1。E0 不过，不许跑 E1/E2/E3。
+# kv_blocks=64：s01 约 167 token + 64 = 231 token，ceil(231/16) = 15 块，留 4 倍余量；
+# 这个值不参与容量判据，只保证「放得下」。
+
+schema = 1
+
+[exp]
+id = "W4-0001"
+stage = "W4"
+type = "microbench"
+slug = "paged-numeric-gate"
+title = "E0 数值门：paged 64 token 贪心输出与 golden 逐 id 全等"
+hypothesis = ["paged_kv_is_bitwise_equivalent_to_seat_on_golden_prompt"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 64
+arrival = "closed"
+requests = 1               # 只有 s01：数值门不是吞吐 / 容量 probe
+prompt_ids = ["s01"]       # 锁定 golden 的 s01（scenario 分发下 --limit 不生效）
+budgets = [64]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cuda"
+max_batch = 1
+block_size = 16
+kv_blocks = 64
+
+[measure]
+warmup = 0                 # 确定性贪心数值门，不需要热机
+repeats = 1
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# E0 只记录：判据是 token 全等（人工核对 golden），不在这份配置里自动判 ratio。
+mode = "record_only"
+criteria = []

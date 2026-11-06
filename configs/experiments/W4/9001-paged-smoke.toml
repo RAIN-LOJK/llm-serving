@@ -1,0 +1,57 @@
+# W4-9001 · smoke：paged 配置契约 -> runner 校验的管线是否通（dummy，不出数字）
+# 目的只有「配置能通过 validate_config、字段齐、结果落在 /tmp 而不是 results/」。
+# 运行：
+#   python -m bench.run --config configs/experiments/W4/9001-paged-smoke.toml \
+#     --out /tmp/minillm-w4-smoke --allow-dirty
+#
+# 本配置是流水线冒烟（dummy 引擎，不加载权重），验证 runner→adapter→scheduler 通路：
+# 先保证 runner 的配置校验与 provenance 字段通过；等 adapter 落地后同一条命令应端到端跑通。
+#
+# 用 closed（不是 poisson）：poisson 要求 [exp].type='scenario'，而这是 smoke；
+# 这里只验 paged 契约本身（[scheduler] + block_size/kv_blocks + requests）。
+
+schema = 1
+
+[exp]
+id = "W4-9001"
+stage = "W4"
+type = "smoke"
+slug = "paged-smoke"
+title = "W4 paged 管线冒烟（dummy / paged 配置路径）"
+hypothesis = []
+seed = 0
+
+[[models]]
+name = "dummy"
+revision = "0000000000000000000000000000000000000000"   # dummy arm never loads weights
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 8
+arrival = "closed"
+requests = 4
+budgets = [4, 8]
+batch_sizes = [1]          # 并发度是 [engine].max_batch，不是这个行标签（P-20）
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cpu"
+max_batch = 4
+block_size = 16
+kv_blocks = 64
+vocab_size = 1024
+seed = 0
+
+[measure]
+warmup = 1
+repeats = 2
+timer = "perf_counter"
+memory = ["torch_peak"]
+
+[accept]
+mode = "record_only"
+criteria = []

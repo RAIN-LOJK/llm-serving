@@ -8,7 +8,22 @@ from pathlib import Path
 import pytest
 
 from bench.index import check_root
-from bench.run import ConfigError, RunExistsError, load_config, run_config, validate_config
+from bench.loadgen import PromptSet
+from bench.run import (
+    ConfigError,
+    RunExistsError,
+    _build_trace,
+    _cases_for_model,
+    _effective_prompt_sha256,
+    _prompt_info,
+    load_config,
+    run_config,
+    validate_config,
+)
+
+ROOT = Path(__file__).resolve().parents[2]
+PROMPTS = ROOT / "bench" / "prompts.json"
+LONG_IDS = ["l01", "l02", "l03", "l04", "l05", "l06", "l07", "l08"]
 
 CONFIG = """
 schema = 1
@@ -279,4 +294,385 @@ def test_closed_batch_allows_a_longer_trace(tmp_path: Path):
         {'arrival = "poisson"': 'arrival = "closed"', "requests = 16": "requests = 64"},
     )
     assert validate_config(load_config(config)) == []
+
+
+# ---------------------------------------------------------------- W4 paged / fill contract
+PAGED_CONFIG = """
+schema = 1
+
+[exp]
+id = "W4-9009"
+stage = "W4"
+type = "microbench"
+slug = "paged-contract"
+title = "paged contract smoke"
+hypothesis = []
+seed = 0
+
+[[models]]
+name = "dummy"
+revision = "0000000000000000000000000000000000000000"
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 8
+arrival = "closed"
+requests = 4
+budgets = [4, 8]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cpu"
+max_batch = 4
+block_size = 16
+kv_blocks = 64
+vocab_size = 1024
+seed = 0
+
+[measure]
+warmup = 0
+repeats = 1
+timer = "perf_counter"
+memory = ["torch_peak"]
+
+[accept]
+mode = "record_only"
+criteria = []
+"""
+
+
+def _paged_config(tmp_path: Path, replacements: dict[str, str] | None = None) -> Path:
+    text = PAGED_CONFIG
+    for old, new in (replacements or {}).items():
+        assert old in text, old
+        text = text.replace(old, new)
+    path = tmp_path / "paged.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_paged_config_is_accepted(tmp_path: Path):
+    """D6: a paged arm needs block_size/kv_blocks and may carry ``[scheduler]``."""
+    assert validate_config(load_config(_paged_config(tmp_path))) == []
+
+
+def test_paged_accepts_continuous_and_static_policies(tmp_path: Path):
+    for policy in ("static", "continuous"):
+        config = _paged_config(tmp_path, {'policy = "continuous"': f'policy = "{policy}"'})
+        assert validate_config(load_config(config)) == [], policy
+
+
+@pytest.mark.parametrize(
+    "replacements",
+    [
+        {"block_size = 16\n": ""},                 # missing block_size
+        {"kv_blocks = 64\n": ""},                   # missing kv_blocks
+        {"block_size = 16": "block_size = 8"},      # outside {16, 32}
+        {"kv_blocks = 64": "kv_blocks = 0"},        # empty pool
+        {"kv_blocks = 64": "kv_blocks = -4"},       # negative pool
+        {"kv_blocks = 64": "kv_blocks = 1.5"},      # not an integer block count
+        {'policy = "continuous"': 'policy = "bogus"'},
+        {"batch_sizes = [1]": "batch_sizes = [2]"},  # concurrency is max_batch (P-20)
+        {"requests = 4\n": ""},                       # paged is on the scenario path
+    ],
+)
+def test_paged_config_violations_are_rejected(tmp_path: Path, replacements):
+    config = _paged_config(tmp_path, replacements)
+    errors = validate_config(load_config(config))
+    assert errors, "expected at least one validation error"
+    with pytest.raises(ConfigError):
+        run_config(config, out_root=tmp_path / "results", allow_dirty=True)
+
+
+def test_paged_block_size_32_is_also_allowed(tmp_path: Path):
+    assert validate_config(load_config(_paged_config(tmp_path, {"block_size = 16": "block_size = 32"}))) == []
+
+
+def test_paged_block_size_must_be_16_or_32(tmp_path: Path):
+    errors = validate_config(load_config(_paged_config(tmp_path, {"block_size = 16": "block_size = 8"})))
+    assert any("block_size" in err for err in errors), errors
+
+
+def test_paged_without_block_size_reports_it(tmp_path: Path):
+    errors = validate_config(load_config(_paged_config(tmp_path, {"block_size = 16\n": ""})))
+    assert any("block_size" in err for err in errors), errors
+
+
+def test_paged_without_kv_blocks_reports_it(tmp_path: Path):
+    errors = validate_config(load_config(_paged_config(tmp_path, {"kv_blocks = 64\n": ""})))
+    assert any("kv_blocks" in err for err in errors), errors
+
+
+def test_minillm_with_scheduler_is_still_rejected(tmp_path: Path):
+    """Only continuous/paged have a scheduler to steer; minillm must keep refusing the knob."""
+    config = _paged_config(
+        tmp_path,
+        {
+            'impl = "paged"': 'impl = "minillm"',
+            "block_size = 16\n": "",
+            "kv_blocks = 64\n": "",
+            "requests = 4\n": "",
+        },
+    )
+    errors = validate_config(load_config(config))
+    assert any("[scheduler]" in err for err in errors), errors
+
+
+FILL_CONFIG = """
+schema = 1
+
+[exp]
+id = "W4-9008"
+stage = "W4"
+type = "fill"
+slug = "fill-contract"
+title = "fill contract smoke"
+hypothesis = []
+seed = 0
+
+[[models]]
+name = "dummy"
+revision = "0000000000000000000000000000000000000000"
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+max_new_tokens = 8
+arrival = "closed"
+requests = 8
+budgets = [8]
+batch_sizes = [1]
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cpu"
+max_batch = 4
+vocab_size = 1024
+seed = 0
+
+[measure]
+warmup = 0
+repeats = 1
+timer = "perf_counter"
+memory = ["torch_peak"]
+
+[accept]
+mode = "record_only"
+criteria = []
+"""
+
+
+def _fill_config(tmp_path: Path, replacements: dict[str, str] | None = None) -> Path:
+    text = FILL_CONFIG
+    for old, new in (replacements or {}).items():
+        assert old in text, old
+        text = text.replace(old, new)
+    path = tmp_path / "fill.toml"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_fill_config_is_accepted_on_both_workload_kinds(tmp_path: Path):
+    assert validate_config(load_config(_fill_config(tmp_path))) == []
+    synthetic = _fill_config(
+        tmp_path,
+        {
+            'kind = "prompts"\nprompts = "bench/prompts.json"': 'kind = "synthetic"\ncontext_lengths = [64]',
+        },
+    )
+    assert validate_config(load_config(synthetic)) == []
+
+
+def test_fill_requires_requests(tmp_path: Path):
+    config = _fill_config(tmp_path, {"requests = 8\n": ""})
+    errors = validate_config(load_config(config))
+    assert any("requests" in err and "fill" in err for err in errors), errors
+    with pytest.raises(ConfigError):
+        run_config(config, out_root=tmp_path / "results", allow_dirty=True)
+
+
+def test_fill_does_not_require_requests_on_a_closed_minillm_arm(tmp_path: Path):
+    """The new 'fill' rule must not leak into other types, and a plain closed arm is unchanged."""
+    config = _fill_config(
+        tmp_path,
+        {
+            'type = "fill"': 'type = "microbench"',
+            "requests = 8\n": "",
+            'impl = "continuous"': 'impl = "minillm"',
+            '[scheduler]\npolicy = "continuous"\n\n': "",
+        },
+    )
+    assert validate_config(load_config(config)) == []
+
+
+def test_w3_configs_still_validate():
+    """P-28 regression: the W4 additions must not change any existing W3 verdict."""
+    repo_root = Path(__file__).resolve().parents[2]
+    for name in (
+        "W3/0001-single-request-recheck.toml",
+        "W3/0011-continuous-b8-mixed.toml",
+        "W3/9001-scheduler-smoke.toml",
+        "W3/9003-capacity-b8-mixed.toml",
+    ):
+        path = repo_root / "configs" / "experiments" / name
+        assert validate_config(load_config(path)) == [], name
+
+
+# ---------------------------------------------------------------- optional prompt subset
+def _toml_ids(ids: list[str]) -> str:
+    return "prompt_ids = [" + ", ".join(f'"{pid}"' for pid in ids) + "]\n"
+
+
+def _subset_config(tmp_path: Path, replacements: dict[str, str] | None = None) -> Path:
+    """SCENARIO_CONFIG with an explicit `prompt_ids` subset."""
+    base = {"budgets = [4, 8]\n": "budgets = [4, 8]\n" + _toml_ids(LONG_IDS)}
+    return _scenario_config(tmp_path, {**base, **(replacements or {})})
+
+
+def test_prompt_ids_subset_is_accepted(tmp_path: Path):
+    assert validate_config(load_config(_subset_config(tmp_path))) == []
+
+
+def test_prompt_ids_must_exist_in_the_prompt_set(tmp_path: Path):
+    config = _scenario_config(
+        tmp_path,
+        {"budgets = [4, 8]\n": 'budgets = [4, 8]\nprompt_ids = ["l01", "nope"]\n'},
+    )
+    errors = validate_config(load_config(config))
+    assert any("nope" in err for err in errors), errors
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "prompt_ids = []\n",                    # empty list
+        "prompt_ids = [1, 2]\n",                # not strings
+        "prompt_ids = 'l01'\n",                 # not a list
+    ],
+)
+def test_invalid_prompt_ids_are_rejected(tmp_path: Path, line: str):
+    config = _scenario_config(tmp_path, {"budgets = [4, 8]\n": "budgets = [4, 8]\n" + line})
+    errors = validate_config(load_config(config))
+    assert any("prompt_ids" in err for err in errors), errors
+
+
+def test_prompt_ids_on_synthetic_workload_is_rejected(tmp_path: Path):
+    """A key that changes nothing must not be silently accepted on the synthetic path."""
+    config = _scenario_config(
+        tmp_path,
+        {
+            'kind = "prompts"\nprompts = "bench/prompts.json"': 'kind = "synthetic"\ncontext_lengths = [64]',
+            "budgets = [4, 8]\n": 'budgets = [4, 8]\nprompt_ids = ["l01"]\n',
+            'arrival = "poisson"': 'arrival = "closed"',
+            "requests = 16": "requests = 4",
+        },
+    )
+    errors = validate_config(load_config(config))
+    assert any("prompt_ids" in err and "synthetic" in err for err in errors), errors
+
+
+def test_prompt_ids_filter_builds_a_deterministic_trace(tmp_path: Path):
+    from bench.engines.dummy import DummyEngine
+
+    cfg = load_config(_subset_config(tmp_path))
+    prompt_set = PromptSet.load(PROMPTS)
+    engine = DummyEngine(vocab_size=1024, seed=0)
+
+    traced = _build_trace(cfg, engine, prompt_set, requests=8, budgets=(4,), max_new=8)
+    assert [a.prompt_id for a in traced.arrivals] == LONG_IDS
+    # The runner feeds tokenized entries, so the trace's own `prompt_sha256` stays None
+    # (unchanged W3 behaviour); workload identity lives in the manifest's `[prompt]` block.
+    assert traced.prompt_sha256 is None
+    assert _prompt_info(cfg)["sha256"] == _effective_prompt_sha256(prompt_set, LONG_IDS)
+
+    # Rebuilding is deterministic, and only the named prompts appear.
+    again = _build_trace(cfg, engine, prompt_set, requests=8, budgets=(4,), max_new=8)
+    assert traced.sha256 == again.sha256
+    assert {a.prompt_id for a in again.arrivals} == set(LONG_IDS)
+
+    # Reversing the ids reverses the trace order: the order is the configured order.
+    reversed_cfg = load_config(
+        _subset_config(
+            tmp_path,
+            {"budgets = [4, 8]\n": "budgets = [4, 8]\n" + _toml_ids(LONG_IDS[::-1])},
+        )
+    )
+    reversed_trace = _build_trace(reversed_cfg, engine, prompt_set, requests=8, budgets=(4,), max_new=8)
+    assert [a.prompt_id for a in reversed_trace.arrivals] == LONG_IDS[::-1]
+    assert reversed_trace.sha256 != traced.sha256
+
+
+def test_prompt_ids_filter_limits_per_request_cases(tmp_path: Path):
+    from bench.engines.dummy import DummyEngine
+
+    cfg = load_config(_subset_config(tmp_path))
+    cases = list(_cases_for_model(cfg, DummyEngine(vocab_size=1024), PromptSet.load(PROMPTS)))
+    assert [case["prompt_id"] for case in cases] == LONG_IDS
+    assert all(case["bucket"] == "long" for case in cases)
+
+
+def test_prompt_sha256_distinguishes_subsets_and_the_full_set(tmp_path: Path):
+    prompt_set = PromptSet.load(PROMPTS)
+    full = _effective_prompt_sha256(prompt_set, None)
+    assert full == prompt_set.sha256
+    assert _prompt_info(load_config(_subset_config(tmp_path)))["sha256"] != full
+
+    other = ["l01", "l02"]
+    assert _effective_prompt_sha256(prompt_set, LONG_IDS) != _effective_prompt_sha256(prompt_set, other)
+    # Order is a trace concern, not a workload-identity one.
+    assert _effective_prompt_sha256(prompt_set, LONG_IDS) == _effective_prompt_sha256(
+        prompt_set, LONG_IDS[::-1]
+    )
+
+
+def test_subset_manifest_records_both_hashes_and_the_ids(tmp_path: Path):
+    cfg = load_config(_subset_config(tmp_path))
+    info = _prompt_info(cfg)
+    assert info["prompt_ids"] == LONG_IDS
+    assert info["n_prompts"] == len(LONG_IDS)
+    assert info["prompt_set_sha256"] == PromptSet.load(PROMPTS).sha256
+    assert info["n_prompts_in_set"] == 32
+    assert info["sha256"] != info["prompt_set_sha256"]
+
+
+def test_historical_prompt_configs_keep_the_full_prompt_sha256():
+    """P-28: configs without `prompt_ids` must be byte-for-byte unchanged."""
+    repo_root = Path(__file__).resolve().parents[2]
+    full = PromptSet.load(PROMPTS).sha256
+    for name in ("W3/0011-continuous-b8-mixed.toml", "W3/9001-scheduler-smoke.toml"):
+        cfg = load_config(repo_root / "configs" / "experiments" / name)
+        assert "prompt_ids" not in cfg["workload"], name
+        info = _prompt_info(cfg)
+        assert info["sha256"] == full, name
+        assert "prompt_ids" not in info, name
+
+
+def test_w4_configs_validate_and_paired_arms_share_a_workload():
+    """Every committed W4 config must pass the contract, and each pair must differ only in
+    [engine] -- same seed and same [workload] -- or the trace_sha256 pairing gate (D5)
+    would refuse the comparison."""
+    repo_root = Path(__file__).resolve().parents[2]
+    w4 = repo_root / "configs" / "experiments" / "W4"
+    loaded = {}
+    for path in sorted(w4.glob("*.toml")):
+        cfg = load_config(path)
+        assert validate_config(cfg) == [], path.name
+        loaded[path.name] = cfg
+    for left, right in (
+        ("0002-seat-fill-max2048.toml", "0003-paged-fill-max2048.toml"),
+        ("0004-seat-b8-cost.toml", "0005-paged-b8-cost.toml"),
+        ("0006-seat-saturate.toml", "0007-paged-saturate.toml"),
+    ):
+        a, b = loaded[left], loaded[right]
+        assert a["exp"]["seed"] == b["exp"]["seed"], (left, right)
+        assert a["workload"] == b["workload"], (left, right)
+        assert a["engine"]["impl"] != b["engine"]["impl"], (left, right)
 

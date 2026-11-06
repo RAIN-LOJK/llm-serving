@@ -225,8 +225,20 @@
 ### W4 · 分页 KV
 
 - `BlockManager`（block_size 16/32 可配）、block table、按需分配/回收、物理块池（参考实现见 §14）
-- **验收**：同显存 max concurrency ≥ 1.5×（ctx=2048）；碎片率 < 5%；paged vs 连续输出逐 token 一致
-- 这一格复现 vLLM 论文的核心论点：**浪费来自"按最坏长度预留"**
+- **验收**（口径见 `docs/decisions.md` **D6**）：
+  - 同**总预算**（KV + workspace = 1640 MiB）、**W3-like 混合长度** trace 下，fill-only 的
+    peak concurrency **≥1.5×**（<1.2× 记负结果）；
+  - **uniform 2048 只作负对照**（预测 0.8–1.0×），只报不判——它不是失败线；
+  - **internal frag ≤5%**（只算最后一块没写满；reservation slack 单独报，不判）；
+  - paged vs 连续输出**逐 token 一致**（E0 对 golden）；
+  - B=8、两边 `lpad=1664` 的 decode `step_ms` 只记录；**>1.5× 撤回吞吐结论**。
+- 这一格复现 vLLM 论文的核心论点：**浪费来自"按最坏长度预留"**，收益只来自长度异质性。
+- 容量比值随预算单调下降（真实 trace、预算反解：1200/1456/1640/2400 MiB → 4.33×/3.50×/**3.22×**/3.54×；
+  ≥2400 后 paged 撞到请求数或 `max_batch`，不再是显存受限），所以**报告主图是容量曲线**，C1 只是 1640 那条竖线。
+- E1 实机门禁：`sim_paged_capacity.py --trace <本 run 的 metrics.jsonl> --paged-blocks 800 --expect-concurrency <实机数>`，
+  期望 28 ±1（预算反解的 29 不是配置块数下的答案）。
+- **注**：原条款的 `ctx=2048` 被读成 uniform，测不到「按最坏长度预留」的浪费，与同段论点矛盾；
+  改法见 §13 v14。
 
 > **W4 末检查点**：若 W0 的 D1 判定不投入移植 → 直接跳 W8 打包，主线结束（已是完整交付）。
 
@@ -383,7 +395,7 @@ python scripts/exp_index.py --check
 | W1 | Qwen3-0.6B 对齐 + golden | ✅ | `tests/golden/qwen3-0-6b/0001` |
 | W2 | 基准框架 | ✅ | `W2-0007`（HF 分母 `W2-0005`） |
 | W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
-| W4 | 分页 KV | ⬜ | — |
+| W4 | 分页 KV | 🟡 | 代码落地，正式 run 待跑（口径见 D6） |
 | W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
@@ -411,6 +423,7 @@ python scripts/exp_index.py --check
 | 2026-11-01 | v11 | **W2 完成（返工后）**：`W2-0004` 判 `invalid`——两处失败都与注意力路径无关（slab 三桶驻留把账外内存放进 `memory_match_ratio` 的分母；HF 分母取自另一台 4090 实例）。改为单一 slab（`ce0af17`）后同机重测：`W2-0005`（HF）与 **`W2-0006`（自实现）**四条判据全 pass——decode **1.001×**（逐 prompt 0.985–1.031，32 条全在 ±3%）、TTFT 三桶 0.89–0.91×、memory 0.957、CV 1.22%/0.42%；`[W2.bench].basis_run` → `W2-0006`。**判据训：跨实例的 host-bound 比值不稳定**（同一份 HF 代码两台 4090 差 1.28×），引用「相对 HF 多少倍」必须绑定机器；`W2-0001`/`W2-0003` 的比值降级为历史记录。`W3-0001` 的基线改为 `W2-0006` |
 | 2026-11-01 | v12 | **W2 收尾（slab 生命周期）**：`W2-0006` 判 pass 后发现 slab 记账有两处缺陷——① 三桶缓存让 `memory_match_ratio` 的分母含账外内存（已在 `ce0af17` 改单一 slab）；② 交接时 slab 整块分配、且随请求保留，同一份 KV 两次同时在场。②修完才彻底：逐层分配 + 逐层拷 + 逐层释放 + 请求结束释放 slab（`d8361d4`），ctx1517 峰值 1534.6→1348.0 MB、ratio 0.859→0.978；**两处必须同时改**（各自单独无效，2×2 实测）。代价是每请求重建 28 层、TTFT 21.25→21.85 ms。代码变更使 `W2-0006` 不再描述 shipped 状态 → 新开 **`W2-0007`**（`supersedes`）作为 W3 配对基线：四条判据 pass、decode 1.013×、TTFT 0.92–0.95×、memory 0.992（全区间 0.979–0.992）、CV 1.12%/0.44%；`[W2.bench].basis_run` → `W2-0007`。**留待 W3**：真实 serving 的 KV 必须跨请求复用（每并发槽一块），届时 `memory_match_ratio` 的分子需覆盖所有活跃槽的预留，否则重演 `W2-0004` 的错配 |
 | 2026-11-03 | v13 | **W3 完成**：C1 **2.01×**（`W3-0011`/`W3-0010`，B=8 mixed，同 trace `33bc2397…`）、C2 pass、C3 0 mismatch；E1 P1 7.94×/7.90×、P2 3.78×；P3 uniform 1.023×（负结果）；B=32 mixed 1.606×（低于 P4 的 1.8–2.2×，record-only）；E0 四条判据 pass。**发现 synthetic ctx512 EOS**（`W3-0003–0005` invalid，ctx511 重跑，P-31）；R1 的 `step_ms` 含 prefill，判读改为稳态 decode 步；D5 改 accepted，`[W3.continuous]` 标 calibrated（basis `W3-0011`）。 |
+| 2026-11-06 | v14 | **W4 口径冻结（D6）**：原验收的 `ctx=2048` 被读成 uniform，测不到「按最坏长度预留」的浪费 → 改为**同总预算（KV + workspace = 1640 MiB）+ W3-like 混合长度**下的 fill-only peak concurrency ≥1.5×；**uniform 2048 降为负对照**（只报不判）；internal frag ≤5%（reservation slack 只报）；B=8 `lpad=1664` 的 `step_ms` 只记录、>1.5× 撤回吞吐结论。定稿前修正 plan 两处：E1 seat `max_batch` 6→**9**（实际最长 prompt 1517 → 行宽 1664 → 182 MiB/行），E3 paged `kv_blocks` 840→**820**（840 块在 24 活跃行时 1646 MiB 超预算）。**±1 门禁改为对同一真实 trace 重跑模拟**（合成分布比实机量的是 workload 建模差异）；并且模拟必须用**与配置相同的 `kv_blocks`**（`--paged-blocks`），否则预算反解出的块数会让 delta 恰好卡在 ±1 边界——E1 的预期因此是 **28±1（800 块）**，不是预算反解的 29，比值 **3.11×**（预言线 ≥1.5× 仍大幅成立）。 |
 
 ---
 
@@ -427,8 +440,11 @@ python scripts/exp_index.py --check
 | W2/W3 | `model/attention/base.py`（本项目自建，非外部参考） | 本仓库 `model/attention/` | 注意力后端的契约：**两个入口**（prefill / decode）与「不回退」的构造性保证（`T>1` → SDPA，`T==1` → `hand_baddbmm`，见 D4）；`model/attention/__init__.py::provenance()` 写进 manifest/summary；`hand_legacy` 移到 `tests/reference/` 冻结为**数值 oracle**（与 git `26b268d^` 逐 bit 相同） | 不做可选后端的注册表 / 能力声明（D4 定死后是死重量）、不做 entry-point 自动发现、不允许静默回退、不让 oracle 进性能结论 |
 | W3 | nano-vllm `engine/{scheduler,sequence,llm_engine}.py` | `github.com/GeeeekExplorer/nano-vllm`（~1200 行） | `Sequence` 字段与调度主循环的**接口形状**（为 W4 的 block table 预留） | preempt / chunked prefill / CUDA graph；W3 的实现与判据见 `docs/decisions.md` **D5**，结果见 §5 W3 |
 | W4 | nano-vllm `engine/block_manager.py` | 同上 | 物理块池、block table、free list、按需分配/回收 | 其 attention/kernel 部分 |
+| W4 | nano-vllm `layers/attention.py`（`store_kvcache` / `slot_mapping`） | 同上 | 写 KV 的扁平物理槽映射（`block_id*bs + offset`）；`block_table` 与 `context_lens` 的语义 | `flash_attn_with_kvcache(block_table=...)` 的 kernel 级 paged attention（本项目走稠密 gather） |
 | W4 | LightLLM `kv_cache_mem_manager/{allocator,mem_manager}.py` | `github.com/ModelTC/LightLLM` | 纯 Python、token/块级分配器（比固定 block 更轻），与逐序列 attention 的 gather 更贴 | 模型专属子类（deepseek/glm…）、多进程架构 |
 | W4 | PagedAttention（SOSP'23） | `arxiv.org/abs/2309.06180` | block_size 16/32、block table、碎片率定义 | 自定义 CUDA kernel（本项目不写 kernel） |
+
+> W4 的实现口径（总预算 / 容量 / 碎片 / ±1 门禁）见 `docs/decisions.md` **D6**。
 | W5 | `transformers/models/qwen3_next/modular_qwen3_next.py` | `site-packages/transformers/models/qwen3_next/` | 全注意力层装配、输出门控（`chunk(q_proj(x),2)` + `sigmoid(gate)`）、`Qwen3NextRMSNormGated`（norm before gate） | MoE / 多卡分支 |
 | W5 | `transformers/models/qwen3_5/modular_qwen3_5.py` | `site-packages/transformers/models/qwen3_5/` | 0.8B 的覆盖：`Qwen3_5GatedDeltaNet`、partial-RoPE（`dim=int(head_dim*partial_rotary_factor)` ⇒ inv_freq 只按 64 维算）、`rope_parameters` 读取、mrope_section | 视觉塔 |
 | W6 | `qwen3_5/modeling_qwen3_5.py`: `torch_chunk_gated_delta_rule`(L287) / `torch_recurrent_gated_delta_rule`(L424) | 同上 | **「分块 == 循环」两个端点的纯 torch 实现**；`chunk_size=64` 默认；`conv_state` 长度 = kernel−1 | 其 Triton/CUDA 分支 |

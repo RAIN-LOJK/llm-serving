@@ -13,6 +13,7 @@ from bench.engines.continuous import ContinuousEngine
 from bench.engines.dummy import DummyEngine
 from bench.engines.hf import HFEngine
 from bench.engines.minillm import ServeEngine
+from bench.engines.paged import PagedEngine
 
 __all__ = [
     "Engine",
@@ -20,12 +21,12 @@ __all__ = [
     "ContinuousEngine",
     "DummyEngine",
     "HFEngine",
+    "PagedEngine",
     "ServeEngine",
     "build_engine",
 ]
 
 _NOT_YET = {
-    "paged": "paged KV lives in serve/block_manager.py (W4)",
     "hybrid": "hybrid attention lives in serve/state_pool.py (W7)",
 }
 
@@ -75,6 +76,26 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             policy=str(engine_cfg.get("_policy", "continuous")),
             vocab_size=int(engine_cfg.get("vocab_size", 1024)),
             seed=int(engine_cfg.get("seed", 0)),
+            fill=bool(engine_cfg.get("_fill", False)),
+        )
+    if impl == "paged":
+        # W4 (D6): the same trace/scheduler path as `continuous`, with physical KV blocks
+        # instead of one slab row per seat. `block_size` / `kv_blocks` come from `[engine]`
+        # and are validated by the runner; `fill` selects the fill-only step loop
+        # (`bench/engines/fill.py`) for `[exp].type = "fill"` capacity probes.
+        return PagedEngine(
+            name=name,
+            revision=model_cfg.get("revision"),
+            dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "float32"))),
+            device=device,
+            model_path=model_cfg.get("path"),
+            max_batch=int(engine_cfg.get("max_batch", 1)),
+            policy=str(engine_cfg.get("_policy", "continuous")),
+            vocab_size=int(engine_cfg.get("vocab_size", 1024)),
+            seed=int(engine_cfg.get("seed", 0)),
+            block_size=int(engine_cfg.get("block_size", 16)),
+            kv_blocks=int(engine_cfg.get("kv_blocks", 1)),
+            fill=bool(engine_cfg.get("_fill", False)),
         )
     if impl in _NOT_YET:
         raise NotImplementedError(f"engine impl={impl!r}: {_NOT_YET[impl]}")
