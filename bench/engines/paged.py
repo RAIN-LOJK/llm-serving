@@ -80,7 +80,6 @@ class PagedEngine(ContinuousEngine):
         block_size: int = 16,
         kv_blocks: int = 1,
         fill: bool = False,
-        prefill: str = "serial",
         max_prefill_tokens: int = 8192,
         decode: str = "auto",
     ) -> None:
@@ -95,7 +94,6 @@ class PagedEngine(ContinuousEngine):
             vocab_size=vocab_size,
             seed=seed,
             fill=fill,
-            prefill=prefill,
             max_prefill_tokens=max_prefill_tokens,
             decode=decode,
         )
@@ -155,7 +153,6 @@ class PagedEngine(ContinuousEngine):
             dtype=self.dtype_name,
             device=self.device,
             model_path=self.model_path,
-            prefill=self.prefill_mode,
             max_prefill_tokens=self.max_prefill_tokens,
             decode=self._decode,
         )
@@ -344,28 +341,38 @@ class PagedEngine(ContinuousEngine):
         reservation size is ``blocks_for(prompt, budget)`` either way, and an aborted
         prefill never gets a row to charge.
 
+        W4.5 (D7) admits a whole packed group per forward, so the wrapper sits on
+        ``prefill_group``: after a successful forward, every member of the group is
+        charged its own ``blocks_for(prompt, budget)`` reservation. A failed group
+        records nothing, which is the "aborted prefill gets no row" rule above.
+
         Wraps the instance, not the class, and restores the original in
         :meth:`_uninstrument` so repeated repeats do not stack wrappers.
         """
         self._reserved_blocks = {}
-        original = getattr(engine, "prefill_into_blocks", None)
+        original = getattr(engine, "prefill_group", None)
         if not callable(original):
             return
         block_size = self.block_size
 
-        def wrapped(request_id, prompt_ids, *, budget=None, seat=None):
-            logits = original(request_id, prompt_ids, budget=budget, seat=seat)
-            reserved = max(1, -(-(len(prompt_ids) + int(0 if budget is None else budget)) // block_size))
-            self._reserved_blocks[int(request_id)] = int(reserved)
+        def wrapped(requests):
+            logits = original(requests)
+            for spec in requests:
+                prompt = list(spec.get("prompt_ids") or [])
+                budget = int(spec.get("budget") or 0)
+                reserved = max(1, -(-(len(prompt) + budget) // block_size))
+                request_id = spec.get("id")
+                if request_id is not None:
+                    self._reserved_blocks[int(request_id)] = int(reserved)
             return logits
 
-        engine.prefill_into_blocks = wrapped
+        engine.prefill_group = wrapped
         self._instrumented = (engine, original)
 
     def _uninstrument(self) -> None:
         engine, original = getattr(self, "_instrumented", (None, None))
         if engine is not None and original is not None:
-            engine.prefill_into_blocks = original
+            engine.prefill_group = original
         self._instrumented = (None, None)
 
     def _engine_stats(self) -> dict[str, Any]:
@@ -537,34 +544,79 @@ class _DummyPagedEngine:
         if self._manager is None:
             raise RuntimeError("open_paged_pool() must be called before the scheduler runs")
 
-    def can_admit(self, prompt_len: int, budget: int) -> bool:
+    def can_admit_group(self, requests: list[dict]) -> bool:
+        """Whether the whole packed group fits: row cap plus every member's blocks."""
         self._require_pool()
-        if len(self._state) >= int(self._max_batch or 0):
+        if len(self._state) + len(requests) > int(self._max_batch or 0):
             return False
-        return self._manager.blocks_for(int(prompt_len), int(budget)) <= self._manager.stats()["free"]
+        needed = sum(
+            self._manager.blocks_for(
+                len(spec.get("prompt_ids") or []), int(spec.get("budget") or 0)
+            )
+            for spec in requests
+        )
+        return needed <= self._manager.stats()["free"]
 
     # ---------------------------------------------------------------- steps
-    def prefill_into_blocks(self, request_id, prompt_ids, *, budget=None, seat=None):
+    def prefill_group(self, requests: list[dict]):
+        """Reserve every member's blocks, then register the group all-or-nothing."""
         self._require_pool()
-        if not prompt_ids:
-            raise ValueError("prompt_ids must not be empty")
-        if request_id in self._state:
-            raise ValueError(f"request {request_id} is already in the paged pool")
-        needed = self._manager.blocks_for(len(prompt_ids), int(0 if budget is None else budget))
-        block_table = self._manager.reserve(needed)
-        if block_table is None:
-            raise RuntimeError(f"cannot reserve {needed} blocks for request {request_id}")
-        if seat is None:
-            seat = len(self._state)
-        self._state[int(request_id)] = {
-            "block_table": list(block_table),
-            "prompt_len": len(prompt_ids),
-            "length": len(prompt_ids),
-            "seat": int(seat),
-        }
-        self._tokens[int(seat)] = []
-        first = (self.seed + prompt_ids[-1] + sum(prompt_ids)) % self.vocab_size
-        return [self._row(first)]
+        if not requests:
+            raise ValueError("prefill_group needs at least one request")
+        reserved: list[tuple[int, list[int], int, int, tuple[int, ...]]] = []
+        used_seats: set[int] = set()
+        try:
+            for spec in requests:
+                request_id = spec.get("id")
+                if request_id is None:
+                    request_id = -len(reserved) - 1
+                request_id = int(request_id)
+                if request_id in self._state:
+                    raise ValueError(f"request {request_id} is already in the paged pool")
+                prompt = list(spec.get("prompt_ids") or [])
+                if not prompt:
+                    raise ValueError("prompt_ids must not be empty")
+                seat = spec.get("seat")
+                if seat is None:
+                    occupied = {state["seat"] for state in self._state.values()} | used_seats
+                    seat = next(
+                        (row for row in range(int(self._max_batch or 0)) if row not in occupied),
+                        None,
+                    )
+                    if seat is None:
+                        raise RuntimeError("no free seat id for the paged request")
+                seat = int(seat)
+                if not 0 <= seat < int(self._max_batch or 0):
+                    raise IndexError(f"seat {seat} outside the paged pool's max_batch")
+                if seat in {state["seat"] for state in self._state.values()}:
+                    raise ValueError(f"seat {seat} is already occupied by a paged request")
+                if seat in used_seats:
+                    raise ValueError(f"two requests in one packed group share seat {seat}")
+                used_seats.add(seat)
+                needed = self._manager.blocks_for(len(prompt), int(spec.get("budget") or 0))
+                block_table = self._manager.reserve(needed)
+                if block_table is None:
+                    raise RuntimeError(
+                        f"cannot reserve {needed} blocks for request {request_id} "
+                        "(can_admit_group should have refused the group)"
+                    )
+                reserved.append((request_id, list(block_table), len(prompt), seat, tuple(prompt)))
+        except BaseException:
+            for _, block_table, _, _, _ in reserved:
+                self._manager.free(block_table)
+            raise
+        rows = []
+        for request_id, block_table, length, seat, prompt in reserved:
+            self._state[request_id] = {
+                "block_table": block_table,
+                "prompt_len": length,
+                "length": length,
+                "seat": seat,
+            }
+            self._tokens[seat] = []
+            first = (self.seed + prompt[-1] + sum(prompt)) % self.vocab_size
+            rows.append(self._row(first))
+        return rows
 
     def release_request(self, request_id: int) -> None:
         if self._manager is None:

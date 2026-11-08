@@ -1,9 +1,9 @@
 """W4.5 packed-prefill admission: FIFO groups, one shared forward, one TTFT identity.
 
-The fake engine has exactly the real one's grouped interface (``prefill_mode`` /
-``max_prefill_tokens`` / ``prefill_group``), so these tests pin the scheduler rather than
-any kernel. The serial path is covered by the existing ``test_scheduler.py`` and must stay
-unchanged: an engine without the grouped hooks never enters this code.
+The fake engine has exactly the real one's grouped interface (``max_prefill_tokens`` /
+``prefill_group``), so these tests pin the scheduler rather than any kernel. The scheduler
+has no serial path any more (D7): ``test_scheduler.py`` runs the same grouped interface
+with a richer per-seat fake.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ class FakeSlab:
 
 class PackedFakeEngine:
     impl = "continuous"
-    prefill_mode = "packed"
 
     def __init__(
         self,

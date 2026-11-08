@@ -180,7 +180,8 @@ def test_decomposition_uses_pack_wait_when_present():
     """W4.5: ``ttft == queue + pack_wait + prefill`` on the packed arm.
 
     The same row without ``pack_wait_ms`` must decompose by the W3 identity
-    ``ttft == queue + prefill``; the serial arm is the special case ``pack_wait = 0``.
+    ``ttft == queue + prefill``; that is the historical per-request row, whose wait is
+    structurally 0 (the serial control arm itself was deleted in D7).
     """
     packed = [
         {
@@ -200,7 +201,8 @@ def test_decomposition_uses_pack_wait_when_present():
     assert summary["latency"]["pack_wait_ms"]["p99"] == 5.0
     assert summary["latency"]["prefill_shared_ms"]["p99"] == 5.0
 
-    # Without the field, the very same timestamps mean a serial row: the wait is 0.
+    # Without the field, the very same timestamps mean a historical per-request row:
+    # the wait is 0.
     serial = [dict(packed[0])]
     serial[0].pop("pack_wait_ms")
     serial[0].pop("prefill_shared_ms")

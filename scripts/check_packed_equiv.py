@@ -49,7 +49,6 @@ def _check(engine, selected, *, max_new_tokens: int = 1):
     prompt_ids = [value for _, value in selected]
     lengths = [len(value) for value in prompt_ids]
     engine.open_pool(len(prompt_ids), max(lengths) + 8)
-    engine.prefill_mode = "packed"
     engine.max_prefill_tokens = max(8192, sum(lengths))
 
     reference = torch.cat([engine.prefill_one(prompt)[0] for prompt in prompt_ids])

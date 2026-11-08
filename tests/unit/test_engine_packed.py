@@ -39,10 +39,10 @@ def _config() -> MiniLLMConfig:
     )
 
 
-def _engine(*, prefill: str = "packed", decode: str = "auto") -> MiniLLMEngine:
+def _engine(*, decode: str = "auto") -> MiniLLMEngine:
     torch.manual_seed(0)
     model = MiniLLM(_config()).eval()
-    return MiniLLMEngine(model, prefill=prefill, max_prefill_tokens=64, decode=decode)
+    return MiniLLMEngine(model, max_prefill_tokens=64, decode=decode)
 
 
 def _group_specs(prompts) -> list[dict]:
@@ -147,9 +147,7 @@ def test_packed_group_rejects_an_over_budget_group():
 def test_paged_triton_packed_group_decodes_like_per_sequence():
     torch.manual_seed(0)
     model = MiniLLM(_config()).to("cuda", dtype=torch.bfloat16).eval()
-    engine = MiniLLMEngine(
-        model, prefill="packed", max_prefill_tokens=64, decode="triton"
-    )
+    engine = MiniLLMEngine(model, max_prefill_tokens=64, decode="triton")
     engine.open_paged_pool(32, BS, 4, max_position=128, decode="triton")
     refs = [engine.prefill_one(prompt) for prompt in PROMPTS]
 

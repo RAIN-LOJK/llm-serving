@@ -139,13 +139,22 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
 
     # ---- W4.5 attention-path contract (D7) ----------------------------
     # These keys are additive: W0–W4 configs never write them, so their validation is
-    # unchanged. `prefill` is the temporary E3 control arm, not a production fallback;
-    # `packed` without a scheduler arm would silently do nothing (there is no batch to
-    # pack), and `decode="triton"` is a paged block-table kernel only.
-    prefill = engine.get("prefill", "serial")
-    if prefill not in {"serial", "packed"}:
+    # unchanged. Production prefill is ALWAYS the packed FIFO group now; the old
+    # serial/packed switch was deleted with W4.5's control arm. `prefill = "packed"` is
+    # still tolerated (as a no-op) so the historical W45 configs that recorded the
+    # production mode keep validating; `prefill = "serial"` is the deleted control arm
+    # and must fail loudly instead of silently running packed. `max_prefill_tokens` is
+    # the packing budget and stays; `decode="triton"` is a paged block-table kernel only.
+    if "prefill" in engine and engine.get("prefill") != "packed":
         errors.append(
-            f"[engine].prefill must be 'serial' or 'packed' (got {prefill!r})"
+            "[engine].prefill is no longer a switch: production W4.5 prefill is always "
+            "packed (D7); the serial control arm was deleted (got "
+            f"{engine.get('prefill')!r}). Historical serial configs are not runnable."
+        )
+    elif "prefill" in engine and engine.get("impl") not in {"continuous", "paged"}:
+        errors.append(
+            "[engine].prefill is a scheduler-arm key (historical no-op); a per-request "
+            "arm has no packed group to schedule"
         )
     max_prefill_tokens = engine.get("max_prefill_tokens", 8192)
     if (
@@ -161,11 +170,6 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     if decode not in {"auto", "triton", "gather"}:
         errors.append(
             f"[engine].decode must be 'auto', 'triton', or 'gather' (got {decode!r})"
-        )
-    if prefill == "packed" and engine.get("impl") not in {"continuous", "paged"}:
-        errors.append(
-            "[engine].prefill='packed' requires [engine].impl='continuous' or 'paged' "
-            "(a per-request arm has no scheduler to pack)"
         )
     if decode == "triton" and engine.get("impl") != "paged":
         errors.append(
@@ -721,18 +725,19 @@ def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
     """``manifest["scheduler"]``: the arm's concurrency unit, policy and pool shape.
 
     The paged arm's unit is a block table, not a seat row; it also records the block
-    geometry so a reader can turn ``kv_blocks``/``block_size`` into a budget. W4.5 adds
-    ``prefill``/``max_prefill_tokens`` to both arms and the resolved ``decode`` kernel to
-    the paged arm; no existing key is renamed. ``fill_only`` stays additive.
+    geometry so a reader can turn ``kv_blocks``/``block_size`` into a budget. W4.5 records
+    the (constant) production prefill mode and its packing budget on both arms, plus the
+    resolved ``decode`` kernel on the paged arm; no existing key is renamed.
+    ``fill_only`` stays additive.
     """
     impl = str(getattr(engine, "impl", ""))
     entry: dict[str, Any] = {
         "policy": engine.policy,
         "max_batch": int(engine.max_batch),
-        # W4.5: the temporary serial/packed control arm and its packing budget. Both are
-        # recorded even on the serial default so a paired E3 arm cannot be inferred from
-        # a missing key. Existing keys keep their names (`prefill` was "per_sequence").
-        "prefill": str(getattr(engine, "prefill_mode", "serial")),
+        # W4.5 (D7): there is no serial/packed switch any more -- the scheduler always
+        # prefills whole packed groups. The key is kept as constant provenance so old
+        # and new manifests have the same shape. `prefill` was "per_sequence" in W2.
+        "prefill": "packed",
         "max_prefill_tokens": int(getattr(engine, "max_prefill_tokens", 8192)),
     }
     if impl == "paged":
@@ -1248,6 +1253,10 @@ def _summary(
         warnings.append("measure protocol deviates from warmup=3/repeats=5; explain in notes.md")
     if manifest.get("type") in {"microbench", "scenario"} and not cfg.get("baseline", {}).get("run_id"):
         warnings.append("no paired baseline run_id; mechanism conclusions are incomplete")
+    if isinstance(cfg.get("engine"), dict) and "prefill" in cfg["engine"]:
+        warnings.append(
+            "[engine].prefill is a legacy no-op; production prefill is always packed (D7)"
+        )
 
     attn = (manifest.get("engine") or {}).get("attn") or {}
     engine_meta = manifest.get("engine") or {}
@@ -1265,15 +1274,15 @@ def _summary(
         # is why the pairing check treats "both None" as equal (bench/thresholds.py).
         "attn_prefill": attn.get("prefill"),
         "attn_decode": attn.get("decode"),
-        # W4.5: the control arm and packing budget. `attn_prefill`/`attn_decode` keep
-        # their source above; these are the scheduler's knobs, recorded even when the
-        # run is a per-request arm (where prefill packing is not used) so a pairing can
-        # never infer the mode from a missing key.
-        "prefill_mode": scheduler_meta.get("prefill", engine_meta.get("prefill", "serial")),
-        "max_prefill_tokens": scheduler_meta.get(
-            "max_prefill_tokens", int(engine_meta.get("max_prefill_tokens", 8192))
-        ),
     }
+    # W4.5 (D7): the scheduler always prefills packed groups, so the mode is constant
+    # provenance, not a switch. A per-request arm (``impl="minillm"``) has no scheduler
+    # block and omits both keys rather than inventing a mode it never runs.
+    if "prefill" in scheduler_meta:
+        protocol["prefill_mode"] = "packed"
+        protocol["max_prefill_tokens"] = int(
+            engine_meta.get("max_prefill_tokens", scheduler_meta.get("max_prefill_tokens", 8192))
+        )
     if (
         str(engine_meta.get("impl") or "") == "paged"
         or scheduler_meta.get("seats") == "paged_blocks"

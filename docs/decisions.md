@@ -409,12 +409,12 @@
   | **KV 写入** | 每层 K/V 通过 per-request sink 写 seat 行（`SlabWriteSink`）或 paged 块（`PagedWriteSink` + 预计算 slot map）；两臂共用同一 varlen 计算，只差写入目标。 |
   | **logits / 首 token** | 每组只取每个请求的最后一个 token（`last_token_index`）过 `lm_head`；一次批量 greedy argmax；同组 `t_first` 同一时间戳。 |
   | **decode 路径** | paged：Triton `paged_decode` 直接读 `(n_blocks, bs, H_kv, D)` 池 + int32 block table + int32 seqlen，无 gather/lpad/zero block/causal mask；seat：`hand_baddbmm` 不变。paged 在 CUDA 上不允许自动回退 gather。 |
-  | **TTFT 归属** | `queue_ms = t_admitted − t_arrival`；`pack_wait_ms = t_prefill_start − t_admitted`；`prefill_shared_ms = t_first − t_prefill_start`。串行臂 `t_admitted == t_prefill_start`，退化为 `ttft == queue + prefill`。step 的 `prefill_ms` 是**组耗时之和**，不是逐请求相加。 |
+  | **TTFT 归属** | `queue_ms = t_admitted − t_arrival`；`pack_wait_ms = t_prefill_start − t_admitted`；`prefill_shared_ms = t_first − t_prefill_start`。历史串行控制臂曾退化为 `ttft == queue + prefill`（该臂已删除，旧 run 仍按此口径解读）。step 的 `prefill_ms` 是**组耗时之和**，不是逐请求相加。 |
   | **step/request row** | 新增 `prefill_group`、`pack_wait_ms`、`prefill_shared_ms`、`prefill_groups`、`prefill_ids_per_group`；旧字段不改名。`host_gap_ms = step_ms − decode_event_ms − prefill_ms`。 |
   | **计时** | 沿用 D5：墙钟 `perf_counter`，单步 GPU `cuda_event`；报 p50/p95/p99/max，不报单一均值。 |
   | **C3 数值** | 精确 token 一致只在两种同组场景判：① `W45-0001` golden 64/64；② E2（closed、同 prompt 集、同 packed group 组成）8/8 first-repeat prompt hash、W4 口径 40/40 row。**E4 开放负载的 paged vs seat token 一致率只作诊断**：两臂 group 组成不同（B=9 vs B=64），且 Triton 与 hand 的 bf16 归约不同，near-tie 翻转不是接线错误；不设 0.999 门禁。 |
   | **单步 kernel 容差** | bf16：`max|Δ| ≤ 2e-2`、argmax 全等、无 NaN/Inf；fp32：`≤1e-4`。packed vs serial 的 logits 容差按 dry run 记为 `max|Δ| ≤ 1.0`（Qwen3 bf16 的 |logit|≈28），**不用于替代 token 门禁**。 |
-  | **控制臂** | `[engine].prefill="serial"` 只在 W4.5 实验期存在，写入 provenance；它不是生产回退。`[engine].decode="gather"` 只作 oracle/对照；`auto` 按 device 解析（CUDA→triton，其他→gather），不按可用性回退。 |
+  | **控制臂** | `[engine].prefill="serial"`（逐请求串行 prefill）只存在于 W4.5 实验期，**已于 W4.5 收口后删除**（2026-11-06，未提交步骤 1）：生产调度器只有 packed group 一条路径，不再有 prefill 开关；历史 serial 配置不可运行，代码在 git 历史。`[engine].decode="gather"` 暂留作 oracle/对照，等下一步从生产分支移除；`auto` 按 device 解析（CUDA→triton，其他→gather），不按可用性回退。 |
   | **阈值** | `[W45.paged]` 于 2026-11-06 dry run 后冻结：`decode_step_ratio_max=1.15`（目标 1.0）、`packed_prefill_ttft_p99_speedup_min=1.15`、`p50_ratio_max=1.10`、`capacity_speedup_min=1.50`、`fragmentation_max=0.05`、`golden_token_match_min=1.0`、`paged_vs_seat_token_match_min=0.999`（**只用于 E2**）。`decode_step_ratio_max` 取两臂最大公共、prefill 占比 ≤10% 的 active bucket，不取全 bucket 中位数。 |
 
 - **后果**：
@@ -428,13 +428,19 @@
      同时给出一致率和首个翻转的 top-2 margin，不能只报一个百分比。
   4. **`decode="gather"` 是 oracle**：paged 生产路径在 CUDA 上必须走 Triton；`auto` 只按
      device 解析，不因 Triton 缺失而静默切 gather（缺失时构造/调用直接 `RuntimeError`）。
-  5. **控制臂的生命周期（收口时保留）**：`[engine].prefill="serial"` 与
-     `decode="gather"` 只作 W4.5 控制臂/oracle；W4.5 的正式配置使用 packed + Triton，
-     代码的 `serial` 默认仅保留给历史 run/控制臂，`auto` 不会回退到 serial/gather。
-     **本次收口保留它们**，因为 `W45-0002/0003/0006` 与 W4 历史配置的 `reproduce.sh` 仍依赖这些路径；在 W5 开工前、确认不再需要历史复现后，再把
+  5. **控制臂的生命周期（serial 已删除，gather 待删）**：`[engine].prefill="serial"`
+     与 `decode="gather"` 只作 W4.5 控制臂/oracle；W4.5 的正式配置使用 packed + Triton，
+     `auto` 不会回退到 serial/gather。**serial 控制臂已在 W4.5 收口后删除**
+     （2026-11-06，未提交步骤 1）：`MiniLLMEngine` 不再接受/宣告 `prefill` 模式，
+     `[engine].prefill` 不再是开关（配置里写 `serial` 会被校验拒绝），
+     `Scheduler` 只走 `prefill_group`，`prefill_into_seat` 仍作为引擎 API 保留给
+     W2/W3/W4 的直接调用与测试。`W45-0002/0003/0006` 因此不可运行，配置保留作历史，
+     git 历史有旧代码。W3/W4 的配置从未写 `prefill`，用新 commit 复跑会从历史默认
+     serial 变成 packed（调度/归因与数值路径都变），其结果不能与历史 run 直接配对。
+     **gather 控制臂留到下一步**：确认不再需要历史复现后，再把
      `PagedPool.gather`、`lpad`、`zero_block`、`mask-bias`、`gather_*` 记账移到
-     `tests/reference/`，并删除 serial 生产分支。`max_prefill_tokens` 保留。删除前先
-     `grep` 确认没有生产引用，并跑完整快速门禁。
+     `tests/reference/` 并删除 `decode="gather"` 生产分支。`max_prefill_tokens` 保留。
+     删除前先 `grep` 确认没有生产引用，并跑完整快速门禁。
   6. **新坑（收口时编号，候选 P-40…P-45）**：
      - P-40 packed 的 TTFT 是共享时间，p50 可能变差、p99 可能变好；只报均值会掩盖；
      - P-41 FA2 的 256 page 约束只在 `block_table` 路径触发，varlen prefill 不受影响，

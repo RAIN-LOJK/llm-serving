@@ -130,7 +130,6 @@ def main(argv: list[str] | None = None) -> int:
 
     adapter = _load(args.model, args.revision, args.device, args.dtype)
     engine = adapter.engine
-    engine.prefill_mode = "packed"
     engine.max_prefill_tokens = int(args.max_prefill_tokens)
     prompts = _prompt_map(args.prompts, adapter)
 

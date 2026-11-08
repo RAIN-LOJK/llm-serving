@@ -32,7 +32,9 @@ W0–W4.5 已完成。W3 的连续批在 B=8、混合长度、过载 trace 上�
 但 B=8 decode step **1.671×**，按预注册规则**不报吞吐**。W4.5 把注意力路径换成 packed
 varlen prefill + Triton block-table decode：decode step 从 **1.203× fail** 修到 **1.040×
 pass（接受线，1.0 目标未达）**，E3 TTFT p99 **3.760×**，E4 **2.053×**（both saturated，
-record-only）。下一步 W5：混合层。
+record-only）。W4.5 收口后已删除 serial prefill 控制臂：生产调度器只有 packed group，
+`[engine].prefill` 不再是开关；历史 `W45-0002/0003/0006` 配置保留作历史但不可运行，
+旧代码在 git 历史。下一步 W5：混合层。
 
 ## 快速开始
 

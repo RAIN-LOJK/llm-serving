@@ -201,6 +201,27 @@ def _scenario_config(tmp_path: Path, replacements: dict[str, str] | None = None)
     return path
 
 
+def test_serial_prefill_config_is_rejected(tmp_path: Path):
+    """The serial control arm is deleted; such a config must not silently run packed."""
+    path = _scenario_config(
+        tmp_path,
+        {"seed = 0\n\n[measure]": 'seed = 0\nprefill = "serial"\n\n[measure]'},
+    )
+    errors = validate_config(load_config(path))
+    assert any("prefill" in error and "serial" in error for error in errors), errors
+    with pytest.raises(ConfigError):
+        run_config(path, out_root=tmp_path / "results", allow_dirty=True)
+
+
+def test_historical_packed_prefill_key_still_validates(tmp_path: Path):
+    """`prefill="packed"` was the production mode; it stays a tolerated no-op (D7)."""
+    path = _scenario_config(
+        tmp_path,
+        {"seed = 0\n\n[measure]": 'seed = 0\nprefill = "packed"\n\n[measure]'},
+    )
+    assert validate_config(load_config(path)) == []
+
+
 def test_historical_closed_config_without_requests_still_validates(tmp_path: Path):
     """P-28: `requests` is not a global requirement -- W0/W2 configs never wrote it."""
     path = _write_config(tmp_path)

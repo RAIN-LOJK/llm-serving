@@ -8,10 +8,10 @@ run is trying to hold fixed.
 Two pieces live here, both selected only by ``[exp].type = "fill"``:
 
 * :class:`FillScheduler` -- a :class:`serve.scheduler.Scheduler` subclass that admits
-  (through the engine's optional ``can_admit`` hook, so a paged pool that cannot
-  reserve blocks refuses the FIFO head) and then finishes every resident request
-  without a decode call. It reuses the base admission loop, timestamps and release
-  path; only :meth:`~serve.scheduler.Scheduler.step` / ``run`` are replaced.
+  (through the engine's optional ``can_admit_group`` hook, so a paged pool that cannot
+  reserve the packed group refuses the FIFO head) and then finishes every resident
+  request without a decode call. It reuses the base admission loop, timestamps and
+  release path; only :meth:`~serve.scheduler.Scheduler.step` / ``run`` are replaced.
 * :func:`run_fill_trace` -- the seat-arm runner (``impl="continuous"``), mirroring
   :meth:`bench.engines.continuous.ContinuousEngine.run_trace` but stopping after
   admission. The paged arm builds its own trace row inside
@@ -62,12 +62,9 @@ def _prefill_timings(
     """``(prefill_ms, groups, pack_wait_ms, prefill_shared_ms)`` for one admission pass.
 
     A packed group pays its shared prefill **once**; summing per request would multiply
-    that time by the group size. When the base scheduler already kept a per-group ledger
-    (``_step_groups``: one entry per forward, including a failed one), that ledger is the
-    authoritative accounting. Otherwise each distinct ``prefill_group`` is counted once
-    from its ``(t_prefill_start, t_first)``. A serial admission pass carries no packed
-    group (every value is ``None``), so it is one group: ``prefill_groups`` is 0 or 1
-    there, while a packed step reports one per forward.
+    that time by the group size. The base scheduler keeps a per-group ledger
+    (``_step_groups``: one entry per forward, including a failed one), and that ledger is
+    the authoritative accounting. A fill step that admitted nothing reports 0 groups.
 
     ``pack_wait_ms`` is per request (each request that waited for the shared prefill
     contributes its own wait), matching the base scheduler's step row; only the shared
@@ -80,27 +77,10 @@ def _prefill_timings(
         and group.get("start") is not None
         and group.get("end") is not None
     ]
-    if groups:
-        prefill_ms = sum(
-            (float(group["end"]) - float(group["start"])) * 1000.0 for group in groups
-        )
-        group_count = len(groups)
-    else:
-        grouped: dict[Any, list[Request]] = {}
-        for request in admitted:
-            grouped.setdefault(getattr(request, "prefill_group", None), []).append(request)
-
-        prefill_ms = 0.0
-        for members in grouped.values():
-            starts = [m.t_prefill_start for m in members if m.t_prefill_start is not None]
-            ends = [
-                (m.t_first if m.t_first is not None else m.t_finish) for m in members
-            ]
-            ends = [end for end in ends if end is not None]
-            if starts and ends:
-                prefill_ms += (max(ends) - min(starts)) * 1000.0
-        group_count = len(grouped)
-
+    prefill_ms = sum(
+        (float(group["end"]) - float(group["start"])) * 1000.0 for group in groups
+    )
+    group_count = len(groups)
     pack_wait_ms = sum(
         (m.t_prefill_start - m.t_admitted) * 1000.0
         for m in admitted
@@ -157,9 +137,8 @@ class FillScheduler(Scheduler):
             "retired": self._retired_this_step,
             "step_ms": step_ms,
             "prefill_ms": prefill_ms,
-            # W4.5 step attribution (D7 TTFT row). A group is one packed
-            # prefill forward; a serial fill pass has no packed groups, so it reports
-            # one group (zero when nothing was admitted) and pack_wait ~0.
+            # W4.5 step attribution (D7 TTFT row). A group is one packed prefill
+            # forward; an idle fill pass reports zero groups.
             "prefill_groups": prefill_groups,
             "pack_wait_ms": pack_wait_ms,
             "prefill_shared_ms": prefill_shared_ms,
@@ -187,8 +166,8 @@ class FillScheduler(Scheduler):
             row = self.step()
             if not self._active and not row["admitted"] and not row["retired"]:
                 # Every seat is free and the FIFO head still cannot be admitted: the
-                # pool is out of capacity for it (``can_admit`` refused). Leaving it
-                # queued is the honest outcome of a fill probe, not an error.
+                # pool is out of capacity for it (``can_admit_group`` refused). Leaving
+                # it queued is the honest outcome of a fill probe, not an error.
                 break
         return sorted(self._all, key=lambda r: r.id)
 

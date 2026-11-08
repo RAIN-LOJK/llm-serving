@@ -66,7 +66,6 @@ class ContinuousEngine:
         vocab_size: int = 1024,
         seed: int = 0,
         fill: bool = False,
-        prefill: str = "serial",
         max_prefill_tokens: int = 8192,
         decode: str = "auto",
     ) -> None:
@@ -80,12 +79,11 @@ class ContinuousEngine:
         # keeps every W3 scenario row on the original path (``run_fill_trace`` is only
         # entered when a fill config asks for it).
         self.fill = bool(fill)
-        # W4.5 control arm (D7 control-arm clause). ``prefill`` is the temporary
-        # serial/packed switch, ``max_prefill_tokens`` the per-step packing budget. The
-        # engine (serve/) consumes both; the adapter only records what was asked for so
-        # provenance cannot drift from the config. ``decode`` is recorded the same way;
-        # a seat arm resolves to ``gather`` because it has no block-table kernel.
-        self._prefill = str(prefill or "serial")
+        # W4.5 (D7): production prefill is always the packed FIFO group; there is no
+        # serial control arm any more. ``max_prefill_tokens`` is the per-step packing
+        # budget `serve/scheduler.py` reads from the engine. ``decode`` is recorded the
+        # same way; a seat arm resolves to ``gather`` because it has no block-table
+        # kernel.
         self._max_prefill_tokens = int(max_prefill_tokens)
         self._decode = str(decode or "auto")
         self.model_path = model_path
@@ -106,11 +104,6 @@ class ContinuousEngine:
     @property
     def eos_token_id(self) -> int | None:
         return None if self._delegate is None else self._delegate.eos_token_id
-
-    @property
-    def prefill_mode(self) -> str:
-        """``"serial"`` or ``"packed"`` -- the W4.5 control switch actually configured."""
-        return self._prefill
 
     @property
     def max_prefill_tokens(self) -> int:
@@ -140,7 +133,6 @@ class ContinuousEngine:
             dtype=self.dtype_name,
             device=self.device,
             model_path=self.model_path,
-            prefill=self.prefill_mode,
             max_prefill_tokens=self.max_prefill_tokens,
             decode=self._decode,
         )
@@ -391,11 +383,12 @@ def _request_row(
         queue_ms          = t_admitted - t_arrival       (W3: t_prefill_start - t_arrival)
         pack_wait_ms      = t_prefill_start - t_admitted  (0.0 without a scheduler stamp)
         prefill_shared_ms = t_first - t_prefill_start    (same as prefill_ms for a group of 1)
-        prefill_group     = the scheduler's packed group, or None on the serial arm
+        prefill_group     = the scheduler's packed group
 
-    A serial arm stamps ``t_admitted == t_prefill_start``, so every W3/W4 field keeps its
-    value and ``pack_wait_ms`` is 0.0. ``prefill_ms``/``ttft_ms`` are unchanged: they are
-    the frozen D5 names, not a second copy of the new attribution.
+    Every scheduler run is packed now (D7); the ``t_admitted`` fallback exists for
+    historical W3/W4 request rows, which have no admission stamp and no packed group.
+    ``prefill_ms``/``ttft_ms`` are unchanged: they are the frozen D5 names, not a second
+    copy of the new attribution.
     """
     arrival = request.t_arrival
     first = request.t_first if request.t_first is not None else arrival
@@ -403,8 +396,8 @@ def _request_row(
     stamped_start = request.t_prefill_start
     prefill_start = stamped_start if stamped_start is not None else arrival
     admitted = getattr(request, "t_admitted", None)
-    # W3 had no admission stamp; falling back to ``t_prefill_start`` reproduces the old
-    # queue_ms exactly. W4.5's serial arm keeps them equal by construction.
+    # Historical W3 rows had no admission stamp; falling back to ``t_prefill_start``
+    # reproduces their queue_ms exactly.
     queue_start = admitted if admitted is not None else prefill_start
     # "0.0 if either timestamp is missing": a request that never started prefill has no
     # pack wait to attribute, and must not invent a negative one from the arrival fallback.
@@ -459,6 +452,8 @@ class _DummyPoolEngine:
         self.max_position = 4096
         self.eos_token_id = None
         self.last_decode_event_ms = None
+        #: Packing budget the scheduler reads; the stand-in never needs to split.
+        self.max_prefill_tokens = 8192
         self._slab = None  # type: Any
         self._tokens: dict[int, list[int]] = {}
 
@@ -482,30 +477,34 @@ class _DummyPoolEngine:
         self._slab = None
 
     # ---------------------------------------------------------------- steps
-    def prefill_one(self, prompt_ids: list[int]):
-        """``(logits, cache)`` with ``logits`` shaped ``(1, vocab)`` like the real engine."""
-        if not prompt_ids:
-            raise ValueError("prompt_ids must not be empty")
-        first = (self.seed + prompt_ids[-1] + sum(prompt_ids)) % self.vocab_size
-        return [self._row(first)], None
+    def prefill_group(self, requests: list[dict]):
+        """Packed admission for the stand-in: one first token per request, one row each.
 
-    def prefill_into_seat(self, row: int, prompt_ids: list[int]):
-        """W3 admission: the stand-in's first token + seat length, in one call.
-
-        There is no KV to write, so this is exactly what the scheduler used to do with two
-        calls (``prefill_one`` then ``activate_seat``): same first token, same cursor, and
-        the seat's token history starts empty.
+        There is no KV to write, so this is exactly what the real engine's
+        ``prefill_group`` does for the seat arm: activate the row, start its token history
+        empty, and return one ``(1, vocab)`` row per request. The group is validated
+        before any row is touched, so a rejected member cannot leave a half-activated seat.
         """
-        if not prompt_ids:
-            raise ValueError("prompt_ids must not be empty")
-        logits, cache = self.prefill_one(prompt_ids)
-        self.activate_seat(row, cache, len(prompt_ids))
-        return logits
-
-    def activate_seat(self, slot: int, cache, prompt_len: int) -> None:
-        # ``prefill_one`` returns ``cache=None``: the stand-in keeps no KV, only the cursor.
-        self._tokens[slot] = [] if cache is None else [int(cache)]
-        self.slab.activate(slot, prompt_len)
+        if not requests:
+            raise ValueError("prefill_group needs at least one request")
+        seats: list[tuple[int, tuple[int, ...]]] = []
+        for spec in requests:
+            prompt = list(spec.get("prompt_ids") or [])
+            if not prompt:
+                raise ValueError("prompt_ids must not be empty")
+            if len(prompt) > self.max_position:
+                raise ValueError("prompt longer than max_position_embeddings")
+            seat = spec.get("seat")
+            if seat is None or not 0 <= int(seat) < self.slab.batch:
+                raise IndexError(f"seat {seat!r} outside the slab's batch of {self.slab.batch}")
+            seats.append((int(seat), tuple(prompt)))
+        rows = []
+        for seat, prompt in seats:
+            self._tokens[seat] = []
+            self.slab.activate(seat, len(prompt))
+            first = (self.seed + prompt[-1] + sum(prompt)) % self.vocab_size
+            rows.append(self._row(first))
+        return rows
 
     def freeze_seat(self, slot: int) -> None:
         self.slab.freeze(slot)

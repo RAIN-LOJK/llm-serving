@@ -1,23 +1,25 @@
-"""Static-wave vs continuous-refill scheduler for W3 (docs/decisions.md D5).
+"""Static-wave vs continuous-refill scheduler (docs/decisions.md D5, packed prefill D7).
 
 One :meth:`Scheduler.step` is exactly the sequence frozen in the plan:
 
-1. **Admission** (policy-dependent, only for requests that have arrived):
+1. **Admission** (policy-dependent, only for requests that have arrived). Both
+   policies admit through **one packed FIFO group per forward** (D7); the serial
+   per-request control arm is gone, so there is no switch and no fallback.
 
-   * ``continuous`` -- while ``len(active) < max_batch`` and the FIFO head has
-     arrived, admit it. A seat freed during step *k* is refilled at step *k+1*,
-     because admission runs before retirement inside a step.
+   * ``continuous`` -- build one group from the FIFO head, adding members while
+     seats and ``max_prefill_tokens`` allow. A seat freed during step *k* is
+     refilled at step *k+1*, because admission runs before retirement inside a step.
    * ``static`` -- only when ``active == 0`` open one wave: wait until
      ``max_batch`` requests have arrived, or, once the trace is known to be
      exhausted (:meth:`Scheduler.close`, or :meth:`Scheduler.run`, which cannot
      receive submissions while it blocks), take whatever is left. A partial wave
-     is never waited for forever.
+     is never waited for forever. The wave is then split into
+     ``max_prefill_tokens`` groups, all prefilled in the same step.
 
-   Each admitted request takes one free seat, records ``t_admitted`` and then
-   ``t_prefill_start`` immediately before its own serial ``prefill_into_seat`` (no gap
-   between them, so ``ttft == queue + prefill`` holds by construction), which writes
-   the request's KV straight into that seat's row, samples the first token (argmax)
-   and stamps ``t_first``.
+   A request is stamped ``t_admitted`` when it is selected, ``t_prefill_start``
+   when its group's forward starts and ``t_first`` when it returns. Every member
+   of a group shares the last two, which is what makes
+   ``ttft == queue + pack_wait + prefill_shared`` an identity.
 
 2. **Batch decode** -- one ``decode_batch`` over the whole slab. ``tokens`` is
    always length ``max_batch``: active seats carry their last token, **idle
@@ -28,52 +30,58 @@ One :meth:`Scheduler.step` is exactly the sequence frozen in the plan:
 
 3. **Retirement** -- ``budget`` / EOS / ``max_position`` all terminate. The
    seat is frozen (not reclaimed, P-26) and returned to the free list,
-   ``t_finish`` is stamped. An engine exception during one request's prefill
-   aborts only that request; an exception in the batch decode aborts every
-   active request (it cannot be attributed to one row) and the run continues
-   with whatever is still queued.
+   ``t_finish`` is stamped. An engine exception during a group's prefill aborts
+   every member of that group (one forward cannot attribute the failure); an
+   exception in the batch decode aborts every active request (it cannot be
+   attributed to one row) and the run continues with whatever is still queued.
 
 Timing
 ------
-``prefill_ms`` is the sum over this step's admissions of
-``t_first - t_prefill_start`` (an aborted admission contributes the time it
-actually spent). ``decode_event_ms`` is ``engine.last_decode_event_ms`` when
-the engine provides a float, otherwise the decode wall clock. ``step_ms`` is
-measured from the last wake-up, so time spent sleeping for a future arrival is
-not counted as compute. ``host_gap_ms = step_ms - decode_event_ms -
-prefill_ms`` is recorded as-is, including when it is negative.
+``prefill_ms`` is the sum of this step's **group** durations
+``t_first - t_prefill_start``: a shared forward is counted once, not once per
+request (an aborted group contributes the time it actually spent).
+``decode_event_ms`` is ``engine.last_decode_event_ms`` when the engine provides a
+float, otherwise the decode wall clock. ``step_ms`` is measured from the last
+wake-up, so time spent sleeping for a future arrival is not counted as compute.
+``host_gap_ms = step_ms - decode_event_ms - prefill_ms`` is recorded as-is,
+including when it is negative.
+
+The step/request attribution follows D7: ``queue_ms = t_admitted - t_arrival``,
+``pack_wait_ms = t_prefill_start - t_admitted`` and
+``prefill_shared_ms = t_first - t_prefill_start``.
 
 The module depends on the standard library only; the engine is duck-typed
-(``prefill_into_seat`` / ``decode_batch`` / ``freeze_seat`` / ``slab`` /
-``vocab_size`` / ``device`` / ``eos_token_id`` / ``max_position``), so the unit
-tests can use a fake engine without torch.
+(``prefill_group`` / ``decode_batch`` / ``freeze_seat`` / ``slab`` /
+``vocab_size`` / ``device`` / ``eos_token_id`` / ``max_position`` /
+``max_prefill_tokens``), so the unit tests can use a fake engine without torch.
 
 W4 paged arm (``docs/decisions.md`` D6)
 -------------------------------------
 The same step applies to a paged engine, through optional hooks only -- nothing is
 imported and no branch is taken when they are absent:
 
-* **Admission asks before popping.** If the engine has ``can_admit(prompt_len, budget)``,
-  the FIFO head is offered to it *before* the queue pop. A refusal leaves the request
-  queued (so its wait is queue time and ``ttft == queue + prefill`` still holds) and
-  **stops** the admission pass -- a head that does not fit is never skipped (FIFO).
-* **Prefill goes into blocks.** If the engine has ``prefill_into_blocks``, the request is
-  admitted with ``prefill_into_blocks(req.id, prompt_ids, seat=seat, budget=budget)``
-  instead of ``prefill_into_seat(seat, ...)``; the upper-bound reservation needs the
-  budget, and the seat is what lets decode scatter logits back by seat number.
+* **Admission asks before popping.** If the engine has
+  ``can_admit_group(requests)``, the whole candidate group is offered to it
+  *before* any member is popped. A refusal leaves the head queued (so its wait is
+  queue time) and **stops** the admission pass -- a head that does not fit is
+  never skipped (FIFO). The group, not the request, is the admission unit: it
+  matches the all-or-nothing block reservation ``prefill_group`` performs, which
+  is what keeps the pool from being oversold inside one step.
+* **Prefill goes into blocks.** ``prefill_group`` receives one spec per member,
+  ``{id, prompt_ids, seat, budget}``; the engine owns the seat sink / block sink
+  choice (D7) and the reservation is the upper bound over ``prompt + budget``.
 * **Release frees blocks.** If the engine has ``release_request``, retirement calls it
   instead of ``freeze_seat`` (D6: blocks go back to the free list; the seat number still
   returns to the scheduler's free list).
 * **Seat-only bookkeeping is skipped.** ``_park_virgin_seats`` and ``_check_pool`` read
   ``engine.slab``, which a paged engine does not have; they run only on the seat path.
 * **The step row gains the pool's account** when the engine has ``paged_stats()``; every
-  existing field keeps its name (the seat path's rows are bit-for-bit unchanged).
+  existing field keeps its name.
 """
 
 from __future__ import annotations
 
 import heapq
-import inspect
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -104,9 +112,9 @@ class Request:
     t_first: float | None = None
     t_finish: float | None = None
     error: str | None = None
-    #: W4.5 packed prefill: the group this request was prefilled in (None on the serial
-    #: path). Every request of a group shares ``t_prefill_start`` and ``t_first``, which is
-    #: what makes ``ttft == queue + pack_wait + prefill_shared`` an identity.
+    #: W4.5 packed prefill: the group this request was prefilled in. Every request of a
+    #: group shares ``t_prefill_start`` and ``t_first``, which is what makes
+    #: ``ttft == queue + pack_wait + prefill_shared`` an identity.
     prefill_group: int | None = None
 
 
@@ -241,19 +249,6 @@ class Scheduler:
         return list(self._rows)
 
     # ------------------------------------------------------------ seats
-    def _packed_mode(self) -> bool:
-        """Whether the engine opted into W4.5 grouped prefill.
-
-        The switch is the engine's ``prefill_mode`` plus the hook's presence; a fake or
-        historical engine without either keeps the serial path unchanged. This is an
-        explicit protocol, not a try/except fallback: a packed engine whose hook raises
-        aborts the group rather than silently admitting requests one at a time.
-        """
-        return (
-            getattr(self.engine, "prefill_mode", "serial") == "packed"
-            and callable(getattr(self.engine, "prefill_group", None))
-        )
-
     def _paged_mode(self) -> bool:
         """Whether this engine is the W4 paged arm (explicit, never inferred from a try).
 
@@ -275,44 +270,32 @@ class Scheduler:
             getattr(self.engine, "paged_stats", None)
         )
 
-    def _blocks_available(self, req: Request) -> bool:
-        """Ask the engine's admission hook, if any, **before** a seat is popped (W4).
-
-        Pure duck typing: a seat engine has no ``can_admit`` and this returns True, so the
-        W3 path is unchanged. A refusal must not be turned into an exception: the request
-        stays in the queue and its wait is queue time (``ttft == queue + prefill``).
-        """
-        can = getattr(self.engine, "can_admit", None)
-        if not callable(can):
-            return True
-        return bool(can(len(req.prompt_ids), req.budget))
-
     def _group_available(self, requests: list[Request]) -> bool:
-        """Whether a whole candidate group fits (W4.5 packed admission).
+        """Whether a whole candidate group fits (W4.5 packed admission, D7).
 
         The paged engine reserves every member's blocks back to back; checking only the
         head against the pre-group free list over-commits the pool and aborts the last
         member inside ``prefill_group``. The engine's optional ``can_admit_group`` makes
-        the group the admission unit. A seat engine has no such hook and every per-request
-        check returns True, so the serial path is unchanged.
+        the group the admission unit. A seat engine has no such hook (its slab is
+        allocated up front), so the answer is True.
         """
         if not requests:
             return True
         group = getattr(self.engine, "can_admit_group", None)
-        if callable(group):
-            return bool(
-                group(
-                    [
-                        {
-                            "id": req.id,
-                            "prompt_ids": list(req.prompt_ids),
-                            "budget": req.budget,
-                        }
-                        for req in requests
-                    ]
-                )
+        if not callable(group):
+            return True
+        return bool(
+            group(
+                [
+                    {
+                        "id": req.id,
+                        "prompt_ids": list(req.prompt_ids),
+                        "budget": req.budget,
+                    }
+                    for req in requests
+                ]
             )
-        return all(self._blocks_available(req) for req in requests)
+        )
 
     def _park_virgin_seats(self) -> None:
         """Freeze every seat that has never held a request, once, after the first step's
@@ -345,20 +328,12 @@ class Scheduler:
         self._step_origin = self.now()
 
         admitted = self._admit()
-        if self._packed_mode():
-            # A group shares one forward, so its cost is counted once, not once per
-            # request. Summing per-request ``t_first - t_prefill_start`` here would
-            # multiply the shared prefill by the group size and make host_gap negative.
-            prefill_ms = sum(
-                (group["end"] - group["start"]) * 1000.0 for group in self._step_groups
-            )
-        else:
-            prefill_ms = 0.0
-            for req in admitted:
-                started = req.t_prefill_start
-                ended = req.t_first if req.t_first is not None else req.t_finish
-                if started is not None and ended is not None:
-                    prefill_ms += (ended - started) * 1000.0
+        # A group shares one forward, so its cost is counted once, not once per
+        # request. Summing per-request ``t_first - t_prefill_start`` here would
+        # multiply the shared prefill by the group size and make host_gap negative.
+        prefill_ms = sum(
+            (group["end"] - group["start"]) * 1000.0 for group in self._step_groups
+        )
 
         # A request can terminate on its very first token (budget 1 / EOS /
         # max_position). Retire those before the batch decode so they never get a
@@ -396,22 +371,22 @@ class Scheduler:
             "decode_event_ms": decode_event_ms,
             "host_gap_ms": step_ms - decode_event_ms - prefill_ms,
         }
-        if self._packed_mode():
-            # Additive fields only on the packed arm: W3/W4 step rows keep their exact
-            # key set (P-28), while W4.5's TTFT decomposition is auditable here.
-            pack_wait_ms = sum(
-                max(0.0, (req.t_prefill_start or req.t_admitted or 0.0) - (req.t_admitted or 0.0))
-                for req in admitted
-                if req.t_prefill_start is not None and req.t_admitted is not None
-            ) * 1000.0
-            row.update(
-                {
-                    "prefill_groups": len(self._step_groups),
-                    "pack_wait_ms": pack_wait_ms,
-                    "prefill_shared_ms": prefill_ms,
-                    "prefill_ids_per_group": [group["n"] for group in self._step_groups],
-                }
-            )
+        # W4.5 TTFT decomposition (D7): ``queue + pack_wait + prefill_shared``. These
+        # keys are additive; historical W3/W4 rows without them are still readable by
+        # ``bench/scenario.py`` (a missing ``pack_wait_ms`` means 0).
+        pack_wait_ms = sum(
+            max(0.0, (req.t_prefill_start or req.t_admitted or 0.0) - (req.t_admitted or 0.0))
+            for req in admitted
+            if req.t_prefill_start is not None and req.t_admitted is not None
+        ) * 1000.0
+        row.update(
+            {
+                "prefill_groups": len(self._step_groups),
+                "pack_wait_ms": pack_wait_ms,
+                "prefill_shared_ms": prefill_ms,
+                "prefill_ids_per_group": [group["n"] for group in self._step_groups],
+            }
+        )
         self._attach_paged_stats(row)
         self._step_no += 1
         self._rows.append(row)
@@ -432,69 +407,9 @@ class Scheduler:
 
     # ------------------------------------------------------------ admission
     def _admit(self) -> list[Request]:
-        if self._packed_mode():
-            if self.policy == "continuous":
-                return self._admit_packed_continuous()
-            return self._admit_packed_static()
         if self.policy == "continuous":
-            return self._admit_continuous()
-        return self._admit_static()
-
-    def _admit_continuous(self) -> list[Request]:
-        admitted: list[Request] = []
-        while len(self._active) < self.max_batch and self._queue:
-            head = self._queue[0][0]
-            if head > self.now():
-                # With nothing running there is nothing to do but wait for the
-                # arrival -- sleep, do not spin. With active rows the step starts
-                # without the straggler and the next step picks it up if due.
-                if self._active:
-                    break
-                self._wait_until(head)
-                if self._queue and self._queue[0][0] > self.now():
-                    break  # the injected sleep did not advance the clock: do not spin
-                continue
-            if not self._blocks_available(self._queue[0][2]):
-                # Can't reserve blocks for the FIFO head: leave it queued (its wait counts
-                # as queue time) and stop -- never skip it for a later, smaller request.
-                self._blocked_this_step = True
-                break
-            admitted.append(self._start(heapq.heappop(self._queue)[2]))
-        return admitted
-
-    def _admit_static(self) -> list[Request]:
-        if self._active or not self._queue:
-            return []
-        # A wave opens with ``max_batch`` requests, or with whatever is left once the
-        # trace is known to be exhausted (``close()`` / ``run()``): a partial wave is
-        # never waited for forever. Either way every member must have arrived.
-        while True:
-            target = self._wave_target()
-            if target <= self.now():
-                break
-            self._wait_until(target)
-            if self.now() < target:
-                # The injected sleep did not advance the clock. Do not spin: either
-                # wait for a later submission (trace open) or open with the arrived
-                # prefix (trace closed) and pick the rest up on a later step.
-                if len(self._queue) < self.max_batch and not self._closed:
-                    return []
-                break
-        if len(self._queue) < self.max_batch and not self._closed:
-            # Everything submitted so far has arrived; more must be submitted before
-            # the wave can fill. Leave the step empty, do not spin.
-            return []
-
-        admitted: list[Request] = []
-        now = self.now()
-        while len(self._active) < self.max_batch and self._queue and self._queue[0][0] <= now:
-            if not self._blocks_available(self._queue[0][2]):
-                # FIFO: the wave stops at a member that cannot reserve its blocks; it is
-                # opened by a later step once other requests have released theirs.
-                self._blocked_this_step = True
-                break
-            admitted.append(self._start(heapq.heappop(self._queue)[2]))
-        return admitted
+            return self._admit_packed_continuous()
+        return self._admit_packed_static()
 
     def _wave_target(self) -> float:
         """Arrival of the last member of the wave that would open next."""
@@ -716,75 +631,6 @@ class Scheduler:
             self.sleep(delay)
             # Waiting for an arrival is not compute: the step row starts at the wake-up.
             self._step_origin = self.now()
-
-    def _start(self, req: Request) -> Request:
-        if req.budget <= 0:
-            # No generation at all (config validation forbids it, but never invent a
-            # token past the budget): finish immediately without taking a seat.
-            req.t_admitted = req.t_prefill_start = req.t_first = req.t_finish = self.now()
-            req.state = "finished"
-            self._admitted_this_step += 1
-            self._retired_this_step += 1
-            return req
-
-        seat = heapq.heappop(self._free)
-        if self._virgin_seats:
-            self._virgin_seats.discard(seat)
-        req.seat = seat
-        req.state = "prefilling"
-        self._admitted_this_step += 1
-        # One timestamp for both: the serial arm has no group to wait for, so
-        # ``pack_wait`` is exactly zero and ``ttft == queue + prefill`` stays the
-        # identity W3 froze (the bench row reads ``t_admitted`` for queue now).
-        admitted = self.now()
-        req.t_admitted = admitted
-        # ``t_prefill_start`` is taken immediately before this request's own prefill
-        # call, after the seat bookkeeping: ``ttft == queue + prefill`` is then an
-        # identity, not a coincidence (C2). Serial prefill of *other* requests is
-        # queue time -- exactly the tail continuous batching is meant to compress.
-        req.t_prefill_start = admitted
-        try:
-            # Prefill writes straight into the seat's row (or, on the paged arm, into
-            # freshly reserved blocks); there is no separate hand-off step, so a failure
-            # can only leave that row half-written -- the engine rolls it back before
-            # re-raising (freeze for a seat, block release for the pool).
-            logits = self._prefill(req, seat)
-            first = _row_argmax(logits)[0]
-        except Exception as exc:  # noqa: BLE001 - one bad request must not kill the run
-            req.t_first = req.t_finish = self.now()
-            self._abort(req, exc)
-            return req
-        req.out = [first]
-        req.t_first = self.now()
-        req.state = "decoding"
-        self._active.append(req)
-        return req
-
-    def _prefill(self, req: Request, seat: int):
-        """Admission prefill: into blocks on the paged arm, into the seat row otherwise.
-
-        ``prefill_into_blocks`` gets the request id (the engine's block ledger key), the
-        seat (so decode can scatter logits back) and the budget (the reservation is an
-        upper bound over ``prompt + budget``, D6). The optional keywords are passed only if
-        the engine's signature declares them: a fake engine that predates ``budget`` or
-        ``seat`` keeps working, and this is decided by inspection, never by catching a
-        ``TypeError`` raised inside the call.
-        """
-        blocks = getattr(self.engine, "prefill_into_blocks", None)
-        if self._paged_mode() and callable(blocks):
-            try:
-                signature = inspect.signature(blocks)
-            except (TypeError, ValueError):  # pragma: no cover - builtins without signatures
-                signature = None
-            extra = {"seat": seat, "budget": req.budget} if signature is None else {}
-            if signature is not None:
-                accepted = signature.parameters
-                if "seat" in accepted:
-                    extra["seat"] = seat
-                if "budget" in accepted:
-                    extra["budget"] = req.budget
-            return blocks(req.id, list(req.prompt_ids), **extra)
-        return self.engine.prefill_into_seat(seat, list(req.prompt_ids))
 
     # ------------------------------------------------------------ decode
     def _decode(self) -> float:

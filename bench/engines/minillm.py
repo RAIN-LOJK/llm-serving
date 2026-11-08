@@ -2,8 +2,9 @@
 
 Loads straight from the local HF cache through ``model.loading`` — no ``from_pretrained``,
 so what the benchmark measures is the hand-written decoder end to end. The attention path is
-frozen (``docs/decisions.md`` D4): prefill runs on SDPA, decode on ``hand_baddbmm`` over a
-``KvSlab``. The surrounding cache, RoPE and decode loop stay in this repo. Timing comes from
+``docs/decisions.md`` D7: prefill runs as one packed varlen group (FA2 on CUDA,
+SDPA-per-segment elsewhere) and seat decode still runs ``hand_baddbmm`` over a ``KvSlab``.
+The surrounding cache, RoPE and decode loop stay in this repo. Timing comes from
 the engine itself (CUDA events when it runs on a GPU), not from the runner's wall clock.
 
 ``encode`` uses ``add_special_tokens=False`` to match ``bench/engines/hf.py``: if the two
@@ -39,7 +40,6 @@ class ServeEngine:
         device: str = "cpu",
         model_path: str | None = None,
         *,
-        prefill: str = "serial",
         max_prefill_tokens: int = 8192,
         decode: str = "auto",
     ) -> None:
@@ -48,7 +48,6 @@ class ServeEngine:
         self.dtype_name = dtype
         self.device = "cpu" if device in {"", "auto"} else device
         self.model_path = model_path
-        self._prefill = str(prefill)
         self._max_prefill_tokens = int(max_prefill_tokens)
         self._decode = str(decode)
         self.vocab_size = 0
@@ -82,8 +81,8 @@ class ServeEngine:
         self.engine = MiniLLMEngine(
             self.model,
             eos_token_id=self.eos_token_id,
-            # W4.5: pass the control arm down; defaults keep every W2/W3 run serial.
-            prefill=self._prefill,
+            # W4.5 (D7): the scheduler always prefills whole groups; only the group
+            # budget and the paged decode kernel remain configurable.
             max_prefill_tokens=self._max_prefill_tokens,
             decode=self._decode,
         )

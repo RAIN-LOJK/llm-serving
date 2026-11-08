@@ -1,10 +1,10 @@
-"""Scheduler contract tests (docs/decisions.md D5) on a fake engine and clock.
+"""Scheduler contract tests (docs/decisions.md D5/D7) on a fake engine and clock.
 
 No torch, no weights: the engine is duck-typed exactly like the contract the real
-engine will implement (``prefill_into_seat`` / ``decode_batch`` / ``freeze_seat`` /
-``slab``). The fake clock advances only when the engine "runs"
-or when the scheduler sleeps, so "step k perturbs step k+1" is observable to the
-instruction.
+engine implements (``prefill_group`` / ``decode_batch`` / ``freeze_seat`` / ``slab``).
+There is no serial admission path any more (D7): every request enters through one
+packed FIFO group. The fake clock advances only when the engine "runs" or when the
+scheduler sleeps, so "step k perturbs step k+1" is observable to the instruction.
 
 The fake engine is deterministic by construction: a request's token stream is a
 function of *its own* prompt and of how many decode writes its seat has taken
@@ -73,6 +73,9 @@ class FakeEngine:
         self.eos_token_id = eos_token_id
         self.max_position = max_position
         self.device = "fake"
+        #: Packing budget the scheduler reads. The fake never splits; every group the
+        #: scheduler builds is accepted so the tests pin admission, not the budget.
+        self.max_prefill_tokens = 8192
         self.prefill_s = prefill_s
         self.decode_s = decode_s
         self._first_token = first_token or self._default_first
@@ -82,6 +85,8 @@ class FakeEngine:
         self.seat_prompt: dict[int, tuple[int, ...]] = {}
         self.writes: dict[int, int] = {}
         self.prefill_calls: list[tuple[int, ...]] = []
+        self.groups: list[list[tuple[int, ...]]] = []
+        self.group_ids: list[list[int]] = []
         self.activations: list[tuple[int, tuple[int, ...]]] = []
         self.freezes: list[int] = []
         self.release_freezes: list[int] = []
@@ -104,47 +109,41 @@ class FakeEngine:
         return row
 
     # -------------------------------------------------- engine interface
-    def prefill_one(self, prompt_ids: list[int]):
-        assert prompt_ids, "empty prompt reached the engine"
-        assert len(prompt_ids) <= self.max_position
-        self.clock.advance(self.prefill_s)
-        prompt = tuple(prompt_ids)
-        self.prefill_calls.append(prompt)
-        return [self._one_hot(self._first_token(list(prompt)))], {
-            "prompt": prompt,
-            "length": len(prompt),
-        }
-
-    def activate_seat(self, slot: int, cache, prompt_len: int) -> None:
+    def _occupy(self, slot: int, prompt: tuple[int, ...]) -> None:
         assert 0 <= slot < self.slab.batch, f"seat {slot} outside the slab"
         assert slot not in self.occupied, f"seat {slot} activated while still occupied"
-        assert cache["length"] == prompt_len, "activate_seat got the wrong length"
-        self.occupied.add(slot)
-        self.seat_prompt[slot] = cache["prompt"]
-        self.writes[slot] = 0
-        self.activations.append((slot, cache["prompt"]))
-        self.occupied_seen = max(self.occupied_seen, len(self.occupied))
-
-    def prefill_into_seat(self, slot: int, prompt_ids: list[int]):
-        """W3 admission: prefill + seat write in one call, as ``serve/engine.py`` does.
-
-        Deliberately self-contained: the scheduler must not be able to fall back to the W2
-        two-step hand-off (``prefill_one`` + ``activate_seat``), and a test poisons both to
-        pin that down.
-        """
-        assert prompt_ids, "empty prompt reached the engine"
-        assert len(prompt_ids) <= self.max_position
-        assert 0 <= slot < self.slab.batch, f"seat {slot} outside the slab"
-        assert slot not in self.occupied, f"seat {slot} activated while still occupied"
-        self.clock.advance(self.prefill_s)
-        prompt = tuple(prompt_ids)
-        self.prefill_calls.append(prompt)
         self.occupied.add(slot)
         self.seat_prompt[slot] = prompt
         self.writes[slot] = 0
         self.activations.append((slot, prompt))
         self.occupied_seen = max(self.occupied_seen, len(self.occupied))
-        return [self._one_hot(self._first_token(list(prompt)))]
+
+    def prefill_group(self, requests: list[dict]):
+        """W4.5 admission: one shared forward for the whole FIFO group.
+
+        One clock advance per group, one activation per member -- the same contract
+        ``serve/engine.py::prefill_group`` implements for the seat arm. The scheduler
+        holds every member to the same ``(t_prefill_start, t_first)``, so the
+        ``ttft == queue + pack_wait + prefill_shared`` identity is structural.
+        """
+        assert requests, "empty group reached the engine"
+        self.clock.advance(self.prefill_s)
+        prompts: list[tuple[int, ...]] = []
+        ids: list[int] = []
+        rows = []
+        for spec in requests:
+            prompt_ids = list(spec["prompt_ids"])
+            assert prompt_ids, "empty prompt reached the engine"
+            assert len(prompt_ids) <= self.max_position
+            prompt = tuple(prompt_ids)
+            self._occupy(int(spec["seat"]), prompt)
+            self.prefill_calls.append(prompt)
+            prompts.append(prompt)
+            ids.append(int(spec["id"]))
+            rows.append(self._one_hot(self._first_token(list(prompt))))
+        self.groups.append(prompts)
+        self.group_ids.append(ids)
+        return rows
 
     def freeze_seat(self, slot: int) -> None:
         # ``KvSlab.freeze`` is idempotent and safe on a row that never activated
@@ -344,22 +343,24 @@ def test_lifecycle_timestamps_monotone():
     assert all(req.state == "finished" for req in result)
 
     queued_positive = False
-    prefill_total_ms = 0.0
+    group_shared_ms: dict[int | None, float] = {}
     for req in result:
         assert req.t_arrival <= req.t_admitted
         assert req.t_admitted <= req.t_prefill_start
         assert req.t_prefill_start <= req.t_first
         assert req.t_first <= req.t_finish
 
-        queue_ms = (req.t_prefill_start - req.t_arrival) * 1000.0
+        queue_ms = (req.t_admitted - req.t_arrival) * 1000.0
+        pack_wait_ms = (req.t_prefill_start - req.t_admitted) * 1000.0
         prefill_ms = (req.t_first - req.t_prefill_start) * 1000.0
         ttft_ms = (req.t_first - req.t_arrival) * 1000.0
-        assert queue_ms >= 0.0 and prefill_ms >= 0.0
-        # C2: the identity is structural, not a coincidence.
-        assert ttft_ms == pytest.approx(queue_ms + prefill_ms, abs=1e-9)
+        assert queue_ms >= 0.0 and pack_wait_ms >= 0.0 and prefill_ms >= 0.0
+        # D7: ttft == queue + pack_wait + prefill_shared is an identity, not a
+        # coincidence -- every member of a group shares the last two timestamps.
+        assert ttft_ms == pytest.approx(queue_ms + pack_wait_ms + prefill_ms, abs=1e-9)
         assert prefill_ms == pytest.approx(engine.prefill_s * 1000.0, abs=1e-9)
-        prefill_total_ms += prefill_ms
-        queued_positive = queued_positive or queue_ms > 0.0
+        group_shared_ms.setdefault(req.prefill_group, prefill_ms)
+        queued_positive = queued_positive or queue_ms > 0.0 or pack_wait_ms > 0.0
 
     assert queued_positive, "staggered arrivals must queue somewhere"
     # Every step row decomposes the same way; host_gap may be anything (even negative).
@@ -367,8 +368,11 @@ def test_lifecycle_timestamps_monotone():
         assert row["host_gap_ms"] == pytest.approx(
             row["step_ms"] - row["decode_event_ms"] - row["prefill_ms"], abs=1e-9
         )
+        assert row["prefill_shared_ms"] == pytest.approx(row["prefill_ms"], abs=1e-9)
+        assert row["prefill_groups"] == len(row["prefill_ids_per_group"])
+    # A group's shared prefill is charged once per forward, not once per request.
     assert sum(row["prefill_ms"] for row in sched.step_rows) == pytest.approx(
-        prefill_total_ms, abs=1e-9
+        sum(group_shared_ms.values()), abs=1e-9
     )
 
 
@@ -563,15 +567,16 @@ def test_decode_event_ms_prefers_engine_event():
     assert sum(row["decode_event_ms"] for row in rows) > 0.0
 
 
-def test_engine_failure_aborts_and_run_continues():
+def test_group_failure_aborts_members_and_run_continues():
+    """One bad forward aborts its whole group; later groups still run (D7)."""
     clock = FakeClock()
 
     class ExplodingPrefill(FakeEngine):
-        def prefill_into_seat(self, slot, prompt_ids):
-            if prompt_ids[0] == 101:  # request id 1 only
+        def prefill_group(self, requests):
+            if any(spec["prompt_ids"][0] == 101 for spec in requests):
                 self.clock.advance(0.001)
                 raise RuntimeError("prefill blew up")
-            return super().prefill_into_seat(slot, prompt_ids)
+            return super().prefill_group(requests)
 
     engine = ExplodingPrefill(clock, max_batch=2)
     sched = _scheduler(engine, max_batch=2)
@@ -580,29 +585,31 @@ def test_engine_failure_aborts_and_run_continues():
 
     result = _by_id(sched.run())
 
-    assert result[1].state == "aborted"
-    assert "RuntimeError" in result[1].error
-    assert result[1].seat is None
-    assert result[1].t_finish is not None
-    assert all(result[i].state == "finished" for i in (0, 2, 3))
-    assert all(len(result[i].out) == 3 for i in (0, 2, 3))
-    assert not engine.occupied, "every seat must be frozen, including the aborted one"
+    # Requests 0 and 1 share the first packed group; 2 and 3 the next one.
+    assert [result[i].state for i in (0, 1)] == ["aborted", "aborted"]
+    assert all("RuntimeError" in (result[i].error or "") for i in (0, 1))
+    assert all(result[i].seat is None for i in (0, 1))
+    assert all(result[i].t_finish is not None for i in (0, 1))
+    assert all(result[i].state == "finished" for i in (2, 3))
+    assert all(len(result[i].out) == 3 for i in (2, 3))
+    assert not engine.occupied, "every seat must be frozen, including the aborted group's"
 
 
-def test_admission_goes_through_prefill_into_seat():
-    """Admission is one call into the seat, never the W2 ``prefill_one`` + ``activate_seat``.
+def test_admission_goes_through_prefill_group():
+    """Admission is one packed group call, never the W2/W3 per-request hand-offs.
 
-    The two-step hand-off copies a prefill ``KVcache`` into the row; on the pool path that
-    would put the same KV in memory twice, so the scheduler must not go near it (W3 E0b).
+    The two-step hand-off copies a prefill ``KVcache`` into the row, and the old serial
+    control arm admitted request by request; both are gone. The scheduler must only use
+    the grouped interface.
     """
     clock = FakeClock()
     engine = FakeEngine(clock, max_batch=1)
 
     def legacy(*args, **kwargs):
-        raise AssertionError("the scheduler must admit through prefill_into_seat")
+        raise AssertionError("the scheduler must admit through prefill_group")
 
-    engine.prefill_one = legacy
-    engine.activate_seat = legacy
+    for name in ("prefill_one", "activate_seat", "prefill_into_seat"):
+        setattr(engine, name, legacy)
     sched = _scheduler(engine, max_batch=1)
     req = _request(0, budget=2)
     sched.submit(req)
@@ -611,6 +618,7 @@ def test_admission_goes_through_prefill_into_seat():
 
     assert finished.state == "finished"
     assert len(finished.out) == 2
+    assert engine.groups == [[tuple(req.prompt_ids)]]
     assert engine.activations == [(0, tuple(req.prompt_ids))]
 
 
@@ -644,12 +652,13 @@ def test_queued_counts_only_arrived_requests():
 
 # ---------------------------------------------------------------- W4 paged admission
 class PagedFakeEngine(FakeEngine):
-    """Fake engine with the W4 hooks: block admission, block prefill, block release.
+    """Fake engine with the W4 hooks: group admission, block prefill, block release.
 
     Pure Python (like ``FakeEngine``): blocks are integers, a request holds
     ``ceil((prompt + budget) / block_size)`` of them, and the bookkeeping is the same
-    all-or-nothing ledger the real ``BlockManager`` implements. Seats are still handed to
-    ``prefill_into_blocks`` so the decode path can scatter logits back by seat number.
+    all-or-nothing ledger the real ``BlockManager`` implements. ``can_admit_group`` is
+    the admission unit (D7); a reservation failure rolls back the whole group, and a
+    successful group is registered per member with the seat the scheduler handed over.
     """
 
     impl = "paged"
@@ -663,7 +672,7 @@ class PagedFakeEngine(FakeEngine):
         self.held: dict[int, list[int]] = {}
         self.seats: dict[int, int] = {}
         self.released: list[int] = []
-        self.can_admit_calls: list[tuple[int, int]] = []
+        self.admit_group_calls: list[list[int]] = []
         self.blocks_prefills: list[tuple[int, tuple[int, ...], int]] = []
 
     def _needed(self, prompt_len, budget):
@@ -673,34 +682,52 @@ class PagedFakeEngine(FakeEngine):
     def paged_max_batch(self):
         return self.slab.batch
 
-    def can_admit(self, prompt_len, budget):
-        self.can_admit_calls.append((int(prompt_len), int(budget)))
-        if len(self.held) >= self.slab.batch:
+    def can_admit_group(self, requests):
+        self.admit_group_calls.append([len(spec["prompt_ids"]) for spec in requests])
+        if len(self.held) + len(requests) > self.slab.batch:
             return False
-        return self._needed(prompt_len, budget) <= len(self.free_blocks)
+        needed = sum(
+            self._needed(len(spec["prompt_ids"]), int(spec.get("budget") or 0))
+            for spec in requests
+        )
+        return needed <= len(self.free_blocks)
 
-    def prefill_into_blocks(self, request_id, prompt_ids, *, seat=None, budget=None):
-        needed = self._needed(len(prompt_ids), 0 if budget is None else budget)
-        if needed > len(self.free_blocks):
-            raise RuntimeError("cannot reserve blocks")
-        if seat is None or not 0 <= int(seat) < self.slab.batch:
-            raise IndexError(f"bad seat {seat} for prefill_into_blocks")
-        if request_id in self.held:
-            raise ValueError(f"request {request_id} already admitted")
+    def prefill_group(self, requests):
+        assert requests, "empty group reached the engine"
+        reserved: list[tuple[int, int, list[int], tuple[int, ...]]] = []
+        try:
+            for spec in requests:
+                request_id = int(spec["id"])
+                prompt = tuple(spec["prompt_ids"])
+                seat = int(spec["seat"])
+                if not 0 <= seat < self.slab.batch:
+                    raise IndexError(f"bad seat {seat} for prefill_group")
+                if request_id in self.held:
+                    raise ValueError(f"request {request_id} already admitted")
+                needed = self._needed(len(prompt), int(spec.get("budget") or 0))
+                if needed > len(self.free_blocks):
+                    raise RuntimeError("cannot reserve blocks")
+                block_ids = self.free_blocks[:needed]
+                del self.free_blocks[:needed]
+                reserved.append((request_id, seat, block_ids, prompt))
+        except BaseException:
+            for _, _, block_ids, _ in reserved:
+                self.free_blocks.extend(block_ids)
+            self.free_blocks.sort()
+            raise
+
         self.clock.advance(self.prefill_s)
-        ids = self.free_blocks[:needed]
-        del self.free_blocks[:needed]
-        self.held[request_id] = ids
-        self.seats[request_id] = int(seat)
-        prompt = tuple(prompt_ids)
-        self.prefill_calls.append(prompt)
-        self.blocks_prefills.append((request_id, prompt, int(seat)))
-        self.occupied.add(int(seat))
-        self.seat_prompt[int(seat)] = prompt
-        self.writes[int(seat)] = 0
-        self.activations.append((int(seat), prompt))
-        self.occupied_seen = max(self.occupied_seen, len(self.occupied))
-        return [self._one_hot(self._first_token(list(prompt)))]
+        rows = []
+        for request_id, seat, block_ids, prompt in reserved:
+            self.held[request_id] = block_ids
+            self.seats[request_id] = seat
+            self.prefill_calls.append(prompt)
+            self.blocks_prefills.append((request_id, prompt, seat))
+            self._occupy(seat, prompt)
+            rows.append(self._one_hot(self._first_token(list(prompt))))
+        self.groups.append([prompt for _, _, _, prompt in reserved])
+        self.group_ids.append([request_id for request_id, _, _, _ in reserved])
+        return rows
 
     def release_request(self, request_id):
         ids = self.held.pop(request_id, None)
@@ -739,11 +766,13 @@ def test_paged_waits_for_blocks_and_keeps_ttft_identity():
     for req in (first, second, third):
         sched.submit(req)
 
-    # Step 0: req 0 takes 2 of 4 blocks, req 1 takes 2 -> 0 free; req 2 is refused.
+    # Step 0: the candidate group [0, 1] reserves 4 of 4 blocks; adding req 2 would
+    # need 6, so the group stops at the FIFO head and req 2 stays queued.
     row = sched.step()
     assert row["admitted"] == 2 and row["queued"] == 1
     assert third.state == "queued" and third.t_admitted is None
-    assert engine.can_admit_calls[:3] == [(4, 4), (4, 4), (4, 4)]
+    assert engine.groups == [[(10, 1, 2, 3), (11, 4, 5, 6)]]
+    assert engine.admit_group_calls[:3] == [[4], [4, 4], [4, 4, 4]]
 
     # The block ledger is never oversold: admitted requests hold <= n_blocks blocks.
     assert sum(len(ids) for ids in engine.held.values()) <= engine.n_blocks
@@ -751,11 +780,12 @@ def test_paged_waits_for_blocks_and_keeps_ttft_identity():
     result = _by_id(sched.run())
     assert all(req.state == "finished" for req in result.values())
     for req in result.values():
-        queue_ms = (req.t_prefill_start - req.t_arrival) * 1000.0
+        queue_ms = (req.t_admitted - req.t_arrival) * 1000.0
+        pack_wait_ms = (req.t_prefill_start - req.t_admitted) * 1000.0
         prefill_ms = (req.t_first - req.t_prefill_start) * 1000.0
         ttft_ms = (req.t_first - req.t_arrival) * 1000.0
-        assert ttft_ms == pytest.approx(queue_ms + prefill_ms, abs=1e-9)
-    # Waiting for blocks is queue time, not prefill time: only the head request queued.
+        assert ttft_ms == pytest.approx(queue_ms + pack_wait_ms + prefill_ms, abs=1e-9)
+    # Waiting for blocks is queue time, not prefill time: only the third request queued.
     assert result[2].t_prefill_start > result[2].t_arrival
     assert (result[2].t_first - result[2].t_prefill_start) == pytest.approx(
         engine.prefill_s, abs=1e-12
@@ -765,8 +795,8 @@ def test_paged_waits_for_blocks_and_keeps_ttft_identity():
     assert engine.free_blocks == list(range(engine.n_blocks))
 
 
-def test_paged_admission_never_oversells_within_one_step():
-    """Two admissions in one step must not both pass ``can_admit`` on stale capacity."""
+def test_paged_group_admission_never_oversells_within_one_step():
+    """The candidate group is checked before any member is popped (D7)."""
     clock = FakeClock()
     # 3 blocks x 4: each request needs 2 blocks, so only one fits, even with max_batch 3.
     engine = PagedFakeEngine(clock, max_batch=3, n_blocks=3, block_size=4)
@@ -778,6 +808,7 @@ def test_paged_admission_never_oversells_within_one_step():
     row = sched.step()
 
     assert row["admitted"] == 1, "block capacity (not max_batch) must cap the step"
+    assert engine.group_ids == [[0]]
     assert len(engine.held) == 1
     assert len(engine.released) + len(engine.held) == 1
     assert sum(len(ids) for ids in engine.held.values()) <= engine.n_blocks
@@ -819,7 +850,7 @@ def test_paged_fifo_head_blocks_smaller_requests():
     engine.free_blocks.insert(0, 0)
     row = sched.step()
     assert row["admitted"] >= 1
-    assert engine.blocks_prefills[0][0] == 0, "the FIFO head must be admitted first"
+    assert engine.group_ids[0] == [0], "the FIFO head must be admitted first"
 
 
 def test_paged_release_uses_release_request_not_freeze():
@@ -835,7 +866,8 @@ def test_paged_release_uses_release_request_not_freeze():
     assert all(req.state == "finished" for req in result)
     assert sorted(engine.released) == [0, 1, 2, 3]
     assert engine.free_blocks == list(range(8))
-    # Blocks were prefilled through the paged hook, never the seat one.
+    # Blocks were prefilled through the packed paged hook, never the seat one.
+    assert engine.blocks_prefills
     assert [call[0] for call in engine.blocks_prefills] == [0, 1, 2, 3]
     assert all(call[2] in (0, 1) for call in engine.blocks_prefills)
 

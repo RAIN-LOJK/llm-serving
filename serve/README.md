@@ -8,8 +8,8 @@
 
 | 模块 | 职责 | 阶段 |
 |---|---|---|
-| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `prefill_into_blocks` / `release_request` / `paged_stats`）；W4.5 的 `prefill_group` 与 `decode=auto|triton|gather`。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 / W4.5 |
-| `scheduler.py` | 请求状态机、准入/退出、static 与 continuous 两条策略的 step 主循环；W4.5 的 packed admission 与 `pack_wait/prefill_shared` 归因；准入前问引擎的可选 `can_admit`（拿不到块则队头留队列，不跳过） | W3 / W4 / W4.5 |
+| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `can_admit_group` / `prefill_into_blocks` / `release_request` / `paged_stats`）；W4.5 的 `prefill_group` 与 `decode=auto|triton|gather`。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 / W4.5 |
+| `scheduler.py` | 请求状态机、准入/退出、static 与 continuous 两条策略的 step 主循环；W4.5 的 packed admission 与 `pack_wait/prefill_shared` 归因；准入前问引擎的可选 `can_admit_group`（整组拿不到块则队头留队列，不跳过）。**只有 packed group 一条 prefill 路径，serial 控制臂已删除** | W3 / W4 / W4.5 |
 | `block_manager.py` | 分页 KV 的块分配器：free list、原子预留、整张块表归还、`FragStats`（internal frag / reservation slack / seat row slack，时间加权） | W4 |
 | `state_pool.py` | 线性层状态池 + KV 块统一句柄与生命周期 | W7 |
 
@@ -19,9 +19,10 @@
 - 引擎内部不打印；指标通过返回值/回调交给 `bench/metrics.py`。
 - 任何调度/缓存改动先过 `tests/` 的等价性测试（batch 内每请求 == 单独跑）。
 - **`freeze_seat(slot)` 必须幂等**，且必须能作用于「从未准入过的行」（`open_pool()` 后 `KvSlab.reset()` 全行 `active=True`，调度器第一次 decode 前先 park 一遍）和「prefill 失败已回退的行」；任何一次准入都必须在 freeze 之后能完全覆盖 `pos` / `valid` / `active`（不依赖行的旧状态）。
-- **席位 = `KvSlab` 的一行**（口径见 `docs/decisions.md` D5）：准入 = `prefill_into_seat(row, prompt_ids)`
-  把 prefill 的 K/V 直接写穿到该行（`SlabWriteSink` 只写不读，池路径不建 `KVcache`、不 `fill_from`，
-  也就没有交接拷贝），成功后才 `activate`；forward 中途失败则由引擎先 `freeze(row)` 回滚半写的行。
+- **席位 = `KvSlab` 的一行**（口径见 `docs/decisions.md` D5）：准入 = `prefill_group([{id, prompt_ids, seat, budget}, ...])`
+  为每个成员把 prefill 的 K/V 直接写穿到它那一行（`SlabWriteSink` 只写不读，池路径不建 `KVcache`、不
+  `fill_from`，也就没有交接拷贝），成功后才 `activate`；forward 中途失败则由引擎先 `freeze(row)` 回滚半写的行。
+  `prefill_into_seat(row, prompt_ids)` 保留为单请求直接调用/测试入口，调度器不再使用。
   退出 freeze（不回收，回收是 W4 块池的事）；一次 forward 永远覆盖全部 `max_batch` 行，
   空闲行只是被 mask 挡住。不做逐行 forward、不按 active 行重排 KV。
 
@@ -52,10 +53,11 @@ W4.5 注意力路径 v2（`docs/decisions.md` D7）
   `(n_blocks, bs, n_kv_head, head_dim)` + int32 block table + int32 seqlen；没有 gather /
   `lpad` / 零块 / mask-bias。`PagedDecodePlan` 每容器做一次全量契约校验，之后每层只查 query
   布局；新 token 走 `write_slots`（每步算一次 device slot map，`index_copy_` 写）。
-- **seat decode** 仍是 `hand_baddbmm` + `KvSlab`；W4.5 的正式配置使用 packed + Triton，
-  代码的 `prefill="serial"` 默认只保留给历史 run/控制臂，`decode="gather"` 只作 oracle，
-  **都不是生产回退**。生产 paged 在 CUDA 上必须走 Triton；`auto` 只按 device 解析，缺
-  Triton 时直接报错（D7）。
+- **seat decode** 仍是 `hand_baddbmm` + `KvSlab`；W4.5 的正式配置使用 packed + Triton。
+  **serial prefill 控制臂已删除**：`MiniLLMEngine` 不再有 `prefill` 模式，`Scheduler`
+  只调用 `prefill_group`，`prefill_into_seat` 仅作为引擎 API 留给直接调用/测试。
+  `decode="gather"` 暂留作 oracle，**不是生产回退**；生产 paged 在 CUDA 上必须走
+  Triton，`auto` 只按 device 解析，缺 Triton 时直接报错（D7）。
 - **正式结果**：`W45-0001` golden **64/64**；E1 **9/28 = 3.111×**；E2 pre-fix `W45-0005`
   **1.203× fail** → post-fix `W45-0012` **1.040× pass（接受线，非 1.0 目标）**；
   E3 p99 **3.760×** / p50 **0.512×**；E4 `W45-0008/0009` **330.53 → 678.59 tok/s =

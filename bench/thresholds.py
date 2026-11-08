@@ -389,7 +389,9 @@ def _check_fragmentation(summary: Mapping[str, Any], limit: float) -> dict[str, 
 # The packed-prefill and decode-kernel criteria are *paired*: they compare two arms of
 # this repo that ran the same trace on the same pool width. The attention backend is the
 # variable under test, so these checks deliberately use the common + scenario keys only;
-# ``mechanism=True`` would mark every honest serial-vs-packed pair invalid.
+# ``mechanism=True`` would mark every honest packed-vs-control-arm pair invalid. The
+# serial control arm is deleted from production (D7); its historical summaries remain
+# valid as the E3 baseline.
 
 
 def _scenario_pair_problems(
@@ -504,12 +506,14 @@ def _check_ttft_ratio(
     percentile: str,
     mode: str,
 ) -> dict[str, Any]:
-    """E3: paired TTFT p99 speedup / p50 ratio between packed and serial prefill.
+    """E3: paired TTFT p99 speedup / p50 ratio, packed vs the historical serial arm.
 
     ``mode="speedup"`` is ``baseline / ours >= limit`` (the packed arm must be faster);
     ``mode="ratio"`` is ``ours / baseline <= limit`` (the packed arm must not regress the
     median). Both arms must share the trace and pool width; the prefill mode is the
-    variable and is therefore not part of the pairing keys.
+    variable and is therefore not part of the pairing keys. The serial control arm was
+    deleted from production after W4.5 closed (D7); this evaluator now only reads the
+    historical baseline summaries under ``results/W45/``.
     """
     if not baseline:
         return {"status": "pending", "reason": "no paired baseline summary"}

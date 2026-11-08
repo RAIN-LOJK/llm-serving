@@ -154,7 +154,6 @@ class MiniLLMEngine:
         model,
         eos_token_id=None,
         *,
-        prefill: str = "serial",
         max_prefill_tokens: int = 8192,
         decode: str = "auto",
     ):
@@ -164,13 +163,12 @@ class MiniLLMEngine:
         self.vocab_size = model.config.vocab_size
         self.max_position = model.config.max_position_embeddings
         self._use_cuda_events = self.device.type == "cuda"
-        if prefill not in {"serial", "packed"}:
-            raise ValueError(f"prefill must be 'serial' or 'packed', got {prefill!r}")
         if int(max_prefill_tokens) < 1:
             raise ValueError(f"max_prefill_tokens must be >= 1, got {max_prefill_tokens!r}")
         if decode not in {"auto", "triton", "gather"}:
             raise ValueError(f"decode must be auto/triton/gather, got {decode!r}")
-        self.prefill_mode = str(prefill)
+        # W4.5 (D7): the scheduler always pre-fills whole FIFO groups through
+        # ``prefill_group``; there is no serial/packed switch any more.
         self.max_prefill_tokens = int(max_prefill_tokens)
         self._decode_preference = str(decode)
         self._varlen_backend = None
@@ -412,8 +410,9 @@ class MiniLLMEngine:
 
     # ------------------------------------------------------------------ W3 batch pool
     # One slab with ``max_batch`` rows and one seat per row, alive for the whole trace
-    # (D5). An admission prefills **into** its row (``prefill_into_seat``): the prompt's KV
-    # never exists anywhere else, so there is no hand-off copy to account for. Retirement
+    # (D5). An admission prefills **into** its row (``prefill_into_seat``, or the
+    # scheduler's ``prefill_group``): the prompt's KV never exists anywhere else, so
+    # there is no hand-off copy to account for. Retirement
     # freezes the row instead of freeing it, because a row's cursor is a device tensor and
     # moving KV out of the way would be a copy the protocol does not account for (P-26).
     # Every forward covers all ``max_batch`` rows -- idle ones included, masked out -- so the
@@ -464,10 +463,11 @@ class MiniLLMEngine:
 
     @torch.inference_mode()
     def prefill_one(self, prompt_ids: list[int]) -> tuple[torch.Tensor, KVcache]:
-        """Per-sequence prefill (D4: SDPA, no pad, no mask). Same call as ``prefill``.
+        """Per-sequence prefill reference (D4: no pad, no mask). Same call as ``prefill``.
 
-        The W2 single-request path still hands the returned ``KVcache`` to a slab with
-        ``fill_from``; the W3 pool path does not go through here (``prefill_into_seat``).
+        This is the W2/W3/W4 oracle the packed group is compared against; the pool
+        admission path writes straight into a seat/block sink instead, and the scheduler
+        only calls ``prefill_group``.
         """
         return self.prefill(prompt_ids)
 
@@ -534,7 +534,7 @@ class MiniLLMEngine:
         The seat arm writes each prompt's KV into its own ``KvSlab`` row; the paged arm
         reserves each prompt's blocks and writes through its block table. Both arms run
         the **same** packed varlen computation (only the sink differs), which is what
-        makes the serial-vs-packed A/B a scheduling comparison rather than a kernel
+        makes the seat-vs-paged A/B a sink comparison rather than a kernel
         comparison. A failure rolls back every row/block in the group before re-raising;
         the caller aborts the whole group because a single forward cannot attribute the
         error to one request.
@@ -623,7 +623,8 @@ class MiniLLMEngine:
                 if table is None:
                     raise RuntimeError(
                         f"cannot reserve {needed} blocks for request {request_id}: "
-                        f"{blocks.stats()['free']} free (can_admit should have refused it)"
+                        f"{blocks.stats()['free']} free (can_admit_group should have "
+                        "refused the group)"
                     )
                 reserved.append((request_id, list(table), len(prompt), seat, budget))
             slots = [pool.slot_ids(table, 0, length) for _, table, length, _, _ in reserved]
@@ -652,11 +653,13 @@ class MiniLLMEngine:
     def prefill_into_seat(self, row: int, prompt_ids: list[int]) -> torch.Tensor:
         """Prefill one prompt straight into pool row ``row``; returns ``(1, vocab)`` logits.
 
-        This is W3's admission: the prompt's K/V is written into the seat's row as each layer
-        computes it (``SlabWriteSink``), so no ``KVcache`` is built and no ``fill_from`` copy
-        happens -- the pool row is the only copy of this request's prefill KV. The forward
-        call itself is unchanged (D4: one per-sequence SDPA prefill, ``past_len == 0``, so
-        ``is_causal=True`` and no mask).
+        This is the single-request form of the pool admission used by the W3 tests and
+        direct callers; the scheduler admits whole groups through ``prefill_group``, which
+        uses the same ``SlabWriteSink`` per member. The prompt's K/V is written into the
+        seat's row as each layer computes it, so no ``KVcache`` is built and no
+        ``fill_from`` copy happens -- the pool row is the only copy of this request's
+        prefill KV. The forward call goes through the packed varlen path with one segment
+        (``past_len == 0``, so ``is_causal=True`` and no mask).
 
         The row is activated only after the whole forward succeeded. A failure can leave a
         **half-written** row (every layer before the failing one already landed its columns),
@@ -690,8 +693,9 @@ class MiniLLMEngine:
         """Copy one request's prefill KV into its seat and unfreeze the row's cursor.
 
         Kept for the W2-style hand-off (``prefill_one`` + ``fill_from``) that the equivalence
-        tests and the single-request path compare against; the W3 scheduler admits through
-        ``prefill_into_seat`` instead, which needs neither this copy nor a ``KVcache``.
+        tests and the single-request path compare against; both scheduler admission paths
+        (``prefill_group`` and the direct ``prefill_into_seat``) need neither this copy nor
+        a ``KVcache``.
         """
         slab = self.slab
         # Interleaved layer by layer, like the single-request hand-off (W2-0007): allocate
@@ -831,10 +835,11 @@ class MiniLLMEngine:
     def can_admit(self, prompt_len: int, budget: int) -> bool:
         """Whether a request of this length/budget fits **now**; never changes state.
 
-        Two conditions, both necessary before a seat is popped (D6): the request's whole
-        ``ceil((prompt + budget) / bs)`` reservation is available in the free list, and the
-        active request count is below ``max_batch``. A failed check leaves the request in
-        the queue (its wait is queue time), and the scheduler does not skip it (FIFO).
+        Two conditions (D6): the request's whole ``ceil((prompt + budget) / bs)``
+        reservation is available in the free list, and the active request count is below
+        ``max_batch``. This is the single-request check kept as an engine-level API; the
+        scheduler's admission unit is the whole packed group
+        (:meth:`can_admit_group`), so the two answers can differ by design.
 
         With only the seat pool open there is no block reservation to make (the slab is
         allocated up front), so the answer is ``True``: the hook always describes the arm
@@ -854,8 +859,9 @@ class MiniLLMEngine:
         reserves several requests back to back, so checking each head independently lets
         the group over-commit the pool: the first members take blocks, the last one then
         fails inside ``prefill_group`` and aborts requests that were legitimately
-        admissible on their own. This hook makes the whole group the admission unit,
-        matching the all-or-nothing reservation the engine performs.
+        admissible on their own. The scheduler therefore makes the whole group the
+        admission unit through this hook, matching the all-or-nothing reservation the
+        engine performs.
         """
         if self._paged_pool is None or self._blocks is None:
             return True

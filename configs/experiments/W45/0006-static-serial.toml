@@ -1,3 +1,5 @@
+# HISTORICAL control-arm config · 历史控制臂配置：serial prefill 臂已删除，本配置不可再运行；
+# 旧代码见 git 历史，测量结果保留在 results/W45/；下面的测量意图不改写。
 # W45-0006 · E3 prefill 打包（serial 臂）：static B=8 mixed / 1 token
 # W4.5 口径见 ROADMAP.md §5 W4.5。这是 E3 的 A/B 控制臂：同一组 prompt、
 # 同一 varlen 后端，但调度器逐个 prefill（prefill="serial"）。
