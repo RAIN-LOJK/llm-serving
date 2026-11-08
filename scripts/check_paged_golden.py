@@ -11,7 +11,7 @@ Exit codes: 0 = every compared prompt matches, 1 = mismatch or missing data,
 
 The comparison is **exact ids**, not a tolerance: both arms run the same greedy decode
 over the same tokenizer, so a single different id means the paged path (block table,
-mask width, gather columns or logits scatter) drifted. Do not loosen this to a metric.
+seqlen tail mask or logits scatter) drifted. Do not loosen this to a metric.
 """
 
 from __future__ import annotations

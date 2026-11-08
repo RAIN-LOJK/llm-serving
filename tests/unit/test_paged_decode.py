@@ -1,9 +1,12 @@
-"""W4 paged decode through the engine: compressed batch, sparse seats, block reuse.
+"""W4.5 paged decode through the engine: Triton decode, sparse seats, block reuse.
 
-These tests pin ``serve/engine.py``'s paged arm (docs/decisions.md D6) against the
-per-sequence ``KVcache`` reference the seat path is already checked against:
+These tests pin ``serve/engine.py``'s paged arm against the per-sequence ``KVcache``
+reference the seat path is already checked against. Decode is the Triton block-table
+kernel (W4's gather control arm was deleted), so the whole module needs CUDA + Triton and
+is skipped with an explicit reason elsewhere:
 
 * a multi-step paged decode produces the same tokens as one ``KVcache`` per sequence;
+* the engine runs exactly one Triton launch per layer (no dense decode backend);
 * seats may be sparse (0 / 2 / 5): logits come back on the seat rows, idle rows are zero
   and cannot influence an active row;
 * blocks freed by one request and reused by the next decode exactly like never-used blocks;
@@ -11,7 +14,7 @@ per-sequence ``KVcache`` reference the seat path is already checked against:
 * a failed prefill returns its reservation, so ``blocks_in_use`` does not creep;
 * ``decode_batch`` with nothing active never forwards (zero ``(max_batch, vocab)`` rows).
 
-CPU only, tiny model, no golden files, no HF weights. The block allocator is the real
+Tiny bf16 model on CUDA, no golden files, no HF weights. The block allocator is the real
 ``BlockManager`` and the containers are the real ``PagedPool`` / ``PagedKV``.
 """
 
@@ -21,7 +24,7 @@ import pytest
 import torch
 
 from model import MiniLLM, MiniLLMConfig
-from model.attention import DECODE_BACKEND
+from model.triton_decode import TRITON_AVAILABLE
 from serve.engine import MiniLLMEngine
 
 N_LAYER = 2
@@ -35,6 +38,14 @@ PROMPTS = [
     [3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43],
 ]
 
+CUDA_READY = TRITON_AVAILABLE and torch.cuda.is_available()
+pytestmark = pytest.mark.skipif(
+    not CUDA_READY, reason="paged decode is the CUDA Triton block-table kernel"
+)
+#: bf16 logits from two different attention kernels; the token ids are asserted separately.
+ATOL = 2e-2
+RTOL = 2e-2
+
 
 def _config(max_position: int = 128) -> MiniLLMConfig:
     return MiniLLMConfig(vocab_size=64, max_position_embeddings=max_position, n_embd=32,
@@ -42,9 +53,9 @@ def _config(max_position: int = 128) -> MiniLLMConfig:
                          dropout=0.0, bias=False)
 
 
-def _engine(**kwargs) -> tuple[MiniLLM, MiniLLMEngine]:
+def _engine() -> tuple[MiniLLM, MiniLLMEngine]:
     torch.manual_seed(0)
-    model = MiniLLM(_config()).eval()
+    model = MiniLLM(_config()).to("cuda", dtype=torch.bfloat16).eval()
     return model, MiniLLMEngine(model)
 
 
@@ -94,7 +105,6 @@ def test_paged_decode_matches_per_sequence_reference():
     assert first == [token for _, token in refs], "paged prefill changed the first token"
 
     tokens = list(first)
-    previous_lpad = 0
     for step in range(10):
         logits = engine.decode_batch(tokens)
         assert tuple(logits.shape) == (3, model.config.vocab_size)
@@ -103,20 +113,22 @@ def test_paged_decode_matches_per_sequence_reference():
         expected, ref_logits = _step_reference(engine, refs, tokens)
         got = [int(row.argmax()) for row in logits]
         assert got == expected, f"step {step}: paged ids {got} != reference {expected}"
-        assert torch.allclose(logits, ref_logits, atol=1e-5, rtol=1e-4), f"step {step} drifted"
+        torch.testing.assert_close(
+            logits.float(), ref_logits.float(), atol=ATOL, rtol=RTOL
+        ), f"step {step} drifted"
 
         stats = engine.paged_stats()
-        assert stats["lpad"] >= max(len(p) + step + 1 for p in PROMPTS)
-        assert engine.paged_pool.workspace_mb() > 0.0
+        assert stats["decode_impl"] == "triton"
+        assert stats["workspace_mb"] == 0.0
+        assert "lpad" not in stats and "gather_calls" not in stats
+        assert stats["active_rows"] == len(PROMPTS)
         assert stats["blocks_in_use"] == sum(
             engine.block_manager.blocks_for(len(p), 12) for p in PROMPTS
         )
-        previous_lpad = stats["lpad"]
 
         tokens = got
         refs = [(cache, token) for (cache, _), token in zip(refs, expected)]
 
-    assert previous_lpad == 64
     assert engine.block_manager.in_use == sum(
         engine.block_manager.blocks_for(len(p), 12) for p in PROMPTS
     )
@@ -137,8 +149,8 @@ def test_prefill_and_decode_keep_the_reservation_upper_bound():
     assert stats["blocks_in_use"] == expected
     assert stats["written_blocks"] == 1, "only the prompt's bytes are written so far"
     assert stats["kv_live_mb"] < stats["kv_alloc_mb"] < stats["kv_mb"]
-    assert stats["workspace_mb"] == 0.0, "no gather until the first decode step"
-    assert stats["lpad"] == 0
+    # No gather workspace and no mask/bias pair: the Triton kernel reads the pool.
+    assert stats["workspace_mb"] == 0.0
 
 
 # ------------------------------------------------------------------------ sparse seats
@@ -188,52 +200,29 @@ def test_sparse_seats_scatter_logits_to_the_right_rows():
         refs = [refs[request_id] for request_id, _ in assignment]
 
 
-# ------------------------------------------------------------------------ block reuse
+# --------------------------------------------------------------- Triton launch shape
 
-def test_paged_decode_dispatches_one_baddbmm_per_layer(monkeypatch):
-    """D4 stays intact on the paged arm: one decode call per layer, not one per row."""
+def test_paged_decode_runs_one_triton_launch_per_layer(monkeypatch):
+    """The paged arm uses the block-table kernel: one launch per layer, no dense backend."""
+    from model.triton_decode import PagedDecodePlan
+
     model, engine = _engine()
     _open(model, engine, max_batch=3)
     for request_id, (prompt, seat) in enumerate(zip(PROMPTS, (0, 1, 2))):
         engine.prefill_into_blocks(request_id, prompt, budget=8, seat=seat)
 
-    calls: list[int] = []
-    original = DECODE_BACKEND.decode
+    launched: list[int] = []
+    original = PagedDecodePlan.run
 
-    def counting_decode(*args, **kwargs):
-        calls.append(1)
-        return original(*args, **kwargs)
+    def counting_run(self, layer, q):
+        launched.append(int(layer))
+        return original(self, layer, q)
 
-    monkeypatch.setattr(DECODE_BACKEND, "decode", counting_decode)
+    monkeypatch.setattr(PagedDecodePlan, "run", counting_run)
     engine.decode_batch([0, 0, 0])
 
-    assert len(calls) == N_LAYER, f"expected {N_LAYER} layer calls, got {len(calls)}"
-
-
-def test_step_stats_report_one_gather_per_layer_and_host_time():
-    """Plan §5: the step row carries the step's gather calls, host time and traffic."""
-    model, engine = _engine()
-    _open(model, engine, max_batch=3)
-    tokens = []
-    for request_id, (prompt, seat) in enumerate(zip(PROMPTS, (0, 1, 2))):
-        logits = engine.prefill_into_blocks(request_id, prompt, budget=8, seat=seat)
-        tokens.append(_first_token(logits))
-
-    for _ in range(3):
-        logits = engine.decode_batch(tokens)
-        stats = engine.paged_stats()
-        assert stats["gather_calls"] == N_LAYER, "one gather per layer, no more, no less"
-        assert stats["gather_ms"] >= 0.0, "host wall clock cannot be negative"
-        assert stats["gather_read_mb"] > 0.0 and stats["gather_write_mb"] > 0.0
-        # Traffic, not occupancy: it is the k+v bytes of this step's lpad width.
-        per_token_per_layer = 2 * N_KV_HEAD * model.head_dim * 4
-        expected = N_LAYER * len(PROMPTS) * stats["lpad"] * per_token_per_layer / 2**20
-        assert stats["gather_read_mb"] == pytest.approx(expected)
-        assert stats["gather_read_mb"] == stats["gather_write_mb"]
-        tokens = [int(row.argmax()) for row in logits]
-
-    # Each step's account starts at zero: ``gather_calls`` is not cumulative.
-    assert engine.paged_stats()["gather_calls"] == N_LAYER
+    assert launched == list(range(N_LAYER)), f"expected one launch per layer, got {launched}"
+    assert engine.attn_backends()["decode"] == "paged-triton"
 
 
 def test_reused_blocks_decode_identically_to_fresh_blocks():
@@ -262,90 +251,14 @@ def test_reused_blocks_decode_identically_to_fresh_blocks():
     fresh_logits, fresh_tokens = run(dirty=False)
 
     assert dirty_tokens == fresh_tokens, "a reused block leaked stale KV into the output"
+    # Same kernel, same shapes: the stale tail is masked by seqlen, so the bytes match.
     assert torch.equal(dirty_logits, fresh_logits), "reused blocks changed the logits"
 
 
-# ------------------------------------------------------- workspace residency (W4 blocker)
-
-def test_workspace_holds_one_lpad_bucket_and_follows_active_rows():
-    """Decode past several lpad buckets: one pair resident, sized to the active rows.
-
-    The old implementation kept ``{lpad: (k, v)}`` forever and allocated ``max_batch`` rows
-    per bucket, so an E3-shaped run (26 buckets, ``max_batch=64``) peaked at GiBs. The rules
-    pinned here: after every step ``len(pool._workspace) == 1``, the engine keeps one
-    mask/bias pair, and both are sized by the active rows, not by ``max_batch``.
-    """
-    torch.manual_seed(0)
-    model = MiniLLM(_config(max_position=512)).eval()
-    engine = MiniLLMEngine(model)
-    pool = engine.open_paged_pool(256, BS, 64, max_position=512)
-    prompts = [
-        [3 + (i % 50) for i in range(length)] for length in (20, 60, 100)
-    ]
-    tokens = []
-    for request_id, prompt in enumerate(prompts):
-        logits = engine.prefill_into_blocks(request_id, prompt, budget=220, seat=request_id)
-        tokens.append(_first_token(logits))
-
-    per_token_bytes = 2 * N_KV_HEAD * model.head_dim * pool.dtype.itemsize
-    gqa = model.config.n_head // model.config.n_kv_head
-    mib = 2**20
-    seen: set[int] = set()
-    peak = 0.0
-    for _ in range(220):
-        logits = engine.decode_batch(tokens + [0] * (64 - len(tokens)))
-        stats = engine.paged_stats()
-        seen.add(stats["lpad"])
-        assert len(pool._workspace) == 1, "lpad buckets must not accumulate"
-        assert len(engine._paged_buffers) == 1, "mask/bias buckets must not accumulate"
-        rows = len(prompts)
-        expected_gather = rows * stats["lpad"] * per_token_bytes / mib
-        # Appendix C mask/bias: one bool per (row, column) and one addend per (row*H_kv, G, col).
-        expected_buffers = (
-            rows * stats["lpad"] + rows * N_KV_HEAD * gqa * stats["lpad"] * pool.dtype.itemsize
-        ) / mib
-        assert stats["gather_workspace_mb"] == pytest.approx(expected_gather)
-        assert stats["workspace_mb"] == pytest.approx(expected_gather + expected_buffers)
-        peak = max(peak, stats["workspace_mb"])
-        tokens = [int(row.argmax()) for row in logits[: rows]]
-
-    assert len(seen) > 2, "the run never crossed several bucket boundaries; test is blind"
-    widest = max(seen)
-    # 3 rows, not 64: the workspace is the active rows at the widest bucket, everywhere.
-    largest_gather = len(prompts) * widest * per_token_bytes / mib
-    assert peak < largest_gather + 0.05, "workspace grew beyond the current bucket"
-    assert pool.workspace_peak_mb() >= pool.workspace_mb()
-
-
-def test_workspace_falls_back_when_a_long_request_releases():
-    """A long request leaving shrinks ``lpad``; the workspace must not stay at the old size."""
-    torch.manual_seed(0)
-    model = MiniLLM(_config(max_position=256)).eval()
-    engine = MiniLLMEngine(model)
-    pool = engine.open_paged_pool(64, BS, 4, max_position=256)
-    short = [3, 5, 7, 11, 13]
-    long = [3 + (i % 50) for i in range(100)]  # -> lpad 128 once the long row decodes
-    engine.prefill_into_blocks(0, short, budget=8, seat=0)
-    engine.prefill_into_blocks(1, long, budget=8, seat=1)
-    engine.decode_batch([0, 0, 0, 0])
-    wide = engine.paged_stats()
-    assert wide["lpad"] == 128
-
-    engine.release_request(1)
-    engine.decode_batch([0, 0, 0, 0])
-    narrow = engine.paged_stats()
-    assert narrow["lpad"] == 64, "lpad must follow the remaining row"
-    assert len(pool._workspace) == 1
-    # One active row in a 64-wide bucket: the old 128-wide pair is gone.
-    expected = 2 * 1 * 64 * N_KV_HEAD * model.head_dim * pool.dtype.itemsize / 2**20
-    assert narrow["gather_workspace_mb"] == pytest.approx(expected)
-    assert narrow["gather_workspace_mb"] < wide["gather_workspace_mb"]
-
-
-def test_batch_growth_rebuilds_and_stays_numerically_correct():
-    """Rows 0..3, then 0..7: the rebuild changes addresses but not the logits."""
+def test_batch_growth_keeps_triton_decode_correct():
+    """Rows 0..3, then 0..7: rebuilding the container does not change the logits."""
     model, engine = _engine()
-    pool = _open(model, engine, kv_blocks=128, block_size=BS, max_batch=8)
+    _open(model, engine, kv_blocks=128, block_size=BS, max_batch=8)
     prompts = [PROMPTS[i % len(PROMPTS)] for i in range(8)]
     refs = _reference(engine, prompts)
     tokens = [None] * 8
@@ -353,30 +266,22 @@ def test_batch_growth_rebuilds_and_stays_numerically_correct():
         tokens[i] = _first_token(engine.prefill_into_blocks(i, prompts[i], budget=16, seat=i))
     assert tokens[:4] == [token for _, token in refs[:4]]
 
-    rebuilds = pool.workspace_rebuilds
     for step in range(8):
         if step == 4:
-            # Four more requests arrive: the batch and the workspace grow mid-run.
+            # Four more requests arrive: the container is rebuilt mid-run.
             for i in range(4, 8):
                 tokens[i] = _first_token(
                     engine.prefill_into_blocks(i, prompts[i], budget=16, seat=i)
                 )
         rows = 4 if step < 4 else 8
-        before = pool.workspace_rebuilds
         logits = engine.decode_batch(tokens[:rows] + [0] * (8 - rows))
         expected, ref_logits = _step_reference(engine, refs[:rows], tokens[:rows])
         assert [int(row.argmax()) for row in logits[:rows]] == expected, f"step {step}"
-        assert torch.allclose(logits[:rows], ref_logits, atol=1e-5, rtol=1e-4), f"step {step}"
-
-        assert pool._rows_cap == rows, "workspace rows must track the active batch"
-        assert len(pool._workspace) == 1
-        growth = 1 if step in (0, 4) else 0  # first allocation, then the 4 -> 8 row growth
-        assert pool.workspace_rebuilds == before + growth, (
-            f"step {step}: rebuilt {pool.workspace_rebuilds - before} times"
-        )
+        torch.testing.assert_close(
+            logits[:rows].float(), ref_logits.float(), atol=ATOL, rtol=RTOL
+        ), f"step {step}"
         tokens[:rows] = expected
         refs[:rows] = [(cache, token) for (cache, _), token in zip(refs[:rows], expected)]
-    assert pool.workspace_rebuilds == rebuilds + 2, "first alloc plus the 4 -> 8 row growth"
 
 
 # ------------------------------------------------------------------------ release rules
@@ -417,10 +322,6 @@ def test_one_block_belongs_to_one_request_at_a_time():
                 + engine.block_manager.blocks_for(len(PROMPTS[2]), 8))
     assert used == expected
     assert stats["free"] == stats["n_blocks"] - used
-    # The dedicated zero block is not an allocator block: it is outside the free list and
-    # outside the pool's KV account (P-33 / P-35).
-    assert engine.paged_pool.zero_block.shape == (BS, N_KV_HEAD, model.head_dim)
-    assert not bool(engine.paged_pool.zero_block.any())
 
     # Releasing request 0 returns exactly its reservation, nothing more.
     engine.release_request(0)
@@ -490,7 +391,9 @@ def test_decode_with_no_active_request_does_not_forward(monkeypatch):
 
     assert tuple(logits.shape) == (5, model.config.vocab_size)
     assert not logits.any()
-    assert engine.paged_stats()["lpad"] == 0
+    stats = engine.paged_stats()
+    assert stats["workspace_mb"] == 0.0
+    assert "lpad" not in stats
 
 
 def test_can_admit_checks_blocks_and_active_count_without_mutating():

@@ -6,23 +6,12 @@ import torch
 from model import KVcache, KvSlab, MiniLLM, PagedKV, PagedPool
 from model.attention import DECODE_BACKEND
 from model.packed import PackedPrefill
-from model.paged import LPAD_GRANULARITY
 from serve.block_manager import BlockManager, FragStats
 
 # The slab bucket is a multiple of this many columns (D4). The old
 # "start at 256, double" rounded 2048 + 128 up to 4096, so every decode step read
 # ~2x the columns it needed.
 SLAB_GRANULARITY = 64
-
-
-def _empty_gather_stats() -> dict:
-    """Zeroed per-step gather account (see ``PagedPool.step_stats``)."""
-    return {
-        "gather_ms": 0.0,
-        "gather_read_mb": 0.0,
-        "gather_write_mb": 0.0,
-        "gather_calls": 0,
-    }
 
 
 @dataclass
@@ -155,7 +144,6 @@ class MiniLLMEngine:
         eos_token_id=None,
         *,
         max_prefill_tokens: int = 8192,
-        decode: str = "auto",
     ):
         self.model: MiniLLM = model.eval()
         self.eos_token_id = eos_token_id
@@ -165,14 +153,11 @@ class MiniLLMEngine:
         self._use_cuda_events = self.device.type == "cuda"
         if int(max_prefill_tokens) < 1:
             raise ValueError(f"max_prefill_tokens must be >= 1, got {max_prefill_tokens!r}")
-        if decode not in {"auto", "triton", "gather"}:
-            raise ValueError(f"decode must be auto/triton/gather, got {decode!r}")
         # W4.5 (D7): the scheduler always pre-fills whole FIFO groups through
-        # ``prefill_group``; there is no serial/packed switch any more.
+        # ``prefill_group``; there is no serial/packed switch any more. Paged decode is
+        # always the Triton block-table kernel -- there is no decode switch either.
         self.max_prefill_tokens = int(max_prefill_tokens)
-        self._decode_preference = str(decode)
         self._varlen_backend = None
-        self._paged_decode_impl = "gather"
         # Exactly one slab, reallocated when the bucket changes (W2-0005). A bucket cache
         # was measured to be pure cost under this protocol: prompts are grouped, so a new
         # bucket is built once and `warmup=3` already keeps that build out of the timed
@@ -198,18 +183,10 @@ class MiniLLMEngine:
         # compressed from the live entries' seats each step).
         self._paged_state: dict[int, dict] = {}
         # The per-step ``PagedKV`` for the compressed active batch. Rebuilt when the active
-        # seat set or any block table changes; rows keep their block tables, so the pool's
-        # flat gather index stays cached across steps.
+        # seat set or any block table changes; a plain step reuses it and only refreshes
+        # the int32 seqlen / slot map in place.
         self._paged_cache: PagedKV | None = None
         self._paged_cache_key: tuple | None = None
-        # Per-lpad mask/bias pair: ONE bucket resident, sized to the active rows (not
-        # ``max_batch``), released and rebuilt when the bucket moves or the batch grows (R4).
-        self._paged_buffers: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
-        self._paged_last_lpad = 0
-        # The last decode step's gather account (plan §5 / appendix C): host time and
-        # shape-derived traffic, produced by ``PagedPool.step_stats`` after ``gather``
-        # ran once per layer. Forwarded verbatim by ``paged_stats()``.
-        self._paged_gather_stats = _empty_gather_stats()
         self.last_decode_event_ms: float | None = None
 
     @torch.inference_mode()
@@ -454,8 +431,8 @@ class MiniLLMEngine:
 
         Recording only the request's own share would leave the other reservations
         unaccounted in the denominator, which is the W2-0004 failure mode (P-30). For the
-        paged arm this is the whole block pool (not the blocks in use); its workspace is a
-        separate figure (``paged_stats``).
+        paged arm this is the whole block pool (not the blocks in use); the Triton arm has
+        no gather workspace on top of it.
         """
         if self._paged_pool is not None:
             return self._paged_pool.mb()
@@ -482,11 +459,9 @@ class MiniLLMEngine:
     def attn_backends(self) -> dict[str, str]:
         """Actual attention backends of the open arms, for run provenance."""
         prefill = self._varlen().name
-        triton_decode = (
-            self._decode_preference == "triton"
-            or (self._paged_pool is not None and self._paged_decode_impl == "triton")
-        )
-        decode = "paged-triton" if triton_decode else DECODE_BACKEND.name
+        # The paged arm is always the Triton block-table kernel (the gather control arm
+        # was deleted); the seat arm keeps hand_baddbmm over a KvSlab.
+        decode = "paged-triton" if self._paged_pool is not None else DECODE_BACKEND.name
         return {"prefill": prefill, "decode": decode}
 
     @torch.inference_mode()
@@ -745,8 +720,8 @@ class MiniLLMEngine:
     # on release; there is no eviction and no mid-request allocation. Prefill writes each
     # layer's KV straight into the blocks as it computes it, so -- like the seat path -- no
     # persistent ``KVcache`` is built next to the pool. Decode compresses the active seats
-    # into a ``PagedKV`` batch, gathers each layer's block tables into the pool workspace
-    # (one ``hand_baddbmm`` per layer, D4) and scatters the logits back to their seat rows.
+    # into a ``PagedKV`` batch, runs the Triton block-table kernel once per layer and
+    # scatters the logits back to their seat rows. The W4 gather arm was deleted.
     @property
     def paged(self) -> bool:
         """True when the paged arm is the one open (the scheduler's duck-typed branch)."""
@@ -759,20 +734,18 @@ class MiniLLMEngine:
         block_size: int,
         max_batch: int,
         max_position: int | None = None,
-        decode: str | None = None,
     ) -> PagedPool:
         """Allocate the paged KV pool and its block manager.
 
         ``max_batch`` is the scheduler's concurrency bound (the decode batch is at most that
-        wide) and also the gather workspace's row cap (``max_rows``). ``max_position`` is
-        the run's position bound used for the RoPE table (``rope_len``); it defaults to the
-        model's ``max_position_embeddings`` and is **not** ``n_blocks * block_size`` (P-34).
+        wide). ``max_position`` is the run's position bound used for the RoPE table
+        (``rope_len``); it defaults to the model's ``max_position_embeddings`` and is
+        **not** ``n_blocks * block_size`` (P-34).
 
-        ``decode`` selects the paged decode container explicitly: ``"triton"`` (CUDA
-        block-table kernel), ``"gather"`` (W4's dense gather + ``hand_baddbmm`` oracle
-        path), or ``None`` to resolve the engine's ``decode`` preference. ``"auto"`` means
-        triton on CUDA and gather elsewhere; a CUDA-only kernel on CPU raises here rather
-        than being swapped silently.
+        The paged arm is CUDA-only now: decode is the Triton block-table kernel and W4's
+        gather control arm was deleted (D7). On CPU/MPS this raises instead of silently
+        gathering; use the seat arm (``impl="continuous"``) there. The dense oracle is
+        ``tests/reference/paged.py`` and is never a production fallback.
         """
         if int(max_batch) < 1:
             raise ValueError(f"max_batch must be >= 1, got {max_batch}")
@@ -780,17 +753,19 @@ class MiniLLMEngine:
             raise ValueError(f"kv_blocks must be >= 1, got {kv_blocks}")
         if int(block_size) < 1:
             raise ValueError(f"block_size must be >= 1, got {block_size}")
-        preference = self._decode_preference if decode is None else str(decode)
-        if preference == "auto":
-            preference = "triton" if self.device.type == "cuda" else "gather"
-        if preference not in {"triton", "gather"}:
-            raise ValueError(f"paged decode must be 'triton', 'gather' or 'auto', got {preference!r}")
-        if preference == "triton" and self.device.type != "cuda":
+        if self.device.type != "cuda":
             raise ValueError(
-                "paged decode='triton' is the CUDA block-table kernel; this engine is on "
-                f"{self.device}. Select decode='gather' explicitly for CPU/MPS."
+                "paged decode is the CUDA block-table Triton kernel; the gather control "
+                "arm was deleted in W4.5 step 2. The engine is on "
+                f"{self.device}. Run impl='paged' on CUDA, or use impl='continuous' for "
+                "the seat arm. The dense oracle lives in tests/reference/paged.py."
             )
-        self._paged_decode_impl = preference
+        if not self._paged_triton_available():
+            raise RuntimeError(
+                "paged decode requires Triton, but Triton could not be imported; the "
+                "gather control arm was deleted, so there is no eager fallback. The "
+                "dense oracle lives in tests/reference/paged.py."
+            )
         max_position = int(self.max_position if max_position is None else max_position)
         self._paged_pool = PagedPool(
             self.model.config.n_layer,
@@ -801,7 +776,6 @@ class MiniLLMEngine:
             dtype=self.model.token_embedding.weight.dtype,
             device=self.device,
             n_head=self.model.config.n_head,
-            max_rows=int(max_batch),
         )
         self._blocks = BlockManager(int(kv_blocks), int(block_size))
         self._paged_max_batch = int(max_batch)
@@ -810,10 +784,14 @@ class MiniLLMEngine:
         self._paged_state = {}
         self._paged_cache = None
         self._paged_cache_key = None
-        self._paged_buffers = {}
-        self._paged_last_lpad = 0
-        self._paged_gather_stats = _empty_gather_stats()
         return self._paged_pool
+
+    @staticmethod
+    def _paged_triton_available() -> bool:
+        """Whether the Triton kernel can be imported (the paged arm's only decoder)."""
+        from model.triton_decode import TRITON_AVAILABLE
+
+        return bool(TRITON_AVAILABLE)
 
     @property
     def paged_pool(self) -> PagedPool:
@@ -947,7 +925,9 @@ class MiniLLMEngine:
 
         Unlike ``freeze_seat`` (which parks a row and keeps its reservation, P-26), the
         paged path really frees: the blocks leave the ledger and the next request may reuse
-        them immediately (the zero-block padding rule is what makes reuse correct, P-33).
+        them immediately. Reuse is safe without clearing a block: the Triton kernel masks
+        the last page by the row's seqlen, so stale bytes past the request's length never
+        reach the softmax (P-42; W4's gather/zero-block mechanism is gone).
         Releasing an unknown or already-released id is a no-op.
         """
         if self._blocks is None:
@@ -968,18 +948,16 @@ class MiniLLMEngine:
         discards them). With nothing active this does **not** forward: it returns a zero
         ``(max_batch, vocab)`` tensor. The scheduler never calls it in that state.
 
-        One ``hand_baddbmm`` runs per layer (D4, via the container's ``write``/``get``);
-        the batch is never expanded to one forward per row. Statistics for the step (row
-        count, ``lpad``, block counts, ``FragStats.observe``) are recorded here, from the
-        step's own wall clock.
+        Decode is the Triton block-table kernel: ``PagedKV.attend`` runs once per layer and
+        reads the pool directly. The batch is never expanded to one forward per row.
+        Statistics for the step (row count, block counts, ``FragStats.observe``) are
+        recorded here, from the step's own wall clock.
         """
         if self._paged_pool is None or self._blocks is None or self._paged_max_batch is None:
             raise RuntimeError("open_paged_pool() must be called before decode_batch()")
         max_batch = int(self._paged_max_batch)
         vocab = int(self.vocab_size)
         if not self._paged_state:
-            self._paged_last_lpad = 0
-            self._paged_gather_stats = _empty_gather_stats()
             self.last_decode_event_ms = None
             return torch.zeros(
                 (max_batch, vocab),
@@ -1000,10 +978,6 @@ class MiniLLMEngine:
         ids = torch.tensor(
             [int(tokens[seat]) for seat in seats], dtype=torch.long, device=self.device
         ).view(-1, 1)
-        # Step boundary for the gather account: every layer's ``PagedKV.get`` below adds
-        # one call, its host time and its shape-derived k+v traffic. In triton mode no
-        # gather runs, so the account is zero by construction.
-        self._paged_pool.begin_step()
         start = time.perf_counter()
         event = self._new_event()
         if event is not None:
@@ -1019,13 +993,6 @@ class MiniLLMEngine:
             self.last_decode_event_ms = None
             self._sync()
         dt_s = time.perf_counter() - start
-        # Produced by the pool's own accumulator, never recomputed here: the same numbers
-        # the step's gather calls just measured (plan §5, appendix C). The triton path
-        # never calls gather, so its traffic is exactly zero.
-        self._paged_gather_stats = (
-            _empty_gather_stats() if self._paged_decode_impl == "triton"
-            else self._paged_pool.step_stats()
-        )
 
         for _, state in active:
             state["length"] += 1
@@ -1033,7 +1000,6 @@ class MiniLLMEngine:
         out = logits.new_zeros((max_batch, vocab))
         out[torch.tensor(seats, dtype=torch.long, device=self.device)] = logits
 
-        self._paged_last_lpad = int(cache.lpad or 0)
         written = sum(state["length"] for _, state in active)
         # C2's internal frag charges only blocks that hold bytes: a reserved-but-unwritten
         # block is reservation slack, not internal fragmentation (D6 keeps them apart).
@@ -1045,78 +1011,26 @@ class MiniLLMEngine:
 
         The container's rows are the active requests in seat order. Its struct (block
         tables, seats) is fixed at construction; a request entering or leaving invalidates
-        it, while a plain decode step reuses it and only advances its cursors. The per-lpad
-        mask/bias buffers are owned here, one pair for the current bucket sized to the
-        active rows, so a rebuild reuses the same addresses instead of allocating
-        ``(B*H_kv, G, lpad)`` per admission (R4) -- and buckets never accumulate.
+        it, while a plain decode step reuses it and only advances its cursors. The
+        container owns the int32 block table and seqlen the Triton kernel reads; there is
+        no mask/bias pair or gather workspace to keep alive between steps.
         """
         key = tuple(
             (request_id, state["seat"], tuple(state["block_table"])) for request_id, state in active
         )
         if key == self._paged_cache_key and self._paged_cache is not None:
-            cache = self._paged_cache
-        else:
-            cache = PagedKV(
-                self._paged_pool,
-                [state["block_table"] for _, state in active],
-                [state["length"] for _, state in active],
-                rope_len=int(self._paged_max_position),
-                seats=[state["seat"] for _, state in active],
-                n_head=self.model.config.n_head,
-                decode_impl=self._paged_decode_impl,
-            )
-            self._paged_cache = cache
-            self._paged_cache_key = key
-
-        if self._paged_decode_impl == "triton":
-            # No mask/bias and no gather workspace: the container owns the kernel and
-            # reads the pool directly. ``build_mask`` still runs once inside the model
-            # forward, but it only refreshes the int32 seqlen vector.
-            return cache
-        batch = int(cache.batch)
-        lpad = self._paged_lpad([state["length"] for _, state in active])
-        mask, bias = self._paged_mask_bias(lpad, batch)
-        cache.set_buffers(lpad, mask, bias)
+            return self._paged_cache
+        cache = PagedKV(
+            self._paged_pool,
+            [state["block_table"] for _, state in active],
+            [state["length"] for _, state in active],
+            rope_len=int(self._paged_max_position),
+            seats=[state["seat"] for _, state in active],
+            n_head=self.model.config.n_head,
+        )
+        self._paged_cache = cache
+        self._paged_cache_key = key
         return cache
-
-    def _paged_lpad(self, lengths: list[int]) -> int:
-        """This step's bucket, computed exactly like ``PagedKV.build_mask`` (one step ahead)."""
-        length = max(int(value) + 1 for value in lengths)
-        return max(1, -(-length // int(LPAD_GRANULARITY))) * int(LPAD_GRANULARITY)
-
-    def _paged_mask_bias(self, lpad: int, batch: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Mask/bias views for a step, backed by ONE buffer pair for the current ``lpad``.
-
-        The pair is sized to the active row count exactly and rebuilt only when the bucket
-        moves or the batch outgrows it. Earlier buckets are released *before* the new
-        allocation, so 26 lpad buckets over a run cost one pair, not 26 -- which is what
-        keeps the workspace account honest (plan appendix C).
-        """
-        batch = int(batch)
-        if batch < 1:
-            raise ValueError("mask/bias need at least one active row")
-        entry = self._paged_buffers.get(lpad)
-        if entry is not None and entry[0].shape[0] < batch:
-            entry = None
-        if entry is None:
-            self._paged_buffers.clear()  # release first: peak = one bucket
-            rows = min(batch, int(self._paged_max_batch or batch))
-            head_dim = self.model.config.n_head // self.model.config.n_kv_head
-            entry = (
-                torch.zeros(
-                    (rows, 1, 1, lpad),
-                    dtype=torch.bool,
-                    device=self.device,
-                ),
-                torch.zeros(
-                    (rows * self.model.config.n_kv_head, head_dim, lpad),
-                    dtype=self.model.token_embedding.weight.dtype,
-                    device=self.device,
-                ),
-            )
-            self._paged_buffers[lpad] = entry
-        mask, bias = entry
-        return mask[:batch], bias[: batch * self.model.config.n_kv_head]
 
     def _written_blocks(self, active: list[tuple[int, dict]]) -> int:
         """Blocks holding at least one written token (the last partial block counts)."""
@@ -1127,21 +1041,6 @@ class MiniLLMEngine:
             total += (length + block_size - 1) // block_size
         return total
 
-    def _paged_buffer_mb(self) -> float:
-        """Bytes of the engine-owned mask/bias pair for the current lpad bucket.
-
-        These are the ``(rows, 1, 1, lpad)`` bool mask and the ``(rows*H_kv, G, lpad)`` bias
-        tensor for the step's bucket, sized to the active batch (not ``max_batch``), with the
-        previous bucket released before the next is allocated. The pool's gather buffers are
-        counted separately by ``PagedPool.workspace_mb``. Both are workspace, not KV.
-        """
-        total = sum(
-            tensor.numel() * tensor.element_size()
-            for pair in self._paged_buffers.values()
-            for tensor in pair
-        )
-        return total / 2**20
-
     def paged_stats(self) -> dict:
         """Code-produced memory/occupancy account for the paged arm (P-35).
 
@@ -1149,31 +1048,29 @@ class MiniLLMEngine:
         tokens, ``kv_alloc_mb`` the capacity of the blocks currently reserved; the three are
         different numbers and all are reported. ``frag_internal`` is the time-weighted C2
         metric; ``reservation_slack`` is the instantaneous upper-bound waste (reported, not
-        judged). ``workspace_mb`` is every gather/mask buffer the paged arm allocates on top
-        of KV (a cost the seat arm does not pay); in triton mode there is no gather and no
-        mask/bias pair, so it is zero. ``gather_ms`` / ``gather_read_mb`` /
-        ``gather_write_mb`` / ``gather_calls`` are the **last decode step's** gather
-        account: host time summed over the step's per-layer ``gather`` calls and the
-        shape-derived k+v traffic (plan §5 / appendix C). Traffic, not occupancy; the
-        triton path never gathers, so its traffic is exactly zero.
+        judged).
+
+        The Triton arm owns no gather workspace and no mask/bias pair, so ``workspace_mb``
+        is structurally 0.0 (kept because the D6 total-budget readers ask for it) and the
+        W4 ``lpad`` / ``gather_*`` fields are gone. ``decode_impl`` stays as constant
+        provenance: production paged decode is always the Triton kernel.
         """
         if self._paged_pool is None or self._blocks is None:
             raise RuntimeError("open_paged_pool() must be called before paged_stats()")
         block_size = self._paged_pool.block_size
         pool = self._paged_pool
-        triton = self._paged_decode_impl == "triton"
         per_token_bytes = 2 * pool.n_layer * pool.n_kv_head * pool.head_dim * pool.dtype.itemsize
         active = sorted(self._paged_state.items(), key=lambda item: item[1]["seat"])
         written_tokens = sum(state["length"] for _, state in active)
         in_use = self._blocks.in_use
         reserved_tokens = in_use * block_size
         stats = self._blocks.stats()
-        result = {
+        return {
             "kv_mb": pool.mb(),
             "kv_live_mb": written_tokens * per_token_bytes / 2**20,
             "kv_alloc_mb": reserved_tokens * per_token_bytes / 2**20,
-            "workspace_mb": 0.0 if triton else pool.workspace_mb() + self._paged_buffer_mb(),
-            "gather_workspace_mb": 0.0 if triton else pool.workspace_mb(),
+            # No gather workspace, no mask/bias pair: the kernel reads the pool directly.
+            "workspace_mb": 0.0,
             "active_rows": len(active),
             "blocks_in_use": in_use,
             "free_blocks": stats["free"],
@@ -1182,12 +1079,8 @@ class MiniLLMEngine:
             "reservation_slack": self._paged_frag.reservation_slack(
                 reserved_tokens, written_tokens
             ),
-            "lpad": self._paged_last_lpad,
-            "decode_impl": self._paged_decode_impl,
+            "decode_impl": "triton",
         }
-        # Appended, never replacing an existing key: the step row's gather account.
-        result.update(self._paged_gather_stats)
-        return result
 
     def close_pool(self) -> None:
         self._pool_slab = None
@@ -1196,8 +1089,6 @@ class MiniLLMEngine:
         self._paged_state = {}
         self._paged_cache = None
         self._paged_cache_key = None
-        self._paged_buffers = {}
-        self._paged_last_lpad = 0
         self._release_memory()
 
     def _release_memory(self) -> None:

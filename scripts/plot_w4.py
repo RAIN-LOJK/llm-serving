@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Generate the three W4 figures from the completed runs plus the allocator sweep.
 
+**Historical (W4)**: ``lpad`` / ``gather_ms`` / workspace are gather-era fields; the
+gather control arm was deleted in W4.5 step 2. This script reads the committed W4
+summaries, not the current production path.
+
 Inputs (never edited here):
 
 * ``results/W4/0002.../summary.json`` / ``0003...`` -- E1 seat and paged fill

@@ -144,7 +144,9 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     # still tolerated (as a no-op) so the historical W45 configs that recorded the
     # production mode keep validating; `prefill = "serial"` is the deleted control arm
     # and must fail loudly instead of silently running packed. `max_prefill_tokens` is
-    # the packing budget and stays; `decode="triton"` is a paged block-table kernel only.
+    # the packing budget and stays. `decode` has no production switch either: paged decode
+    # is always the Triton block-table kernel, `triton`/`auto` are historical no-ops, and
+    # `gather` (W4.5's control arm) is rejected with its deletion notice.
     if "prefill" in engine and engine.get("prefill") != "packed":
         errors.append(
             "[engine].prefill is no longer a switch: production W4.5 prefill is always "
@@ -167,14 +169,22 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             f"(got {max_prefill_tokens!r})"
         )
     decode = engine.get("decode", "auto")
-    if decode not in {"auto", "triton", "gather"}:
+    if decode == "gather":
         errors.append(
-            f"[engine].decode must be 'auto', 'triton', or 'gather' (got {decode!r})"
+            "[engine].decode='gather' was the W4.5 paged gather control arm; it was "
+            "deleted in step 2 (the numeric oracle now lives in tests/reference/paged.py). "
+            "Production paged decode is always the CUDA Triton block-table kernel: remove "
+            "the key (or keep 'triton' as a historical no-op)."
         )
-    if decode == "triton" and engine.get("impl") != "paged":
+    elif decode not in {"auto", "triton"}:
+        errors.append(
+            "[engine].decode must be 'auto' or 'triton' (legacy no-ops); 'gather' was "
+            f"deleted (got {decode!r})"
+        )
+    elif decode == "triton" and engine.get("impl") != "paged":
         errors.append(
             "[engine].decode='triton' requires [engine].impl='paged' "
-            "(only the block-table pool has a paged decode kernel)"
+            "(only the block-table pool had a paged decode kernel)"
         )
 
     workload = cfg.get("workload") or {}
@@ -676,6 +686,17 @@ def _scenario_execute(
                     metricsmod.reset_peak()
                     try:
                         result = engine.run_trace(trace, repeat=repeat)
+                        # Attention provenance is read before the run, when a paged engine
+                        # has not opened its pool yet; re-read it now so the manifest and
+                        # the summary's attn_decode describe the kernel that actually ran
+                        # (paged-triton after open, hand_baddbmm for the seat arm).
+                        attn_report = getattr(engine, "attn_backends", None)
+                        if callable(attn_report):
+                            manifest["engine"]["attn"] = dict(attn_report())
+                        if "decode" in (manifest.get("scheduler") or {}):
+                            manifest["scheduler"]["decode"] = str(
+                                getattr(engine, "decode_impl", "triton")
+                            )
                         # Read the peak *after* the trace, before the next reset: it is the
                         # repeat's whole-run maximum, the same quantity the per-request arm
                         # writes on each row (bench/thresholds.py::_memory_ratio).
@@ -706,13 +727,6 @@ def _scenario_execute(
                         metrics_file.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
                     metrics_file.flush()
                     rows.extend(request_rows + step_rows)
-                # W4.5: a paged engine may resolve ``decode="auto"`` when its pool opens,
-                # which is after the manifest was first written. Re-read the adapter now
-                # so the recorded kernel is the one that actually ran.
-                if "decode" in (manifest.get("scheduler") or {}):
-                    resolved = getattr(engine, "decode_impl", None)
-                    if resolved is not None:
-                        manifest["scheduler"]["decode"] = str(resolved)
             finally:
                 engine.close()
 
@@ -747,10 +761,10 @@ def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
                 "block_size": int(getattr(engine, "block_size", 0)),
                 "kv_blocks": int(getattr(engine, "kv_blocks", 0)),
                 "free_rows": "not_applicable",
-                # The resolved kernel, not the config's "auto":
-                # ``PagedEngine.decode_impl`` asks the loaded engine and falls back to
-                # "gather" when the engine predates the knob.
-                "decode": str(getattr(engine, "decode_impl", "gather")),
+                # Constant provenance: paged decode is always the Triton block-table
+                # kernel (the gather control arm was deleted). ``[engine].decode`` is a
+                # validated legacy no-op, never a switch.
+                "decode": str(getattr(engine, "decode_impl", "triton")),
             }
         )
     else:

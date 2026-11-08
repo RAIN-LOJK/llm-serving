@@ -396,8 +396,8 @@ class Scheduler:
         """Add the paged pool's account to a step row, when the engine reports one (W4).
 
         The seat path appends nothing: no existing field is renamed or dropped. On the
-        paged arm the row carries what the plan's §5 step row lists -- ``lpad``, block
-        counts, the two fragmentation numbers and the three memory figures.
+        paged arm the row carries the block counts, the two fragmentation numbers and the
+        memory figures; the Triton arm has no ``lpad`` or gather account.
         """
         stats = getattr(self.engine, "paged_stats", None)
         if not self._paged_mode() or not callable(stats):

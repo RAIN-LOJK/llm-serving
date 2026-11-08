@@ -1,10 +1,11 @@
 """W4.5 block-table decode: the Triton kernel against a hand-written dense oracle.
 
-The paged arm has two implementations on purpose. ``paged_decode`` is the production
-kernel (CUDA + Triton only); ``reference_paged_decode`` is the slow PyTorch oracle, and
-this file uses a *second*, even more explicit dense oracle for the oracle itself. The
-three-way split means a bug has to survive two independent formulations before it can
-pass, and the CPU-only tests run on hosts where Triton is not installable.
+The paged arm has one production implementation: ``paged_decode`` (CUDA + Triton only).
+The slow PyTorch oracle, ``reference_paged_decode``, lives in ``tests/reference/paged.py``
+(W4's gather control arm was deleted from production); this file also keeps a *second*,
+even more explicit dense oracle for the oracle itself. The three-way split means a bug has
+to survive two independent formulations before it can pass, and the oracle tests run on
+hosts where Triton is not installable.
 
 What is pinned here:
 
@@ -32,12 +33,8 @@ import math
 import pytest
 import torch
 
-from model.triton_decode import (
-    TRITON_AVAILABLE,
-    paged_decode,
-    paged_decode_plan,
-    reference_paged_decode,
-)
+from model.triton_decode import TRITON_AVAILABLE, paged_decode, paged_decode_plan
+from tests.reference.paged import reference_paged_decode
 
 CUDA_READY = TRITON_AVAILABLE and torch.cuda.is_available()
 CUDA = pytest.mark.skipif(not CUDA_READY, reason="needs Triton and CUDA")
@@ -245,6 +242,21 @@ def test_cache_dtype_must_match_q():
         reference_paged_decode(q, k, v, table, seqlen)
 
 
+@CUDA
+@GPU
+def test_reference_oracle_matches_triton_on_a_small_case():
+    """The tests/reference oracle is the ground truth for a tiny, hand-checkable case."""
+    q, k, v, table, seqlen = _build(
+        2, 4, 2, 64, 16, [5, 17], device="cuda", seed=101
+    )
+
+    got = paged_decode(q, k, v, table, seqlen)
+    expected = reference_paged_decode(q, k, v, table, seqlen)
+
+    assert got.shape == expected.shape == (2, 4, 64)
+    torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
+
+
 # ------------------------------------------------------------------- kernel: CUDA only
 
 
@@ -278,6 +290,30 @@ def test_paged_decode_matches_reference_on_cuda(B, H, Hkv, D, block_size, length
     assert diff < tolerance, f"max|delta| {diff} exceeded {tolerance}"
     if dtype == torch.bfloat16:
         assert torch.equal(got.argmax(dim=-1), expected.argmax(dim=-1))
+
+
+@CUDA
+@GPU
+def test_kernel_masks_stale_bytes_in_a_reused_block():
+    """A reused block still holds a previous request's bytes; only seqlen columns count."""
+    block_size, D, H, Hkv = 16, 64, 4, 2
+    gen = torch.Generator(device="cuda").manual_seed(107)
+    k = torch.empty(1, block_size, Hkv, D, device="cuda")
+    v = torch.empty_like(k)
+    k[:, :5] = torch.randn(5, Hkv, D, generator=gen, device="cuda")
+    v[:, :5] = torch.randn(5, Hkv, D, generator=gen, device="cuda")
+    k[:, 5:] = 7.0  # stale bytes from the previous occupant
+    v[:, 5:] = -3.0
+    q = torch.randn(2, H, D, generator=gen, device="cuda")
+    table = torch.zeros(2, 1, dtype=torch.int32, device="cuda")
+    seqlen = torch.tensor([5, 15], dtype=torch.int32, device="cuda")
+
+    got = paged_decode(q, k, v, table, seqlen)
+    expected = reference_paged_decode(q, k, v, table, seqlen)
+
+    # Row 1 has 15 live columns and must include the 15th byte; row 0 must not see 7.0.
+    torch.testing.assert_close(got, expected, rtol=0, atol=1e-4)
+    assert not torch.equal(got[0], got[1]), "rows with different seqlen decoded identically"
 
 
 @CUDA
@@ -507,9 +543,7 @@ def test_container_plan_tracks_in_place_seqlen_updates():
 
     torch.manual_seed(0)
     pool = PagedPool(1, 4, 16, 2, 32, dtype=torch.float32, device="cuda", n_head=4)
-    kv = PagedKV(
-        pool, [[0, 1, 2, 3]], [10], rope_len=64, n_head=4, decode_impl="triton"
-    )
+    kv = PagedKV(pool, [[0, 1, 2, 3]], [10], rope_len=64, n_head=4)
     q = torch.randn(1, 4, 1, 32, device="cuda")
 
     outputs = []

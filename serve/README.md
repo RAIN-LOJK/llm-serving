@@ -8,7 +8,7 @@
 
 | 模块 | 职责 | 阶段 |
 |---|---|---|
-| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `can_admit_group` / `prefill_into_blocks` / `release_request` / `paged_stats`）；W4.5 的 `prefill_group` 与 `decode=auto|triton|gather`。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 / W4.5 |
+| `engine.py` | forward、prefill/decode、采样；单请求 `generate()`；W3 的席位池（`open_pool` / `prefill_into_seat` / `freeze_seat` / `decode_batch`）；W4 的分页池（`open_paged_pool` / `can_admit` / `can_admit_group` / `prefill_into_blocks` / `release_request` / `paged_stats`）；W4.5 的 `prefill_group` 与恒为 CUDA Triton 的 paged decode（`[engine].decode` 只作历史校验）。`activate_seat` 与 `fill_from` 只留给 W2 单请求路径与等价性测试 | S2 / W2 / W3 / W4 / W4.5 |
 | `scheduler.py` | 请求状态机、准入/退出、static 与 continuous 两条策略的 step 主循环；W4.5 的 packed admission 与 `pack_wait/prefill_shared` 归因；准入前问引擎的可选 `can_admit_group`（整组拿不到块则队头留队列，不跳过）。**只有 packed group 一条 prefill 路径，serial 控制臂已删除** | W3 / W4 / W4.5 |
 | `block_manager.py` | 分页 KV 的块分配器：free list、原子预留、整张块表归还、`FragStats`（internal frag / reservation slack / seat row slack，时间加权） | W4 |
 | `state_pool.py` | 线性层状态池 + KV 块统一句柄与生命周期 | W7 |
@@ -34,9 +34,10 @@ W4 分页路径（`docs/decisions.md` D6）
   不做抢占、不做中途分配，所以准入失败只能发生在开头，不会死锁。
 - **decode 压缩到活跃行**：`PagedKV` 的 `batch` 是活跃请求数（不是 `max_batch`）；引擎把席号→批行映射
   留在自己手里，logits 散回 `(max_batch, vocab)`。`max_batch` 只是调度上限，不再是显存上限。
-- **gather 是稠密的**：每步按块表把活跃行搬成 `(n_active, H_kv, lpad, D)`，`lpad = bucket(本步最长活跃长度, 64)`；
-  不足列由**专用零块**填充、逻辑列 mask 关掉。然后仍是一层一次 `hand_baddbmm`（D4 不变）。
-  这是「把按最坏长度的预留从显存搬到带宽」的代价（P-32），`gather_read_mb` / `gather_write_mb` 单独记流量。
+- **gather 控制臂已删除（W4.5 收口后 step 2）**：W4 的 dense gather/lpad/零块/mask-bias
+  只作历史（见 D6/P-32…P-38）；纯稠密 oracle 在 `tests/reference/paged.py`，只被测试导入。
+  W4.5 的生产 paged decode 是 Triton block-table kernel，CPU/MPS 上 `open_paged_pool` /
+  `PagedKV` 直接报错，不回退 gather。
 - **两个池互斥**：`decode_batch(tokens, slab)` 在 `slab is None` 且 paged 池已开时走分页路径；
   `serve/scheduler.py` 用显式 `paged` 属性判定，不靠 `hasattr(engine, "slab")`（未开席位池时该属性会 raise）。
 - **两套名字不共用**：W3 席位退出用 `freeze_seat`（冻结游标、保留预留，P-26 原语义），
@@ -49,15 +50,15 @@ W4.5 注意力路径 v2（`docs/decisions.md` D7）
   CPU/MPS 逐段 SDPA）；无 pad、request-major、请求内 RoPE，只有每组 last token 过 `lm_head`。
   打包策略是 FIFO 填到 `max_prefill_tokens` 或 `max_batch`，不拆 prompt、不 chunk；超预算的
   队头单独成组（P-44）。
-- **paged decode**：`PagedKV(decode_impl="triton")` 直接读
-  `(n_blocks, bs, n_kv_head, head_dim)` + int32 block table + int32 seqlen；没有 gather /
-  `lpad` / 零块 / mask-bias。`PagedDecodePlan` 每容器做一次全量契约校验，之后每层只查 query
-  布局；新 token 走 `write_slots`（每步算一次 device slot map，`index_copy_` 写）。
+- **paged decode**：`PagedKV` 直接读 `(n_blocks, bs, n_kv_head, head_dim)` + int32 block
+  table + int32 seqlen；没有 gather / `lpad` / 零块 / mask-bias / `decode_impl` 开关。
+  `PagedDecodePlan` 每容器做一次全量契约校验，之后每层只查 query 布局；新 token 走
+  `write_slots`（每步算一次 device slot map，`index_copy_` 写）。
 - **seat decode** 仍是 `hand_baddbmm` + `KvSlab`；W4.5 的正式配置使用 packed + Triton。
-  **serial prefill 控制臂已删除**：`MiniLLMEngine` 不再有 `prefill` 模式，`Scheduler`
-  只调用 `prefill_group`，`prefill_into_seat` 仅作为引擎 API 留给直接调用/测试。
-  `decode="gather"` 暂留作 oracle，**不是生产回退**；生产 paged 在 CUDA 上必须走
-  Triton，`auto` 只按 device 解析，缺 Triton 时直接报错（D7）。
+  **serial prefill 与 gather decode 两个控制臂均已删除**：`MiniLLMEngine` 不再有
+  `prefill`/`decode` 模式，`Scheduler` 只调用 `prefill_group`，`prefill_into_seat` 仅作为
+  引擎 API 留给直接调用/测试。生产 paged 只有 CUDA Triton 一条路径；CPU/MPS 上 paged
+  直接报错，**没有 gather 回退**。纯稠密 oracle 在 `tests/reference/paged.py`（D7）。
 - **正式结果**：`W45-0001` golden **64/64**；E1 **9/28 = 3.111×**；E2 pre-fix `W45-0005`
   **1.203× fail** → post-fix `W45-0012` **1.040× pass（接受线，非 1.0 目标）**；
   E3 p99 **3.760×** / p50 **0.512×**；E4 `W45-0008/0009` **330.53 → 678.59 tok/s =

@@ -396,7 +396,7 @@
   | G2 | Triton decode 可用 | 单步 vs dense oracle：无 NaN，argmax 全等，bf16 `max\|Δ\| ≤2e-2`；B=8/L=1664 `step_ms` ≤1.15× seat | 不过则只做 packed prefill（W4.5a） |
   | E0 | 数值门 | `W45-0001` golden 64/64；packed vs serial token 全等 | 不过不跑性能 |
   | E1 | 容量不变 | 9/28、3.111×、`kv_total ≤1640` | 查 allocator，不改预算 |
-  | E2 | decode 代价 | `step_ms` paged/seat ≤1.15×（目标 ≤1.0×）；E2 同组 token 全等；gather 流量 0 | 调 kernel / 退回 W4.5a |
+  | E2 | decode 代价 | `step_ms` paged/seat ≤1.15×（目标 ≤1.0×）；E2 同组 token 全等；生产无 gather 路径（`lpad`/`gather_*` 字段已随控制臂删除） | 调 kernel / 退回 W4.5a |
   | E3 | packed prefill | TTFT p99 改善 ≥1.15×；p50 ≤1.10× | 查打包策略；不过则只做 decode |
   | E4 | 端到端 | 两臂 saturated；paged tok/s ≥ seat；`kv_total ≤1640`；无错误 | 查 kernel/prefill/峰值，不调参 |
 
@@ -408,13 +408,13 @@
   | **packing** | step 开始按 FIFO 取已到达请求，填到 `max_prefill_tokens`（默认 8192）或 `max_batch`；不等待填满、不跳队；队头单独放不下时自己成组；一个 prompt 不拆（无 chunk）；不与 decode 混一个 forward。 |
   | **KV 写入** | 每层 K/V 通过 per-request sink 写 seat 行（`SlabWriteSink`）或 paged 块（`PagedWriteSink` + 预计算 slot map）；两臂共用同一 varlen 计算，只差写入目标。 |
   | **logits / 首 token** | 每组只取每个请求的最后一个 token（`last_token_index`）过 `lm_head`；一次批量 greedy argmax；同组 `t_first` 同一时间戳。 |
-  | **decode 路径** | paged：Triton `paged_decode` 直接读 `(n_blocks, bs, H_kv, D)` 池 + int32 block table + int32 seqlen，无 gather/lpad/zero block/causal mask；seat：`hand_baddbmm` 不变。paged 在 CUDA 上不允许自动回退 gather。 |
+  | **decode 路径** | paged：Triton `paged_decode` 直接读 `(n_blocks, bs, H_kv, D)` 池 + int32 block table + int32 seqlen，无 gather/lpad/zero block/causal mask；seat：`hand_baddbmm` 不变。**paged 只有 CUDA Triton 一条生产路径**：W4 的 gather 控制臂已删除，CPU/MPS 上 paged 构造直接报错，不会回退 gather（用 seat 臂）。 |
   | **TTFT 归属** | `queue_ms = t_admitted − t_arrival`；`pack_wait_ms = t_prefill_start − t_admitted`；`prefill_shared_ms = t_first − t_prefill_start`。历史串行控制臂曾退化为 `ttft == queue + prefill`（该臂已删除，旧 run 仍按此口径解读）。step 的 `prefill_ms` 是**组耗时之和**，不是逐请求相加。 |
   | **step/request row** | 新增 `prefill_group`、`pack_wait_ms`、`prefill_shared_ms`、`prefill_groups`、`prefill_ids_per_group`；旧字段不改名。`host_gap_ms = step_ms − decode_event_ms − prefill_ms`。 |
   | **计时** | 沿用 D5：墙钟 `perf_counter`，单步 GPU `cuda_event`；报 p50/p95/p99/max，不报单一均值。 |
   | **C3 数值** | 精确 token 一致只在两种同组场景判：① `W45-0001` golden 64/64；② E2（closed、同 prompt 集、同 packed group 组成）8/8 first-repeat prompt hash、W4 口径 40/40 row。**E4 开放负载的 paged vs seat token 一致率只作诊断**：两臂 group 组成不同（B=9 vs B=64），且 Triton 与 hand 的 bf16 归约不同，near-tie 翻转不是接线错误；不设 0.999 门禁。 |
   | **单步 kernel 容差** | bf16：`max|Δ| ≤ 2e-2`、argmax 全等、无 NaN/Inf；fp32：`≤1e-4`。packed vs serial 的 logits 容差按 dry run 记为 `max|Δ| ≤ 1.0`（Qwen3 bf16 的 |logit|≈28），**不用于替代 token 门禁**。 |
-  | **控制臂** | `[engine].prefill="serial"`（逐请求串行 prefill）只存在于 W4.5 实验期，**已于 W4.5 收口后删除**（2026-11-06，未提交步骤 1）：生产调度器只有 packed group 一条路径，不再有 prefill 开关；历史 serial 配置不可运行，代码在 git 历史。`[engine].decode="gather"` 暂留作 oracle/对照，等下一步从生产分支移除；`auto` 按 device 解析（CUDA→triton，其他→gather），不按可用性回退。 |
+  | **控制臂** | `[engine].prefill="serial"`（逐请求串行 prefill）与 `[engine].decode="gather"`（稠密 gather decode）只存在于 W4.5 实验期，**均已于 W4.5 收口后删除**：serial 在步骤 1（2026-11-08，commit `a4d8443`），gather 在步骤 2（2026-11-08）。生产调度器只有 packed group 一条 prefill 路径；paged decode 只有 Triton block-table kernel。配置里的 `prefill="packed"` / `decode="triton"`（或 `auto`）只作历史 no-op；`serial` / `gather` 会被校验拒绝，历史配置不可运行，代码在 git 历史。gather 的数值 oracle 在 `tests/reference/paged.py`，只被测试导入。 |
   | **阈值** | `[W45.paged]` 于 2026-11-06 dry run 后冻结：`decode_step_ratio_max=1.15`（目标 1.0）、`packed_prefill_ttft_p99_speedup_min=1.15`、`p50_ratio_max=1.10`、`capacity_speedup_min=1.50`、`fragmentation_max=0.05`、`golden_token_match_min=1.0`、`paged_vs_seat_token_match_min=0.999`（**只用于 E2**）。`decode_step_ratio_max` 取两臂最大公共、prefill 占比 ≤10% 的 active bucket，不取全 bucket 中位数。 |
 
 - **后果**：
@@ -426,21 +426,30 @@
   3. **E4 的 token 一致率不是正确性门禁**：跨调度器/跨 kernel 的 greedy id 在 bf16
      near-tie 上会翻转；正确性由 E0 golden、E2 同组全等与单步 kernel 容差承担。报告必须
      同时给出一致率和首个翻转的 top-2 margin，不能只报一个百分比。
-  4. **`decode="gather"` 是 oracle**：paged 生产路径在 CUDA 上必须走 Triton；`auto` 只按
-     device 解析，不因 Triton 缺失而静默切 gather（缺失时构造/调用直接 `RuntimeError`）。
-  5. **控制臂的生命周期（serial 已删除，gather 待删）**：`[engine].prefill="serial"`
-     与 `decode="gather"` 只作 W4.5 控制臂/oracle；W4.5 的正式配置使用 packed + Triton，
-     `auto` 不会回退到 serial/gather。**serial 控制臂已在 W4.5 收口后删除**
-     （2026-11-06，未提交步骤 1）：`MiniLLMEngine` 不再接受/宣告 `prefill` 模式，
-     `[engine].prefill` 不再是开关（配置里写 `serial` 会被校验拒绝），
-     `Scheduler` 只走 `prefill_group`，`prefill_into_seat` 仍作为引擎 API 保留给
-     W2/W3/W4 的直接调用与测试。`W45-0002/0003/0006` 因此不可运行，配置保留作历史，
-     git 历史有旧代码。W3/W4 的配置从未写 `prefill`，用新 commit 复跑会从历史默认
-     serial 变成 packed（调度/归因与数值路径都变），其结果不能与历史 run 直接配对。
-     **gather 控制臂留到下一步**：确认不再需要历史复现后，再把
-     `PagedPool.gather`、`lpad`、`zero_block`、`mask-bias`、`gather_*` 记账移到
-     `tests/reference/` 并删除 `decode="gather"` 生产分支。`max_prefill_tokens` 保留。
-     删除前先 `grep` 确认没有生产引用，并跑完整快速门禁。
+  4. **paged decode 只有 Triton**：paged 生产路径在 CUDA 上必须走 Triton block-table
+     kernel；W4 的 gather 控制臂已删除，不再有 CPU/MPS paged 回退。CPU/MPS 上用 seat 臂
+     （`KvSlab` + `hand_baddbmm`）。Triton 缺失或张量不在 CUDA 时，构造/调用直接
+     `RuntimeError`/`ValueError`，不会静默切换实现。gather/`lpad`/`zero_block`/
+     `mask-bias` 的纯稠密实现只保留在 `tests/reference/paged.py` 作测试 oracle，
+     生产模块不再引用。
+  5. **控制臂的生命周期（serial 与 gather 均已删除）**：`[engine].prefill="serial"`
+     与 `decode="gather"` 只作 W4.5 控制臂/oracle；W4.5 的正式配置使用 packed + Triton。
+     **serial 控制臂已在 W4.5 收口后删除**（2026-11-08，步骤 1，commit `a4d8443`）：
+     `MiniLLMEngine` 不再接受/宣告 `prefill` 模式，`[engine].prefill` 不再是开关
+     （配置里写 `serial` 会被校验拒绝），`Scheduler` 只走 `prefill_group`，
+     `prefill_into_seat` 仍作为引擎 API 保留给 W2/W3/W4 的直接调用与测试。
+     `W45-0002/0003/0006` 因此不可运行，配置保留作历史，git 历史有旧代码。
+     **gather 控制臂已在步骤 2 删除**（2026-11-08，未提交）：`PagedPool.gather`、
+     gather workspace/`lpad`、`zero_block`、mask/bias pair、`gather_*` 记账，以及
+     `PagedKV.get`/`set_buffers`/`decode_impl`/`kernel_decode` 全部从生产移除；
+     paged decode 恒为 CUDA Triton block-table kernel，CPU/MPS 上
+     `open_paged_pool`/`PagedKV` 直接报错，不再 silent gather。纯稠密实现搬到
+     `tests/reference/paged.py`（`gather_pool`、`write_token_reference`、
+     `reference_paged_decode`），只被测试导入。`W45-0003` 因写 `decode="gather"` 不可
+     运行，保留作历史；写 `decode="triton"` 的 W45 配置仍通过校验（legacy no-op）。
+     W3/W4 的配置从未写 `prefill`，用新 commit 复跑会从历史默认 serial 变成 packed
+     （调度/归因与数值路径都变），其结果不能与历史 run 直接配对。
+     `max_prefill_tokens` 保留。
   6. **新坑（收口时编号，候选 P-40…P-45）**：
      - P-40 packed 的 TTFT 是共享时间，p50 可能变差、p99 可能变好；只报均值会掩盖；
      - P-41 FA2 的 256 page 约束只在 `block_table` 路径触发，varlen prefill 不受影响，

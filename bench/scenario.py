@@ -243,7 +243,9 @@ def _memory(
 
     * ``kv_mb`` -- the KV pool's reservation (``kv_pool_mb`` when the row carries the
       total-budget split, otherwise the W3 ``kv_mb``);
-    * ``workspace_mb`` -- the gather workspace, a paged-only cost; the seat arm has 0;
+    * ``workspace_mb`` -- decode-side workspace. The seat and W4.5 Triton-paged arms both
+      report 0 (the paged gather workspace was deleted with the control arm); historical
+      W4 summaries still carry the gather figure;
     * ``kv_total_mb`` -- ``kv_mb + workspace_mb``, the number capacity is judged against
       (P-36: never KV alone);
     * ``seat_unused_mb`` -- budget a seat arm cannot use because of row granularity;
@@ -271,9 +273,9 @@ def _memory(
     if workspace is None and pool is not None and not any(
         "blocks_in_use" in row for row in step_rows
     ):
-        # Structural, not inferred from data: a seat arm gathers nothing, so its gather
-        # workspace is exactly zero. A paged arm that failed to report one stays None
-        # (an unmeasured workspace must not read as "free").
+        # Structural, not inferred from data: the seat arm has no decode workspace, and
+        # the W4.5 Triton-paged arm reports its structural zero explicitly. A paged row
+        # that failed to report one stays None (never read as "free").
         workspace = 0.0
     total = last(trace_rows, "kv_total_mb")
     if total is None:

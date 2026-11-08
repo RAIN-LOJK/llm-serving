@@ -11,17 +11,18 @@ memory account:
 * ``kv_mb`` on the trace row is the **total budget** ``kv_mb + workspace_mb`` (P-36:
   charging KV alone re-creates the fake uniform-2048 "win"); the pool's own reservation
   is also recorded as ``kv_pool_mb``;
-* every step row carries the engine's ``paged_stats()`` ledger (``lpad``, block counts,
-  internal frag, reservation slack, live/alloc/workspace MiB);
+* every step row carries the engine's ``paged_stats()`` ledger (block counts, internal
+  frag, reservation slack, live/alloc/workspace MiB; the Triton arm has no gather
+  workspace, so ``workspace_mb`` is structurally zero);
 * the summary gains a ``capacity`` block so ``bench/scenario.py`` and
   ``bench/thresholds.py`` can answer C1/C2 without re-parsing rows.
 
 A fill run (``[exp].type = "fill"``) goes through
 :class:`bench.engines.fill.FillScheduler`: prefill + reserve, no decode. Its capacity is
-``max(step_row["active"])``, i.e. the allocator answer D6 asks for. Because a fill run
-never gathers, the gather workspace is not allocated; the adapter reports the Appendix-C
-estimate for it (``workspace_estimated=True`` in the trace/capacity provenance) rather
-than pretending a zero there is a measurement.
+``max(step_row["active"])``, i.e. the allocator answer D6 asks for. W4.5's Triton decode
+owns no gather workspace, so the paged arm reports ``workspace_mb = 0.0``: that is a real
+zero, not a missing estimate. W4's gather-era ``workspace_estimated`` provenance is gone
+with the control arm.
 
 Two backends, exactly like the continuous arm:
 
@@ -43,7 +44,7 @@ from bench.engines.continuous import (
     _trace_clock,
     _trace_row,
 )
-from bench.engines.fill import bucket_tokens, capacity_block
+from bench.engines.fill import capacity_block
 from bench.scenario import aggregate
 from serve.scheduler import Request, Scheduler
 
@@ -81,7 +82,6 @@ class PagedEngine(ContinuousEngine):
         kv_blocks: int = 1,
         fill: bool = False,
         max_prefill_tokens: int = 8192,
-        decode: str = "auto",
     ) -> None:
         super().__init__(
             name=name,
@@ -95,49 +95,25 @@ class PagedEngine(ContinuousEngine):
             seed=seed,
             fill=fill,
             max_prefill_tokens=max_prefill_tokens,
-            decode=decode,
         )
         self.block_size = int(block_size)
         self.kv_blocks = int(kv_blocks)
         # request_id -> blocks reserved at admission (all of them, D6's upper bound).
         self._reserved_blocks: dict[int, int] = {}
         self.kv_pool_mb: float | None = None
-        self.workspace_mb: float | None = None
         self._instrumented: tuple[Any, Any] = (None, None)
 
     # ------------------------------------------------------------------ interface
     @property
     def decode_impl(self) -> str:
-        """Resolved block-table decode kernel ("triton"/"gather"), not the config value.
+        """Paged decode kernel recorded in the manifest: always Triton.
 
-        ``decode="auto"`` is resolved by the loaded engine. The adapter asks the engine
-        for the kernel it actually selected (``decode_impl``/``_paged_decode_impl``); a
-        concrete requested value is recorded as-is, and an engine that predates the knob
-        falls back to ``"gather"`` rather than inventing a kernel name.
+        This is constant provenance, not a config switch. W4's gather control arm was
+        deleted; ``[engine].decode="triton"`` is tolerated only as a historical no-op and
+        ``"gather"`` is rejected by the runner.
         """
-        if self._decode != "auto":
-            return self._decode
-        engine = self._engine if self._engine is not None else self._delegate
-        candidates = (engine, self._delegate)
-        for candidate in candidates:
-            if candidate is None:
-                continue
-            for name in ("decode_impl", "decode_backend", "_paged_decode_impl", "_decode_impl"):
-                value = getattr(candidate, name, None)
-                if value and str(value) != "auto":
-                    return str(value)
-        # The decoder may only expose the public backend pair; ``paged-triton`` is the
-        # engine's name for the block-table kernel, ``hand_baddbmm``/``dummy`` are the
-        # gather path the adapter's ``decode_impl`` vocabulary calls "gather".
-        backend = getattr(engine, "attn_backends", None) if engine is not None else None
-        if callable(backend):
-            try:
-                decode = str((backend() or {}).get("decode") or "")
-            except Exception:  # noqa: BLE001 - provenance must not fail the run
-                decode = ""
-            if "triton" in decode:
-                return "triton"
-        return "gather"
+        return "triton"
+
     def load(self) -> None:
         if self.name == _DUMMY_NAME:
             self._engine = _DummyPagedEngine(
@@ -154,7 +130,6 @@ class PagedEngine(ContinuousEngine):
             device=self.device,
             model_path=self.model_path,
             max_prefill_tokens=self.max_prefill_tokens,
-            decode=self._decode,
         )
         self._delegate.load()
         self.device = self._delegate.device
@@ -178,16 +153,11 @@ class PagedEngine(ContinuousEngine):
         # D6: the pool is sized by the config's kv_blocks. The position bound is the
         # trace's worst prompt + budget (the RoPE table is a run bound, not
         # ``n_blocks * block_size`` -- P-34).
-        open_kwargs = {"max_position": int(need)}
-        if self._delegate is not None:
-            # The real decoder resolves ``auto`` (triton on CUDA, gather elsewhere).
-            # The stand-in keeps its historical signature.
-            open_kwargs["decode"] = self._decode
         engine.open_paged_pool(
             self.kv_blocks,
             self.block_size,
             self.max_batch,
-            **open_kwargs,
+            max_position=int(need),
         )
         self._instrument(engine)
         self.max_len = int(need)
@@ -220,22 +190,10 @@ class PagedEngine(ContinuousEngine):
 
         stats = self._engine_stats()
         kv_pool = float(stats.get("kv_mb") or 0.0)
-        if self.fill:
-            # No gather ran, so the pool's workspace is unallocated. Charge the D6
-            # budget with the Appendix-C estimate for the achieved occupancy instead of
-            # a zero that would make the paged arm look cheaper than it is.
-            measured = float(stats.get("workspace_mb") or 0.0)
-            workspace = measured if measured > 0.0 else self._workspace_estimate(
-                n_active=max((int(row.get("active") or 0) for row in scheduler.step_rows), default=0),
-                lpad=bucket_tokens(need),
-                max_batch=self.max_batch,
-            )
-            workspace_estimated = measured <= 0.0
-        else:
-            workspace = float(stats.get("workspace_mb") or 0.0)
-            workspace_estimated = False
+        # Triton paged decode owns no gather workspace: this is a measured structural
+        # zero (the engine reports it), not a W4 Appendix-C estimate.
+        workspace = float(stats.get("workspace_mb") or 0.0)
         self.kv_pool_mb = kv_pool
-        self.workspace_mb = workspace
         self.pool_kv_mb = kv_pool
 
         t_arrival = min((r.t_arrival for r in requests), default=0.0)
@@ -288,7 +246,6 @@ class PagedEngine(ContinuousEngine):
                 "kv_total_mb": total,
                 "block_size": self.block_size,
                 "kv_blocks": self.kv_blocks,
-                "workspace_estimated": workspace_estimated,
                 "fill_only": bool(self.fill),
             }
         )
@@ -321,7 +278,6 @@ class PagedEngine(ContinuousEngine):
             reservation_slack=_last_stat(step_rows, "reservation_slack"),
             seat_unused_mb=None,
             workload_sha256=trace.sha256,
-            workspace_estimated=workspace_estimated,
         )
         return TraceResult(
             request_rows=request_rows,
@@ -384,7 +340,7 @@ class PagedEngine(ContinuousEngine):
         return dict(stats() or {})
 
     def _kv_shape(self) -> dict[str, int]:
-        """KV shape for the workspace estimate (dummy defaults, real model otherwise)."""
+        """KV shape for the per-token byte account (dummy defaults, real model otherwise)."""
         engine = self._engine
         if engine is not None and engine.__class__.__name__ != "_DummyPagedEngine":
             model = getattr(engine, "model", None)
@@ -418,21 +374,6 @@ class PagedEngine(ContinuousEngine):
             n_layer = 0
         shape = self._kv_shape()
         return 2 * max(n_layer, 0) * shape["n_kv_head"] * shape["head_dim"] * shape["dtype_bytes"]
-
-    def _workspace_estimate(self, *, n_active: int, lpad: int, max_batch: int) -> float:
-        """Appendix-C workspace (MiB) for a step that *would* gather.
-
-        K+V = ``n_active * lpad * per-token-per-layer bytes``; bias =
-        ``n_active * n_head * lpad * itemsize``; logits = ``max_batch * vocab * itemsize``.
-        One layer wide, reused layer by layer (``scripts/sim_paged_capacity.py``).
-        """
-        shape = self._kv_shape()
-        n_active = max(int(n_active), 0)
-        lpad = max(int(lpad), 0)
-        gather = n_active * lpad * 2 * shape["n_kv_head"] * shape["head_dim"] * shape["dtype_bytes"]
-        bias = n_active * shape["n_head"] * lpad * shape["dtype_bytes"]
-        logits = int(max_batch) * int(self.vocab_size) * shape["dtype_bytes"]
-        return (gather + bias + logits) / 2**20
 
 
 # --------------------------------------------------------------------------- rows
@@ -515,7 +456,6 @@ class _DummyPagedEngine:
         self._max_position: int | None = None
         self._state: dict[int, dict] = {}
         self._tokens: dict[int, list[int]] = {}
-        self._lpad = 0
 
     # ---------------------------------------------------------------- pool
     def open_paged_pool(self, kv_blocks, block_size, max_batch, max_position=None):
@@ -528,7 +468,6 @@ class _DummyPagedEngine:
         self._max_position = int(self.max_position if max_position is None else max_position)
         self._state = {}
         self._tokens = {}
-        self._lpad = 0
         return self._manager
 
     @property
@@ -633,8 +572,6 @@ class _DummyPagedEngine:
         out = []
         active = sorted(self._state.items(), key=lambda item: item[1]["seat"])
         by_seat = {state["seat"]: (request_id, state) for request_id, state in active}
-        lengths = [state["length"] for _, state in active]
-        self._lpad = bucket_tokens(max(lengths) + 1) if lengths else 0
         for seat, token in enumerate(tokens):
             entry = by_seat.get(seat)
             if entry is None:
@@ -665,13 +602,6 @@ class _DummyPagedEngine:
             else 0.0
         )
         reserved_tokens = in_use * self.block_size
-        # Appendix C traffic for the rows that were active this step: per layer
-        # ``n_active * lpad * n_kv_head * head_dim * itemsize`` read and the same written,
-        # summed over layers (k+v per token per layer). A fill step has no decode, so the
-        # rows it just admitted have not gathered and the number is 0.
-        gather_read_mb = (
-            len(self._state) * int(self._lpad) * per_token / 2**20 if per_token else 0.0
-        )
         return {
             "kv_mb": pool_mb,
             "kv_live_mb": written_tokens * per_token / 2**20,
@@ -684,16 +614,10 @@ class _DummyPagedEngine:
             "reservation_slack": (
                 1.0 - written_tokens / reserved_tokens if reserved_tokens else None
             ),
-            "lpad": self._lpad,
-            # Appended for the plan §5 step-row contract (the key set must match the real
-            # arm even on the dummy). Traffic is shape-derived exactly as appendix C: per
-            # layer ``n_active * lpad * per-token-per-layer bytes`` read and written, times
-            # ``n_layer`` layers. ``gather_ms`` is 0.0 because the stand-in has no tensors
-            # and never gathers -- it is not a measured host time.
-            "gather_ms": 0.0,
-            "gather_read_mb": gather_read_mb,
-            "gather_write_mb": gather_read_mb,
-            "gather_calls": int(self.n_layer if self._lpad else 0),
+            # The stand-in has the same key set as the real paged arm: no gather
+            # workspace, and constant Triton provenance.
+            "workspace_mb": 0.0,
+            "decode_impl": "triton",
         }
 
     # ---------------------------------------------------------------- rows

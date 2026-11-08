@@ -1,11 +1,14 @@
 """W4.5 block-table decode: one Triton kernel reading the paged KV pool directly.
 
-W4's paged arm materialized a dense ``(B, H_kv, lpad, D)`` copy of the pool through
-``PagedPool.gather`` and then ran ``hand_baddbmm`` on it. The copy is the cost: it reads
-every live KV byte, writes it again, and pays an ``lpad`` bucket that is wider than any
-request in the batch. ``decode`` has exactly one query token, so the gather buys nothing:
-the attention math can read K/V page by page from the physical pool and never materialize
-a dense sequence. This module is that path.
+W4's paged arm materialized a dense ``(B, H_kv, lpad, D)`` copy of the pool through a
+gather and then ran ``hand_baddbmm`` on it. The copy is the cost: it reads every live KV
+byte, writes it again, and pays an ``lpad`` bucket that is wider than any request in the
+batch. ``decode`` has exactly one query token, so the gather buys nothing: the attention
+math can read K/V page by page from the physical pool and never materialize a dense
+sequence. This module is that path, and it is the only production paged decode.
+
+W4's gather control arm was deleted in W4.5 step 2 (docs/decisions.md D7). Its dense
+oracle now lives in ``tests/reference/paged.py``; production keeps only the kernel.
 
 Contract
 --------
@@ -46,9 +49,9 @@ default until an integration measurement asks for the switch.
 Availability
 ------------
 Triton and CUDA are hard requirements for :func:`paged_decode`. It raises ``RuntimeError``
-when either is missing or when a tensor is not on CUDA; it never falls back to
-:func:`reference_paged_decode`. That function is the numeric oracle (pure PyTorch, CPU or
-CUDA) and the only implementation used by tests as ground truth.
+when either is missing or when a tensor is not on CUDA; it never falls back to a dense
+implementation. The numeric oracle (pure PyTorch, CPU or CUDA) lives in
+``tests/reference/paged.py`` and is the only implementation used by tests as ground truth.
 
 Integration caveat
 ------------------
@@ -79,7 +82,7 @@ except ImportError:  # pragma: no cover - exercised by the CPU-only test gate
     tl = None  # type: ignore[assignment]
     TRITON_AVAILABLE = False
 
-__all__ = ["TRITON_AVAILABLE", "paged_decode", "paged_decode_plan", "reference_paged_decode"]
+__all__ = ["TRITON_AVAILABLE", "paged_decode", "paged_decode_plan"]
 
 #: ``log2(e)``; folding it into the score scale lets the softmax use ``tl.exp2``.
 _LOG2E = 1.4426950408889634
@@ -94,13 +97,13 @@ def _require_backend() -> None:
     if not TRITON_AVAILABLE:
         raise RuntimeError(
             "paged_decode requires Triton, but Triton could not be imported; the paged "
-            "decode arm has no eager fallback. Use reference_paged_decode only as a test "
-            "oracle."
+            "decode arm has no eager fallback. The dense oracle lives in "
+            "tests/reference/paged.py."
         )
     if not torch.cuda.is_available():
         raise RuntimeError(
             "paged_decode requires CUDA, but torch.cuda is unavailable; the paged decode "
-            "arm has no CPU fallback. Use reference_paged_decode only as a test oracle."
+            "arm has no CPU fallback. The dense oracle lives in tests/reference/paged.py."
         )
 
 
@@ -110,7 +113,7 @@ def _require_cuda_tensors(tensors: tuple[tuple[str, torch.Tensor], ...]) -> None
         if not tensor.is_cuda:
             raise RuntimeError(
                 f"paged_decode requires CUDA tensors, got {name} on device {tensor.device}; "
-                "there is no silent fallback to reference_paged_decode."
+                "there is no silent fallback to a dense implementation."
             )
 
 
@@ -120,10 +123,8 @@ def _validate(
     v_cache: torch.Tensor,
     block_table: torch.Tensor,
     seqlen: torch.Tensor,
-    *,
-    for_kernel: bool,
 ) -> None:
-    """Validate the layout contract shared by the kernel and its oracle.
+    """Validate the kernel's layout contract.
 
     Structural errors (shape, dtype, device) are ``ValueError``; only "no Triton/CUDA"
     is a ``RuntimeError``. The distinction matters because a wrong block table is a caller
@@ -173,12 +174,7 @@ def _validate(
     B_bt, max_blocks = block_table.shape
     if B_bt != B:
         raise ValueError(f"block_table batch {B_bt} does not match q batch {B}")
-    if block_table.dtype not in (torch.int32, torch.int64):
-        raise ValueError(
-            f"block_table must be int32 (the kernel contract) or int64, got "
-            f"{block_table.dtype}"
-        )
-    if for_kernel and block_table.dtype != torch.int32:
+    if block_table.dtype != torch.int32:
         raise ValueError(
             "paged_decode requires an int32 block_table (the kernel's indexing contract); "
             f"got {block_table.dtype}. Cast at the allocator boundary, not per step."
@@ -275,7 +271,7 @@ def paged_decode(
             ("seqlen", seqlen),
         )
     )
-    _validate(q, k_cache, v_cache, block_table, seqlen, for_kernel=True)
+    _validate(q, k_cache, v_cache, block_table, seqlen)
 
     B, H, D = q.shape
     block_size = k_cache.shape[1]
@@ -440,7 +436,7 @@ class PagedDecodePlan:
                     (f"v_cache[{layer}]", v_cache),
                 )
             )
-            _validate(q, k_cache, v_cache, block_table, seqlen, for_kernel=True)
+            _validate(q, k_cache, v_cache, block_table, seqlen)
             if tuple(k_cache.shape) != tuple(k_caches[0].shape) or tuple(
                 v_cache.shape
             ) != tuple(v_caches[0].shape):
@@ -541,57 +537,6 @@ def paged_decode_plan(
     """
     return PagedDecodePlan(q, k_caches, v_caches, block_table, seqlen, scale=scale)
 
-
-def reference_paged_decode(
-    q: torch.Tensor,
-    k_cache: torch.Tensor,
-    v_cache: torch.Tensor,
-    block_table: torch.Tensor,
-    seqlen: torch.Tensor,
-    *,
-    scale: float | None = None,
-) -> torch.Tensor:
-    """Dense PyTorch oracle for :func:`paged_decode`; CPU or CUDA, never in production.
-
-    The implementation is deliberately the slow, obvious one: for each row it gathers the
-    row's logical K/V with explicit tensor indexing, computes one ``(H_kv, G, n)`` score
-    block in fp32, softmaxes it and multiplies by V. Duplicated or non-contiguous block
-    ids therefore behave exactly like the kernel's page loop; a zero-length row is zeroed
-    explicitly rather than asking ``softmax`` to normalize an empty page.
-    """
-    _validate(q, k_cache, v_cache, block_table, seqlen, for_kernel=False)
-    B, H, D = q.shape
-    block_size = k_cache.shape[1]
-    H_kv = k_cache.shape[2]
-    G = H // H_kv
-    if scale is None:
-        scale = 1.0 / math.sqrt(D)
-    scale = float(scale)
-
-    out = torch.empty(q.shape, dtype=q.dtype, device=q.device)
-    if B == 0:
-        return out
-    table = block_table.to(torch.long)
-    lengths = seqlen.tolist()  # oracle only: one host read is fine here
-    qf = q.to(torch.float32).reshape(B, H_kv, G, D)
-
-    for b in range(B):
-        n = int(lengths[b])
-        if n <= 0:
-            out[b].zero_()
-            continue
-        pages = (n + block_size - 1) // block_size
-        ids = table[b, :pages]
-        # (pages, block_size, H_kv, D) -> (n, H_kv, D); the slice drops the masked tail.
-        k = k_cache.index_select(0, ids).reshape(pages * block_size, H_kv, D)[:n]
-        v = v_cache.index_select(0, ids).reshape(pages * block_size, H_kv, D)[:n]
-        kf = k.to(torch.float32).permute(1, 0, 2)  # (H_kv, n, D)
-        vf = v.to(torch.float32).permute(1, 0, 2)
-        scores = torch.einsum("hgd,hnd->hgn", qf[b], kf) * scale
-        probs = torch.softmax(scores, dim=-1)
-        context = torch.einsum("hgn,hnd->hgd", probs, vf)
-        out[b] = context.reshape(H, D).to(q.dtype)
-    return out
 
 
 if TRITON_AVAILABLE:

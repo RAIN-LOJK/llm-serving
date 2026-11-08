@@ -148,8 +148,8 @@ class FillScheduler(Scheduler):
             "host_gap_ms": step_ms - prefill_ms,
             "fill_only": True,
         }
-        # Paged engines append ``lpad`` / block counts / frag / memory to the row. The
-        # snapshot above is the resident-set account; the base hook would now report the
+        # Paged engines append block counts / frag / memory to the row. The snapshot
+        # above is the resident-set account; the base hook would now report the
         # post-release (empty) pool, which is not what a capacity probe wants.
         if stats is not None:
             row.update(stats)
@@ -185,19 +185,15 @@ def capacity_block(
     reservation_slack: float | None = None,
     seat_unused_mb: float | None = None,
     workload_sha256: str | None = None,
-    workspace_estimated: bool = False,
 ) -> dict[str, Any]:
     """The ``summary.capacity`` block consumed by the W4 C1/C2 evaluators.
 
     ``peak_concurrency`` is the allocator capacity on a fill run (max simultaneous
     admissions) and the dynamic peak on a scenario run; the two are never mixed in
     one block (D6). ``capacity_per_gib`` divides that count by the *total* budget
-    ``kv_mb + workspace_mb``, never by KV alone (P-36).
-
-    ``workspace_estimated`` is provenance, not a judgement: a fill run never gathers,
-    so the gather workspace is not allocated and cannot be measured. When the paged
-    adapter fills it in from the Appendix-C formula instead, it says so here rather
-    than presenting an estimate as a measurement.
+    ``kv_mb + workspace_mb``, never by KV alone (P-36). W4.5's paged Triton arm has no
+    gather workspace, so it reports ``workspace_mb = 0.0``; the W4 ``workspace_estimated``
+    provenance is gone with the gather control arm (historical summaries keep the key).
     """
     total = None if kv_total_mb is None else float(kv_total_mb)
     per_gib = (
@@ -218,7 +214,6 @@ def capacity_block(
         "seat_unused_mb": seat_unused_mb,
         "capacity_per_gib": per_gib,
         "workload_sha256": workload_sha256,
-        "workspace_estimated": bool(workspace_estimated),
     }
 
 

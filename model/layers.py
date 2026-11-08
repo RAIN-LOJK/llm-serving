@@ -193,10 +193,12 @@ class Attention(nn.Module):
                     "and hands over with KvSlab.fill_from()"
                 )
             decode.write(idx, k.permute(0, 2, 1, 3), v.permute(0, 2, 1, 3))
-            if getattr(decode, "kernel_decode", False):
-                # W4.5: the paged container owns a block-table kernel that reads the
-                # pool directly. There is no dense gather and no bias to pass; the
-                # container applies each row's seqlen itself.
+            if getattr(decode, "block_table_decode", False):
+                # W4.5 (D7): the paged container owns the Triton block-table kernel. It
+                # reads the pool directly, masks each row by its int32 seqlen and has no
+                # dense gather or additive bias to pass; the flag is a constant protocol
+                # marker, not a decode switch. The seat container keeps the get+bias path
+                # below.
                 y = decode.attend(
                     idx,
                     q.transpose(1, 2),
@@ -204,9 +206,10 @@ class Attention(nn.Module):
                 )
                 return self.resid_dropout(self.o_proj(y.transpose(1, 2).reshape(B, T, self.n_head * self.head_dim)))
             k_all, v_all = decode.get(idx)
-            # The mask is identical for every layer, so the container already turned it into
-            # the additive bias once at the step boundary (``build_mask``). Passing ``bias=``
-            # avoids rebuilding the same (B*H_kv, G, L) tensor 28 times per step.
+            # The seat mask is identical for every layer, so the container already turned
+            # it into the additive bias once at the step boundary (``build_mask``).
+            # Passing ``bias=`` avoids rebuilding the same (B*H_kv, G, L) tensor 28 times
+            # per step.
             y = self.backend_decode.decode(
                 q.transpose(1, 2),
                 k_all,

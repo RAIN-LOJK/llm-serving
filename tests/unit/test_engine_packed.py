@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from model import MiniLLM, MiniLLMConfig
+from model.triton_decode import TRITON_AVAILABLE
 from serve.engine import MiniLLMEngine
 
 N_LAYER = 2
@@ -19,6 +20,10 @@ N_KV_HEAD = 2
 HEAD_DIM = 8
 N_HEAD = 4
 BS = 16
+CUDA_READY = TRITON_AVAILABLE and torch.cuda.is_available()
+needs_cuda = pytest.mark.skipif(
+    not CUDA_READY, reason="paged decode is the CUDA Triton block-table kernel"
+)
 PROMPTS = [
     [3, 5, 7, 11, 13],
     [3, 5, 7, 11, 13, 17, 19, 23, 29],
@@ -39,10 +44,17 @@ def _config() -> MiniLLMConfig:
     )
 
 
-def _engine(*, decode: str = "auto") -> MiniLLMEngine:
+def _engine() -> MiniLLMEngine:
     torch.manual_seed(0)
     model = MiniLLM(_config()).eval()
-    return MiniLLMEngine(model, max_prefill_tokens=64, decode=decode)
+    return MiniLLMEngine(model, max_prefill_tokens=64)
+
+
+def _cuda_engine() -> MiniLLMEngine:
+    """The paged arm's decode kernel is CUDA-only, so its engine lives on CUDA too."""
+    torch.manual_seed(0)
+    model = MiniLLM(_config()).to("cuda", dtype=torch.bfloat16).eval()
+    return MiniLLMEngine(model, max_prefill_tokens=64)
 
 
 def _group_specs(prompts) -> list[dict]:
@@ -81,25 +93,30 @@ def test_seat_packed_group_decodes_like_per_sequence():
 
 
 # ------------------------------------------------------------------ paged arm
+@needs_cuda
 def test_paged_packed_group_writes_every_block_and_matches_prefill():
-    engine = _engine(decode="gather")
-    engine.open_paged_pool(32, BS, 4, max_position=128, decode="gather")
+    engine = _cuda_engine()
+    engine.open_paged_pool(32, BS, 4, max_position=128)
     reference = torch.cat([engine.prefill_one(prompt)[0] for prompt in PROMPTS])
 
     logits = engine.prefill_group(_group_specs(PROMPTS))
-    torch.testing.assert_close(logits, reference, atol=1e-5, rtol=1e-5)
-    # The gather workspace is allocated by the first decode, not by prefill.
+    torch.testing.assert_close(logits, reference, atol=2e-2, rtol=2e-2)
+    assert [int(row.argmax()) for row in logits] == [
+        int(row.argmax()) for row in reference
+    ]
+    # Decode then uses the Triton kernel; there is no gather workspace to allocate.
     engine.decode_batch([int(row.argmax()) for row in logits] + [0])
     stats = engine.paged_stats()
     assert stats["active_rows"] == len(PROMPTS)
-    assert stats["decode_impl"] == "gather"
-    assert stats["workspace_mb"] > 0.0
-    assert stats["gather_calls"] > 0
+    assert stats["decode_impl"] == "triton"
+    assert stats["workspace_mb"] == 0.0
+    assert "gather_calls" not in stats and "lpad" not in stats
 
 
+@needs_cuda
 def test_paged_group_failure_returns_every_reservation():
-    engine = _engine(decode="gather")
-    engine.open_paged_pool(32, BS, 4, max_position=128, decode="gather")
+    engine = _cuda_engine()
+    engine.open_paged_pool(32, BS, 4, max_position=128)
     before = engine.block_manager.stats()["free"]
 
     class Boom(Exception):
@@ -121,9 +138,10 @@ def test_paged_group_failure_returns_every_reservation():
     assert engine.paged_stats()["active_rows"] == 0
 
 
+@needs_cuda
 def test_paged_group_rejects_two_requests_on_one_seat():
-    engine = _engine(decode="gather")
-    engine.open_paged_pool(32, BS, 4, max_position=128, decode="gather")
+    engine = _cuda_engine()
+    engine.open_paged_pool(32, BS, 4, max_position=128)
     specs = _group_specs(PROMPTS[:2])
     specs[1]["seat"] = specs[0]["seat"]
     with pytest.raises(ValueError, match="share seat"):
@@ -143,12 +161,22 @@ def test_packed_group_rejects_an_over_budget_group():
 
 
 # ------------------------------------------------------------------ CUDA triton
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="paged triton decode needs CUDA")
+@needs_cuda
+def test_paged_engine_rejects_cpu_with_a_clear_error():
+    """The gather arm was the CPU/MPS paged path; it must fail loudly, never fall back."""
+    engine = _engine()  # CPU
+    with pytest.raises(ValueError, match="CUDA") as excinfo:
+        engine.open_paged_pool(32, BS, 4, max_position=128)
+    message = str(excinfo.value)
+    assert "gather control arm was deleted" in message
+    assert "tests/reference/paged.py" in message
+    assert "impl='continuous'" in message
+
+
+@needs_cuda
 def test_paged_triton_packed_group_decodes_like_per_sequence():
-    torch.manual_seed(0)
-    model = MiniLLM(_config()).to("cuda", dtype=torch.bfloat16).eval()
-    engine = MiniLLMEngine(model, max_prefill_tokens=64, decode="triton")
-    engine.open_paged_pool(32, BS, 4, max_position=128, decode="triton")
+    engine = _cuda_engine()
+    engine.open_paged_pool(32, BS, 4, max_position=128)
     refs = [engine.prefill_one(prompt) for prompt in PROMPTS]
 
     logits = engine.prefill_group(_group_specs(PROMPTS))
@@ -171,5 +199,5 @@ def test_paged_triton_packed_group_decodes_like_per_sequence():
     stats = engine.paged_stats()
     assert stats["decode_impl"] == "triton"
     assert stats["workspace_mb"] == 0.0
-    assert stats["gather_calls"] == 0
-    assert stats["gather_read_mb"] == 0.0
+    assert "gather_calls" not in stats and "gather_read_mb" not in stats
+    assert "lpad" not in stats

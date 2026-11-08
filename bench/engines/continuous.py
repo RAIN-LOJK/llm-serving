@@ -67,7 +67,6 @@ class ContinuousEngine:
         seed: int = 0,
         fill: bool = False,
         max_prefill_tokens: int = 8192,
-        decode: str = "auto",
     ) -> None:
         self.name = name
         self.revision = revision
@@ -81,11 +80,10 @@ class ContinuousEngine:
         self.fill = bool(fill)
         # W4.5 (D7): production prefill is always the packed FIFO group; there is no
         # serial control arm any more. ``max_prefill_tokens`` is the per-step packing
-        # budget `serve/scheduler.py` reads from the engine. ``decode`` is recorded the
-        # same way; a seat arm resolves to ``gather`` because it has no block-table
-        # kernel.
+        # budget `serve/scheduler.py` reads from the engine. There is no decode switch
+        # either: the seat arm always uses hand_baddbmm, the paged arm always Triton (the
+        # gather control arm was deleted).
         self._max_prefill_tokens = int(max_prefill_tokens)
-        self._decode = str(decode or "auto")
         self.model_path = model_path
         self._vocab = int(vocab_size)
         self._seed = int(seed)
@@ -112,8 +110,8 @@ class ContinuousEngine:
 
     @property
     def decode_impl(self) -> str:
-        """Resolved decode kernel. The seat arm has no block table, so it gathers."""
-        return "gather"
+        """Decode backend of the seat arm: no block table, so ``hand_baddbmm`` over KvSlab."""
+        return "hand_baddbmm"
 
     @property
     def weights_mb(self) -> float:
@@ -134,7 +132,6 @@ class ContinuousEngine:
             device=self.device,
             model_path=self.model_path,
             max_prefill_tokens=self.max_prefill_tokens,
-            decode=self._decode,
         )
         self._delegate.load()
         self.device = self._delegate.device

@@ -5,6 +5,11 @@ This is the A · capacity half of ``docs/decisions.md`` D6. It runs **no model, 
 weights, no arrivals and no Poisson trace**: given a total budget (KV + workspace,
 D6), a request-length distribution and a block size, it asks two questions.
 
+**Historical (W4)**: this models the gather-era paged arm, whose workspace was
+deleted in W4.5 step 2. It is kept to reproduce the committed W4 capacity numbers;
+production paged decode is Triton-only (no gather workspace). The dense oracle is
+``tests/reference/paged.py``.
+
 * **seat** -- one ``KvSlab`` of ``max_batch`` rows, every row reserved at the width
   ``bucket(max(prompt + budget + 1), 64)`` of the whole trace (one row per request,
   the D6 seat unit). Capacity is how many rows the budget can hold.

@@ -65,14 +65,17 @@ __all__ = ["KvSlab", "as_decode_container", "DECODE_CONTAINER_FLAG"]
 #: growing-cache path instead of being silently treated as a slab.
 DECODE_CONTAINER_FLAG = "decode_container"
 
-_DECODE_HOOKS = ("build_mask", "write", "get", "advance", "pos", "bias", "batch", "max_len")
+#: Hooks every decode container shares. ``get``/``bias`` are seat-only: the paged
+#: container owns the Triton block-table kernel (``block_table_decode = True``) and has no
+#: dense gather or additive bias, so requiring them here would reject the production path.
+_DECODE_HOOKS = ("build_mask", "write", "advance", "pos", "batch", "max_len")
 
 
 def as_decode_container(past):
     """Return ``past`` if it is a decode container (the slab protocol), else ``None``.
 
     The flag is checked first, so a ``KVcache`` -- or any object without it -- never takes
-    this path. An object that claims the flag but is missing a hook (``bias``, ``pos``, ...)
+    this path. An object that claims the flag but is missing a hook (``pos``, ``write``, ...)
     raises instead of failing somewhere inside the layer loop: an incomplete container is a
     caller bug, not a reason to fall back.
     """

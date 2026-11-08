@@ -83,7 +83,9 @@ def test_fill_run_stops_after_admission_and_reports_capacity():
     capacity = result.summary["capacity"]
     assert capacity["peak_concurrency"] == max(row["active"] for row in result.step_rows)
     assert capacity["block_size"] == 16 and capacity["kv_blocks"] == 8
-    assert capacity["kv_total_mb"] > capacity["kv_mb"]  # workspace is paid out of budget
+    # Triton paged decode has no gather workspace: the total budget is the pool itself.
+    assert capacity["workspace_mb"] == 0.0
+    assert capacity["kv_total_mb"] == capacity["kv_mb"]
     assert capacity["workload_sha256"] == trace.sha256
 
 
@@ -224,6 +226,48 @@ criteria = []
 """
 
 
+def test_decode_gather_control_arm_is_rejected(tmp_path: Path):
+    """(a) W4.5 step 2 deleted the gather arm; a config asking for it must fail loudly."""
+    text = PAGED_FILL.replace(
+        "seed = 0\n\n[measure]", 'seed = 0\ndecode = "gather"\n\n[measure]'
+    )
+    config = tmp_path / "decode-gather.toml"
+    config.write_text(text, encoding="utf-8")
+
+    errors = validate_config(load_config(config))
+    assert errors, "decode='gather' must be rejected"
+    joined = " ".join(errors)
+    assert "deleted" in joined and "gather" in joined
+    assert "tests/reference/paged.py" in joined
+
+
+def test_decode_triton_is_a_legacy_noop(tmp_path: Path):
+    """(b) Historical packed W45 configs wrote decode='triton'; it still validates."""
+    text = PAGED_FILL.replace(
+        "seed = 0\n\n[measure]", 'seed = 0\ndecode = "triton"\n\n[measure]'
+    )
+    config = tmp_path / "decode-triton.toml"
+    config.write_text(text, encoding="utf-8")
+
+    assert validate_config(load_config(config)) == []
+
+
+def test_decode_triton_requires_the_paged_arm(tmp_path: Path):
+    """'triton' only names the block-table pool; other arms reject the legacy key."""
+    text = (
+        PAGED_FILL.replace('impl = "paged"', 'impl = "continuous"')
+        .replace("block_size = 16\nkv_blocks = 8\n", "")
+        .replace('[scheduler]\npolicy = "continuous"\n\n', "")
+        .replace("seed = 0\n\n[measure]", 'seed = 0\ndecode = "triton"\n\n[measure]')
+        .replace("W4-9002", "W4-9005")
+    )
+    config = tmp_path / "decode-continuous.toml"
+    config.write_text(text, encoding="utf-8")
+
+    errors = validate_config(load_config(config))
+    assert any("requires [engine].impl='paged'" in error for error in errors), errors
+
+
 def test_paged_fill_summary_and_rows_expose_capacity_and_memory(tmp_path: Path):
     rows, manifest, summary = _rows_for(PAGED_FILL, tmp_path)
 
@@ -232,6 +276,7 @@ def test_paged_fill_summary_and_rows_expose_capacity_and_memory(tmp_path: Path):
     assert manifest["scheduler"]["block_size"] == 16
     assert manifest["scheduler"]["kv_blocks"] == 8
     assert manifest["scheduler"]["fill_only"] is True
+    assert manifest["scheduler"]["decode"] == "triton"
 
     assert summary["protocol"]["block_size"] == 16
     assert summary["protocol"]["kv_blocks"] == 8
@@ -241,6 +286,8 @@ def test_paged_fill_summary_and_rows_expose_capacity_and_memory(tmp_path: Path):
     capacity = summary["capacity"]
     assert capacity["peak_concurrency"] >= 1
     assert capacity["max_batch"] == 4
+    assert capacity["workspace_mb"] == 0.0
+    assert "workspace_estimated" not in capacity
     assert capacity["kv_total_mb"] == pytest.approx(
         capacity["kv_mb"] + capacity["workspace_mb"]
     )

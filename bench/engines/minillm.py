@@ -3,7 +3,8 @@
 Loads straight from the local HF cache through ``model.loading`` — no ``from_pretrained``,
 so what the benchmark measures is the hand-written decoder end to end. The attention path is
 ``docs/decisions.md`` D7: prefill runs as one packed varlen group (FA2 on CUDA,
-SDPA-per-segment elsewhere) and seat decode still runs ``hand_baddbmm`` over a ``KvSlab``.
+SDPA-per-segment elsewhere); seat decode runs ``hand_baddbmm`` over a ``KvSlab``, and the
+paged arm decodes with the CUDA Triton block-table kernel.
 The surrounding cache, RoPE and decode loop stay in this repo. Timing comes from
 the engine itself (CUDA events when it runs on a GPU), not from the runner's wall clock.
 
@@ -41,7 +42,6 @@ class ServeEngine:
         model_path: str | None = None,
         *,
         max_prefill_tokens: int = 8192,
-        decode: str = "auto",
     ) -> None:
         self.name = name
         self.revision = revision
@@ -49,7 +49,6 @@ class ServeEngine:
         self.device = "cpu" if device in {"", "auto"} else device
         self.model_path = model_path
         self._max_prefill_tokens = int(max_prefill_tokens)
-        self._decode = str(decode)
         self.vocab_size = 0
         self.weights_mb: float | None = None
         self.eos_token_id: int | None = None
@@ -81,10 +80,9 @@ class ServeEngine:
         self.engine = MiniLLMEngine(
             self.model,
             eos_token_id=self.eos_token_id,
-            # W4.5 (D7): the scheduler always prefills whole groups; only the group
-            # budget and the paged decode kernel remain configurable.
+            # W4.5 (D7): the scheduler always prefills whole groups and paged decode is
+            # always the Triton block-table kernel; only the packing budget remains.
             max_prefill_tokens=self._max_prefill_tokens,
-            decode=self._decode,
         )
         self.vocab_size = int(self.model.config.vocab_size)
         self.weights_mb = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 2**20
@@ -96,31 +94,15 @@ class ServeEngine:
 
         W4.5 makes the pair non-constant: packed prefill can resolve to
         ``flash-attn-varlen`` (CUDA) or ``sdpa-varlen`` (CPU/tests), and the paged decode
-        kernel can be ``paged-triton`` or ``hand_baddbmm``. The engine owns that answer;
-        this adapter only forwards it, falling back to the frozen D4 pair for an engine
-        that predates the hook (the W2/W3 arms).
+        kernel is always ``paged-triton`` (the gather arm was deleted), while the seat arm
+        stays ``hand_baddbmm``. The engine owns that answer; this adapter only forwards it,
+        falling back to the frozen D4 pair for an engine that predates the hook.
         """
         engine = getattr(self, "engine", None)
         report = getattr(engine, "attn_backends", None)
         if callable(report):
             return dict(report())
         return dict(attention_provenance())
-
-    @property
-    def decode_impl(self) -> str:
-        """Resolved decode kernel, when the decoder reports one.
-
-        W4.5's paged arm may swap ``hand_baddbmm`` for a Triton block-table kernel; the
-        adapter must record which one actually ran, not the config's ``"auto"``. The
-        decoder owns that choice, so this is a pass-through to its ``decode_impl`` (or
-        ``decode_backend``) attribute. An engine that predates the knob resolves to
-        ``"gather"`` -- the path this repo actually has -- rather than inventing a name.
-        """
-        for name in ("decode_impl", "decode_backend", "_paged_decode_impl"):
-            value = getattr(self.engine, name, None)
-            if value and str(value) != "auto":
-                return str(value)
-        return "gather"
 
     def encode(self, text: str) -> list[int]:
         if self.tokenizer is None:

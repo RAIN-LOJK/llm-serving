@@ -627,7 +627,7 @@ def _check_paged_vs_seat_token_match(
 
 
 def _step_cost_ratio(summary: Mapping[str, Any]) -> float | None:
-    """C4's B=8 matched-``lpad`` step ratio, when a summary happens to carry it."""
+    """C4's steady-state decode step ratio, when a summary happens to carry it."""
     for container in (summary, _block(summary, "steps")):
         raw = container.get("step_cost_ratio") if isinstance(container, Mapping) else None
         if isinstance(raw, Mapping):

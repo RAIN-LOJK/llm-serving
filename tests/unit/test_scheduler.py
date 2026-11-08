@@ -882,14 +882,14 @@ def test_paged_step_rows_carry_pool_stats_without_renaming_seat_fields():
     class WithStats(PagedFakeEngine):
         def paged_stats(self):
             stats = {
-                "lpad": 64,
+                "decode_impl": "triton",
                 "blocks_in_use": sum(len(v) for v in self.held.values()),
                 "written_blocks": 1,
                 "frag_internal": 0.25,
                 "reservation_slack": 0.5,
                 "kv_alloc_mb": 0.125,
                 "kv_live_mb": 0.0625,
-                "workspace_mb": 0.5,
+                "workspace_mb": 0.0,
             }
             recorded.append(stats)
             return stats
@@ -904,7 +904,7 @@ def test_paged_step_rows_carry_pool_stats_without_renaming_seat_fields():
         "step_ms", "prefill_ms", "decode_event_ms", "host_gap_ms",
     }
     assert seat_fields <= set(row)
-    for key in ("lpad", "blocks_in_use", "written_blocks", "frag_internal",
+    for key in ("decode_impl", "blocks_in_use", "written_blocks", "frag_internal",
                 "reservation_slack", "kv_alloc_mb", "kv_live_mb", "workspace_mb"):
         assert key in row, f"missing paged stats field {key}"
     assert row["host_gap_ms"] == pytest.approx(

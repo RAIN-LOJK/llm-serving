@@ -124,8 +124,9 @@ class MiniLLM(PreTrainedModel):
                     "the KvSlab path is decode-only (D4: T == 1); prefill via KVcache then "
                     "fill_from(), never pad a prefill into (B, T_max)"
                 )
-            # The mask must already allow the column this step writes, and it is rebuilt
-            # in place so a captured graph only reads it.
+            # Step boundary: the seat container refreshes its mask in place; the paged
+            # container refreshes the int32 seqlen the block-table kernel masks against.
+            # Both are rebuilt in place so a captured graph only reads them.
             slab.build_mask(next_token=True)
             cos, sin = self._rope_rows(slab.pos, slab.max_len)
 

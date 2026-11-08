@@ -5,7 +5,7 @@ This is a **spike**, not a run: it writes no ``results/`` directory, records no
 provenance and is not a benchmark arm. It answers the two questions the W4.5 plan puts in
 front of the Triton decode path:
 
-1. does ``paged_decode`` agree with ``reference_paged_decode`` on the shapes the engine
+1. does ``paged_decode`` agree with the dense oracle (``tests/reference/paged.py``) on the shapes the engine
    will feed it (0.6B plus a wider D=256 synthetic case)?
 2. how long does one kernel launch take, and how close is it to the KV bytes the kernel
    actually reads?
@@ -49,11 +49,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from bench.metrics import percentiles  # noqa: E402
-from model.triton_decode import (  # noqa: E402
-    TRITON_AVAILABLE,
-    paged_decode,
-    reference_paged_decode,
-)
+from model.triton_decode import TRITON_AVAILABLE, paged_decode  # noqa: E402
+from tests.reference.paged import reference_paged_decode  # noqa: E402
 
 DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}
 TOLERANCE = {torch.float32: 1e-4, torch.bfloat16: 2e-2, torch.float16: 2e-2}
