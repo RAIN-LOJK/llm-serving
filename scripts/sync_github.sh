@@ -20,8 +20,10 @@ if [ -n "$(git status --porcelain)" ]; then
   exit 1
 fi
 
-if [ "$(git config --get branch.main.remote || true)" != "origin" ]; then
-  echo "sync_github: branch.main.remote is not origin; refusing to change the primary" >&2
+primary_remote="$(git config --get branch.main.remote || true)"
+push_default="$(git config --get remote.pushDefault || true)"
+if [ "$primary_remote" != "origin" ] && [ "$push_default" != "origin" ]; then
+  echo "sync_github: neither branch.main.remote nor remote.pushDefault is origin; refusing" >&2
   exit 1
 fi
 
