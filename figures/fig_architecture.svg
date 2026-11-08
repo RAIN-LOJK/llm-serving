@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="720" viewBox="0 0 1600 720" role="img" aria-label="LLM serving engine structure">
+  <rect width="1600" height="720" fill="#fcfcfb"/>
+
+  <!-- step loop -->
+  <path d="M 1110 176 L 1110 136 L 460 136 L 460 166" fill="none" stroke="#8a8984" stroke-width="1.5"/>
+  <polygon points="460,176 454,166 466,166" fill="#8a8984"/>
+  <text x="785" y="127" text-anchor="middle" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#8a8984">next step</text>
+
+  <!-- input -->
+  <rect x="60" y="120" width="220" height="70" rx="14" fill="#ffffff" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="84" y="151" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="20" font-weight="700" fill="#0b0b0b">Requests</text>
+  <text x="84" y="173" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" fill="#52514e">closed · Poisson</text>
+
+  <line x1="170" y1="190" x2="170" y2="206" stroke="#52514e" stroke-width="1.8"/>
+  <polygon points="170,216 165,206 175,206" fill="#52514e"/>
+
+  <rect x="60" y="216" width="220" height="80" rx="14" fill="#ffffff" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="84" y="249" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="19" font-weight="700" fill="#0b0b0b">FIFO queue</text>
+  <text x="84" y="271" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13" fill="#52514e">head-of-line</text>
+
+  <line x1="280" y1="256" x2="310" y2="256" stroke="#52514e" stroke-width="2"/>
+  <polygon points="320,256 310,251 310,261" fill="#52514e"/>
+
+  <!-- engine -->
+  <rect x="320" y="176" width="280" height="160" rx="16" fill="#f2f6fc" stroke="#c9d9ee" stroke-width="1.2"/>
+  <text x="344" y="204" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" letter-spacing="1.2" fill="#8a8984">SCHEDULE</text>
+  <text x="344" y="240" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="#0b0b0b">Scheduler</text>
+  <text x="344" y="268" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="14.5" fill="#52514e">static | continuous</text>
+  <text x="344" y="290" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12.5" fill="#8a8984">admission → retire</text>
+
+  <line x1="600" y1="256" x2="650" y2="256" stroke="#52514e" stroke-width="2"/>
+  <polygon points="660,256 650,251 650,261" fill="#52514e"/>
+
+  <rect x="660" y="176" width="260" height="160" rx="16" fill="#ffffff" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="684" y="204" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" letter-spacing="1.2" fill="#8a8984">PREFILL</text>
+  <text x="684" y="240" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="#0b0b0b">Packed prefill</text>
+  <text x="684" y="268" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="14.5" fill="#52514e">FA2 varlen · no padding</text>
+
+  <line x1="920" y1="256" x2="970" y2="256" stroke="#52514e" stroke-width="2"/>
+  <polygon points="980,256 970,251 970,261" fill="#52514e"/>
+
+  <rect x="980" y="176" width="260" height="160" rx="16" fill="#ffffff" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="1004" y="204" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" letter-spacing="1.2" fill="#8a8984">DECODE</text>
+  <text x="1004" y="240" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="23" font-weight="700" fill="#0b0b0b">Batch decode</text>
+  <text x="1004" y="268" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="14.5" fill="#52514e">one forward · argmax</text>
+
+  <!-- outputs -->
+  <line x1="1240" y1="256" x2="1290" y2="256" stroke="#52514e" stroke-width="2"/>
+  <polygon points="1300,256 1290,251 1290,261" fill="#52514e"/>
+
+  <rect x="1300" y="176" width="240" height="210" rx="14" fill="#ffffff" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="1322" y="206" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11" letter-spacing="1.2" fill="#8a8984">MEASURED OUTPUTS</text>
+
+  <text x="1322" y="242" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0b0b0b">TTFT p50 / p99</text>
+  <text x="1518" y="242" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11.5" fill="#8a8984">ms</text>
+  <text x="1322" y="278" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0b0b0b">step_ms</text>
+  <text x="1518" y="278" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11.5" fill="#8a8984">ms</text>
+  <line x1="1322" y1="292" x2="1518" y2="292" stroke="#eceae3" stroke-width="1"/>
+
+  <text x="1322" y="314" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0b0b0b">tok/s</text>
+  <text x="1518" y="314" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11" fill="#8a8984"></text>
+  <line x1="1322" y1="328" x2="1518" y2="328" stroke="#eceae3" stroke-width="1"/>
+
+  <text x="1322" y="350" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" font-weight="700" fill="#0b0b0b">kv_total / frag</text>
+  <text x="1518" y="350" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11.5" fill="#8a8984">MiB · %</text>
+
+  <text x="1322" y="376" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" font-style="italic" fill="#8a8984">from summary.json</text>
+
+  <!-- KV access -->
+  <line x1="460" y1="336" x2="460" y2="406" stroke="#8a8984" stroke-width="1.6"/>
+  <polygon points="460,416 455,406 465,406" fill="#8a8984"/>
+  <text x="472" y="382" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#8a8984">reserve</text>
+
+  <line x1="790" y1="336" x2="790" y2="406" stroke="#eb6834" stroke-width="1.6"/>
+  <polygon points="790,416 785,406 795,406" fill="#eb6834"/>
+  <text x="802" y="382" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#eb6834">write</text>
+
+  <line x1="1110" y1="336" x2="1110" y2="406" stroke="#2f9e58" stroke-width="1.6"/>
+  <polygon points="1110,416 1105,406 1115,406" fill="#2f9e58"/>
+  <text x="1122" y="382" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#2f9e58">read</text>
+
+  <!-- KV cache -->
+  <rect x="320" y="416" width="1220" height="240" rx="18" fill="#f7f7f4" stroke="#d8d7ce" stroke-width="1.2"/>
+  <text x="350" y="450" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="18" font-weight="700" fill="#0b0b0b">KV cache</text>
+  <text x="350" y="470" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#8a8984">one backend per engine</text>
+
+  <rect x="350" y="486" width="560" height="150" rx="12" fill="#ffffff" stroke="#e1e0d9"/>
+  <rect x="350" y="486" width="5" height="150" fill="#2a78d6"/>
+  <text x="380" y="526" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#0b0b0b">Seat</text>
+  <text x="880" y="524" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" letter-spacing="1.2" fill="#8a8984">BASELINE</text>
+  <text x="380" y="558" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" fill="#52514e">contiguous slab</text>
+  <text x="380" y="584" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13.5" fill="#52514e">hand_baddbmm decode</text>
+  <text x="380" y="608" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#8a8984">one row per request</text>
+
+  <rect x="950" y="486" width="560" height="150" rx="12" fill="#ffffff" stroke="#e1e0d9"/>
+  <rect x="950" y="486" width="5" height="150" fill="#eb6834"/>
+  <text x="980" y="526" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#0b0b0b">Paged</text>
+  <text x="1480" y="524" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="10.5" letter-spacing="1.2" fill="#8a8984">CAPACITY</text>
+  <text x="980" y="558" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="15" fill="#52514e">block table</text>
+  <text x="980" y="584" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="13.5" fill="#52514e">Triton block-table decode</text>
+  <text x="980" y="608" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="12" fill="#8a8984">no gather</text>
+
+  <!-- footer -->
+  <text x="60" y="690" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11" fill="#8a8984">schematic · not a measured result</text>
+  <text x="1540" y="690" text-anchor="end" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="11" fill="#8a8984">RTX 4090 · Qwen3-0.6B bf16</text>
+</svg>

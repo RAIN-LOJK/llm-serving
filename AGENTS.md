@@ -2,7 +2,7 @@
 
 - 单卡 serving 引擎实验，**不训练模型、不提交权重**。真实载体：`Qwen/Qwen3-0.6B`（纯注意力骨架）与 `Qwen/Qwen3.5-0.8B`（3:1 混合注意力目标）。
 - `ROADMAP.md` 是 W0–W8 阶段、判据与测量协议的唯一权威；与 `docs/` 冲突时以 ROADMAP 为准并修文档。先读 `ROADMAP.md` 再动阶段目标。
-- 当前 W0–W3 已完成：runner、run 契约、Qwen3-0.6B 对齐、基准框架、连续批处理都已落地；W3 的 C1/C2/C3 见 `ROADMAP.md` §5，下一步 W4 分页 KV。
+- 当前阶段与完成进度以 `ROADMAP.md` §12 为准；本文件不复制阶段状态，避免过期。
 - 训练主线已删除。git tag `legacy-learning-2026-08` 只用于考古，旧代码不是可运行入口。
 
 ## 命令（conda base 的 `python`）

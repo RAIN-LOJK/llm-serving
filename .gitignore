@@ -20,6 +20,10 @@ env/
 # CodeGraph index
 .codegraph/
 
+# Local agent settings / onboarding notes (not part of the published repo)
+.claude/
+background.md
+
 # Model weights / checkpoints (never commit)
 *.pt
 *.pth
@@ -33,9 +37,6 @@ logs/
 # Datasets and HF cache
 datasets
 .cache/
-
-# Legacy archive payloads (only the README/pointer belongs in the tree)
-archive/legacy-*/
 
 # Golden fixtures are small .npz files and MUST be tracked.
 !tests/golden/**/*.npz

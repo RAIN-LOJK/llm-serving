@@ -31,5 +31,5 @@ python scripts/exp_index.py --check
 
 ## 当前
 
-已有一个正式 run：`W0-0001`（双载体探测，D1 接受，见 `results/W0/0001-carrier-probe/`）。
+W0–W4.5 的正式 run 已全部落在本目录；完整清单与关键指标见 [INDEX.md](INDEX.md)。
 `9001-runner-smoke` 只用于验证管线，不作为证据。

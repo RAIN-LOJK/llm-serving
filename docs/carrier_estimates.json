@@ -1,5 +1,5 @@
 {
-  "config": "/Users/rain/workstation/minillm/configs/experiments/W0/0001-carrier-probe.toml",
+  "config": "configs/experiments/W0/0001-carrier-probe.toml",
   "configs": {
     "Qwen/Qwen3-0.6B": {
       "architectures": [

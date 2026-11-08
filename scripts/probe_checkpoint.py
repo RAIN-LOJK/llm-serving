@@ -116,8 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.write:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            config_label = str(config_path.resolve().relative_to(ROOT))
+        except ValueError:
+            config_label = str(config_path)
         payload = {
-            "config": str(config_path),
+            "config": config_label,
             "configs": {name: carrier.text_config(raw[name]) for name in raw},
             "estimates": estimates,
             "comparison": carrier.compare(estimates, names[1], names[0]) if len(names) >= 2 else None,

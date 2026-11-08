@@ -379,6 +379,8 @@
 
 ## 9. 简历映射（数字留空，实测后填）
 
+> **状态（2026-11-08）**：W0–W4.5 已完成；W5–W7 未开始。下面带 `<实测>` 的条目是简历模板，不是已完成事实；投递时只写 W0–W4.5 的数字，W5–W7 留在“计划/进行中”。
+
 > **统一 serving 引擎：跨两代注意力架构的单卡推理实现** 2026.10 — 2027.01
 > - 基于手写 PyTorch 解码器实现单卡 serving：packed prefill + 连续批处理、分页 KV cache、双状态管理；
 >   与 HF 逐 token 数值对齐（贪心 64 token 完全一致，每层 `max|Δ|` `<实测>`）
@@ -416,7 +418,7 @@
 ## 11. 目录与命令
 
 ```text
-minillm/
+llm-serving/
 ├── model/            # layers.py（+输出门控/partial-RoPE）、linear_attn.py（新增）
 ├── llm_utils/        # inference.py（过渡；S2 后由 serve/engine.py 接管）
 ├── serve/            # engine / scheduler / block_manager / state_pool
@@ -425,9 +427,9 @@ minillm/
 ├── scripts/          # env_snapshot / exp_index / probe_* / make_golden / align_hf
 ├── tests/            # unit/ + integration/ + golden/
 ├── results/          # W0..W8/NNNN-slug/（run 目录）+ INDEX.md
+├── figures/          # 结果图 + 架构示意图
 ├── docs/             # experiments / decisions / environments / carrier / hybrid_attention
 ├── reports/
-├── archive/          # 仅 README 指向 legacy tag
 ├── README.md
 ├── AGENTS.md
 ├── PITFALLS.md
@@ -501,6 +503,7 @@ python scripts/exp_index.py --check
 | 2026-11-06 | v23 | **W4.5 正式收口**：`W45-0001…0012` 全部干净树跑完并审。E0 **64/64**；E1 **9/28 = 3.111×**；E2 pre-fix `W45-0005` **1.203× fail** → post-fix `W45-0012` **1.040× pass**（接受线，1.0 目标未达；frag 0.55%、8/8 token）；E3 p99 **3.760×**/p50 **0.512×**；E4 **330.53 → 678.59 tok/s = 2.053×**（both saturated，paged 峰值 34、kv_total 1400）；E4b **157.15 → 292.80 = 1.863×**（record-only）。E4/E4b token 27/32、24/32 只作诊断。D7 accepted；`[W45.paged]` calibrated（basis `W45-0012`，阈值未改）；plan 删除；图 `figures/fig_w4_5_decode.png`、`figures/fig_w4_5_prefill.png`；serial/gather 控制臂当时待 W5 开工前清理（后续由 v24/v25 删除）。 |
 | 2026-11-08 | v24 | **W4.5 收口后清理 step 1：删除 serial prefill 控制臂**。`MiniLLMEngine` 不再接受/宣告 `prefill` 模式；`Scheduler` 删除 `_packed_mode` 与逐请求准入分支，只走 `prefill_group`；`[engine].prefill` 不再是开关（`serial` 被校验拒绝，`packed` 只作历史 no-op），`max_prefill_tokens` 保留；bench 适配器/manifest 记录常量 `packed`。历史 `W45-0002/0003/0006` 配置保留但不可运行，注释指向 git 历史。gather/lpad/零块/mask-bias 与 `decode="gather"` 留到 step 2。 |
 | 2026-11-08 | v25 | **W4.5 收口后清理 step 2：删除 gather decode 控制臂**。`PagedPool.gather` / gather workspace / `lpad` / `zero_block` / mask/bias pair / `gather_*` 记账，以及 `PagedKV.get`/`set_buffers`/`decode_impl`/`kernel_decode` 均从生产删除；paged decode 恒为 CUDA Triton block-table kernel，CPU/MPS 上 `open_paged_pool`/`PagedKV` 明确报错（seat 臂才是 CPU/MPS 路径）。纯稠密 `gather_pool` / `write_token_reference` / `reference_paged_decode` 移到 `tests/reference/paged.py`，只被测试导入。`[engine].decode` 不再是开关：`gather` 被校验拒绝，`triton`/`auto` 只作历史 no-op；`paged_stats()`/summary 不再有 `lpad`/`gather_*`/`workspace_estimated`，`workspace_mb` 在新 paged 行是结构零（D6 总预算口径保留，历史 summary 仍可读）。`W45-0003` 加 HISTORICAL banner，保留作历史但不可运行。快速门禁保持绿。
+| 2026-11-08 | v26 | **投递打包**：README 改为「单卡 LLM Serving：机制收益边界实测」，加入架构图与 W3/W4/W4.5 结果图，W4 负结果折叠；§9 标注 W5–W7 未完成；删除 `archive/` 与 `docs/w4-plan.md`，`background.md` 移出版本控制；MIT LICENSE；GitHub 只读镜像 `RAIN-LOJK/llm-serving`（不推 legacy tag）。 |
 
 ---
 
