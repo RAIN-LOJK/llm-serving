@@ -329,7 +329,7 @@ chunk_size 参数化（Triton 版只允许 16/32/64，naive 版任意）。两�
 
 ### 3.5 `Qwen3NextGatedDeltaNet` 层装配（W6 主要参照）
 
-- **投影与短卷积**：`in_proj_qkvz`：hidden → key_dim*2 + value_dim*2（q,k,v,z 四股）；`in_proj_ba`：hidden → num_v_heads*2（b=beta logits, a=decay logits）；`conv_dim = key_dim*2 + value_dim`（只对 q,k,v 卷积，z 和 ba 不卷积）；`nn.Conv1d(conv_dim, conv_dim, kernel_size=4, groups=conv_dim, bias=False, padding=3)` —— **深度维卷积**；激活 SiLU。
+- **投影与短卷积（以 Qwen3.5-0.8B 实际 checkpoint 为准）**：`in_proj_qkv`：hidden → key_dim*2 + value_dim（6144 = 2×2048 + 2048）；`in_proj_z`：hidden → value_dim（2048，输出门控）；`in_proj_b` / `in_proj_a`：hidden → num_v_heads（各 16，beta logits / decay logits）。**Qwen3-Next 的 `in_proj_qkvz` / `in_proj_ba` 合并投影不适用于 0.8B**（那是 qwen3_next 的装配；照抄会得到 4 股但形状对不上）。`conv_dim = key_dim*2 + value_dim`（只对 q,k,v 卷积，z 和 b/a 不卷积）；`nn.Conv1d(conv_dim, conv_dim, kernel_size=4, groups=conv_dim, bias=False, padding=3)` —— **深度维卷积**；激活 SiLU。
 - **短因果卷积确切形式（可直接抄）**：Prefill `F.conv1d(x, weight, padding=3, groups=hidden)[:, :, :seq_len]` 后接 SiLU（左 pad 3 再取前 seq_len，标准 causal）。Decode 单 token：`hidden_new = cat([conv_state, x], dim=-1)`；`conv_state.copy_(hidden_new[:, :, -3:])`；`F.conv1d(hidden_new, weight, padding=0)[:, :, -seq_len:]`。**必须实现这个 conv_state：长度 = kernel_size − 1 = 3**。
 - **g 与 beta 计算（已抓取）**：`beta = b.sigmoid()`；`g = −A_log.float().exp() * F.softplus(a.float() + dt_bias)`。A_log 可学习（初始化 `log(U(0.01,16))`）、dt_bias 初始化 1。**g 已是 log-space 负值，直接喂算子；beta 已 sigmoid 到 (0,1)。**
 - **KV 头数**：Qwen3.5-0.8B 16 key / 16 value 头（1:1），无需 repeat_interleave；HF 代码里 `num_v_heads // num_k_heads > 1` 分支可保留备用。
@@ -340,8 +340,8 @@ chunk_size 参数化（Triton 版只允许 16/32/64，naive 版任意）。两�
 ### 3.6 partial-RoPE / M-RoPE
 
 - **partial-RoPE（1/4 维，可直接抄）**：head_dim=256 → `rotary_dim = 64`（32 个复数对）；`inv_freq = 1/(theta_base^(arange(0,64,2)/64))`；只旋转 `x[..., :64]`，`x[..., 64:]` 原样透传；**theta_base = 1e7（不是常见的 1e4）**。
-- **M-RoPE（mrope_interleaved，需改造）**：HF 通过 `rope_parameters["rope_type"]="mrope_interleaved"` 选择；section `[11,11,10]` 对应时间/高度/宽度三段；interleaving 模式把 inv_freq 按 3 路交错赋值（第三方 Qwen3-ASR 实现片段可参考）。**文本退化**：纯文本时三路坐标全等于同一个 t，mrope_interleaved 退化为标准 1D RoPE——minillm 只取 text model，**可先用标准 1D RoPE 对拍，再补 mrope 路径**。
-- **测试建议**：① 文本退化测试：同一纯文本序列分别走 1D RoPE 与 mrope_interleaved（三路坐标都=t），cos/sin 必须逐元素相等；② section 分块测试：构造三路不同坐标，验证第 0..10 频率对用 t、11..21 用 h、22..31 用 w；③ 位置错位风险：**对拍时 assert `sum(mrope_section) == rotary_dim // 2`（=32）**，off-by-one 是高频 bug。
+- **M-RoPE（文本退化，本机 5.20.2 已核实）**：0.8B 的 `config.json` 里是 `rope_type="default"` + 独立的 `mrope_interleaved: true` + `mrope_section:[11,11,10]`；**不是** `rope_type="mrope_interleaved"`，而且 5.20.2 的 `Qwen3_5TextRotaryEmbedding` 只读 `mrope_section`、不读 `mrope_interleaved`。纯文本时 position_ids 三路相同，`recomposition_frequencies` 是原地 no-op，`cos/sin` 与「64 维 1D RoPE」**逐元素完全相等**（2026-11-09 实测 max diff 0.0）。因此 W5 的文本路径只需 1D 64 维；3D 分支留到真正接视觉时再做。
+- **测试建议**：① 文本退化测试：HF 文本 rotary 与 1D RoPE(64) 逐元素相等，`max|Δ| == 0`；② 位置错位风险：**assert `sum(mrope_section) == rotary_dim // 2`（=32）**，off-by-one 是高频 bug；③ 三路不同坐标的分块测试只在接视觉时才有意义，W5 不做。
 
 ### 3.7 「分块 prefill == 逐步 decode」自洽性测试（W6 硬判据）
 
@@ -362,8 +362,8 @@ chunk_size 参数化（Triton 版只允许 16/32/64，naive 版任意）。两�
 7. **M-RoPE section 和 = rotary_dim/2 = 32**，off-by-one 高频 bug。
 8. **chunk_size 固定 64 先对拍**；改 chunk_size 会改变浮点累积顺序，对拍失败难以定位。
 9. **naive 实现的 `.clone()`**：推理可 inplace，对拍版本保留 clone 避免 autograd 别名误导。
-10. **HF `modeling_qwen3_next.py` 是自动生成的**——读参考直接读 modular 版。
-11. **Qwen3.5-0.8B 的 model_type 是否复用 `qwen3_next` 目录未完全查证**（见 §6）——实际加载时 `AutoConfig.from_pretrained("Qwen/Qwen3.5-0.8B")` 看 model_type 再定位确切源码。
+10. **`qwen3_next` / `qwen3_5` 都有 `modular_*.py` 与生成版 `modeling_*.py`**——读装配逻辑以 modular 为准；本文件与 ROADMAP §14 的行号引用写在 `modeling_qwen3_5.py` 上，升级后要重新定位。
+11. **Qwen3.5-0.8B 的源码位置已核实（2026-11-09，5.20.2）**：`model_type="qwen3_5"`，文本配置是 `qwen3_5_text`，源码在 `transformers/models/qwen3_5/`；checkpoint 的 text 权重前缀是 `model.language_model.`，另有 `mtp.*` 与视觉塔（D2 只加载 text decoder）。
 
 ---
 

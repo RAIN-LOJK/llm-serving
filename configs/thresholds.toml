@@ -4,7 +4,7 @@
 # resolved values in its manifest/summary.
 
 schema = 1
-updated = "2026-11-01"
+updated = "2026-11-09"
 note = "Targets and failure lines from ROADMAP §6/§8. Calibrate once after W1 and record basis_run."
 
 [W1.align]
@@ -112,3 +112,28 @@ golden_token_match_min = 1.0
 # Evaluated on E2 only (closed, identical packed group). E4's cross-scheduler agreement
 # is diagnostic: bf16 near-ties can flip greedy ids when the group composition differs.
 paged_vs_seat_token_match_min = 0.999
+
+[W5.layer]
+# W5 (docs/w5-plan.md §5, G5): single full-attention layer vs the HF golden, rel per stage.
+# Pre-registered before this fixture existed. The formal golden (2026-11-09) came in at
+# 0.0 on every stage and the lines were NOT changed: "calibrated" here means the basis is
+# now the committed fixture, not that the values were fitted. They must not be relaxed.
+# The integration test may point at a draft with MINILLM_W5_GOLDEN for dry runs only.
+status = "calibrated"
+calibrated = "2026-11-09"
+basis_golden = "tests/golden/qwen35-0-8b/0001"
+# q_proj / gate: same nn.Linear and weights on both sides. With the golden script's thread
+# cap (mirroring tests/conftest.py) this is bit-identical; without it, cross-process BLAS
+# reduction order alone showed ~7e-7 rel, which is what this line leaves headroom for.
+proj_rel_max = 1e-5
+# input_layernorm / q_norm / k_norm: zero-centered RMSNorm in fp32.
+norm_rel_max = 1e-5
+# q_rope / k_rope: same rotation and table; only the multiply/add order differs.
+rope_rel_max = 1e-5
+# attn_gated: o_proj input. HF eager softmax vs our SDPA prefill is the only possible
+# difference; on CPU fp32 at matched thread counts it is bit-identical.
+attn_gated_rel_max = 1e-5
+# layer_out: attention diff carried through o_proj + SwiGLU residual.
+layer_out_rel_max = 1e-4
+# G6: same-shape token replacement must leave positions < t bit-identical on CPU fp32.
+causal_atol = 0.0

@@ -1,0 +1,216 @@
+{
+  "spec": "w5-golden-v1",
+  "model": {
+    "repo": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "slug": "qwen3-5-0-8b",
+    "class": "Qwen3_5ForCausalLM",
+    "config_class": "Qwen3_5TextConfig",
+    "dtype": "float32",
+    "device": "cpu",
+    "attn_implementation": "eager",
+    "n_params": 752393024,
+    "n_layer": 24,
+    "n_head": 8,
+    "n_kv_head": 2,
+    "head_dim": 256,
+    "rotary_dim": 64
+  },
+  "tokenizer": {
+    "repo": "Qwen/Qwen3.5-0.8B",
+    "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+    "class": "Qwen3_5Tokenizer"
+  },
+  "prompts": [
+    {
+      "id": "s01",
+      "n_tokens": 36,
+      "truncation": "none (full prompt)",
+      "text_sha256": "fb18d43efa51228f0bc93a4e4600b72f1e0dead09b06ca80a105487738643054",
+      "token_sha256": "0e2cfd575f98b0d5bf7cdcf0778e21f0d5d57e329e802af22085a8f489f7b050",
+      "sampled_positions": [
+        0,
+        18,
+        35
+      ],
+      "input_ids": [
+        95911,
+        11,
+        95824,
+        108695,
+        95911,
+        11,
+        98274,
+        98631,
+        95895,
+        133801,
+        100689,
+        96100,
+        117361,
+        96719,
+        11,
+        98610,
+        98631,
+        96719,
+        97413,
+        132104,
+        114012,
+        100553,
+        95793,
+        140996,
+        104305,
+        95772,
+        587,
+        65,
+        96190,
+        97451,
+        1710,
+        271,
+        1,
+        120100,
+        487,
+        97373
+      ]
+    },
+    {
+      "id": "m01",
+      "n_tokens": 64,
+      "truncation": "first 64 tokens of the tokenizer output",
+      "text_sha256": "f39bd904c88a6ceefd5a8658ccf8e3bcf73184cfec50d5dafaaa42a300e216a3",
+      "token_sha256": "1ce5bc6898c18524e6b9d2970fbd14a66cb61ae0ae624d7c829695325f4be731",
+      "sampled_positions": [
+        0,
+        32,
+        63
+      ],
+      "input_ids": [
+        137467,
+        95895,
+        133801,
+        100689,
+        96100,
+        117361,
+        96719,
+        11,
+        98610,
+        98631,
+        96719,
+        97413,
+        132104,
+        114012,
+        100553,
+        95793,
+        140996,
+        104305,
+        95772,
+        587,
+        65,
+        96190,
+        97451,
+        1710,
+        271,
+        1,
+        120100,
+        487,
+        97373,
+        96217,
+        97997,
+        96336,
+        100536,
+        96348,
+        97674,
+        98238,
+        112249,
+        114312,
+        98258,
+        127208,
+        95793,
+        142378,
+        142107,
+        11,
+        114940,
+        109625,
+        132625,
+        119601,
+        104445,
+        97829,
+        95793,
+        100884,
+        13,
+        120100,
+        98267,
+        98121,
+        99456,
+        104008,
+        99123,
+        101692,
+        105408,
+        100024,
+        99599,
+        11
+      ]
+    }
+  ],
+  "truncation": {
+    "s01": null,
+    "m01": 64
+  },
+  "layers": [
+    3,
+    23
+  ],
+  "stages": {
+    "sampled": [
+      "input_layernorm",
+      "q_proj",
+      "q_norm",
+      "k_norm",
+      "gate",
+      "attn_gated",
+      "layer_out"
+    ],
+    "full": [
+      "layer_in",
+      "q_rope",
+      "k_rope"
+    ],
+    "rules": {
+      "input_layernorm": "layer.input_layernorm output, float32 (n_pos, hidden)",
+      "q_proj": "layer.self_attn.q_proj output (n_pos, n_head * head_dim * 2)",
+      "q_norm": "q_proj.view(T, n_head, 2D).chunk(2)[0] after q_norm (n_pos, n_head, D)",
+      "k_norm": "k_proj.view(T, n_kv_head, D) after k_norm (n_pos, n_kv_head, D)",
+      "gate": "q_proj.view(T, n_head, 2D).chunk(2)[1] (n_pos, n_head, D)",
+      "q_rope": "HF apply_rotary_pos_emb(q_norm^T) -> (n_pos, n_head, D), all positions",
+      "k_rope": "HF apply_rotary_pos_emb(k_norm^T) -> (n_pos, n_kv_head, D), all positions",
+      "attn_gated": "o_proj forward_pre_hook input: attn_out * sigmoid(gate) (n_pos, H*D)",
+      "layer_in": "decoder layer input (residual stream), all positions (T, hidden)",
+      "layer_out": "decoder layer output, residual included (n_pos, hidden)"
+    },
+    "sampled_positions": "sorted({0, T // 2, T - 1}); see {prompt}/positions in the npz"
+  },
+  "tensors": {
+    "npz_keys": "L{layer}/{prompt}/{stage}; plus {prompt}/input_ids and {prompt}/positions",
+    "input_ids": "int32 (T,) token ids the HF reference consumed",
+    "positions": "int32 (n_sampled,) rows present for the sampled stages"
+  },
+  "versions": {
+    "python": "3.12.3",
+    "torch": "2.8.0+cu128",
+    "transformers": "5.20.2",
+    "numpy": "2.4.4"
+  },
+  "environment": {
+    "pinned_kernels": [
+      "causal_conv1d_fn",
+      "causal_conv1d_update",
+      "torch_chunk_gated_delta_rule"
+    ],
+    "torch_threads": 16
+  },
+  "source": {
+    "commit": "3e564f410738cbb45d8d832e93a0e4692782edf6",
+    "dirty": true,
+    "command": "scripts/make_golden_qwen35_layer.py --layers 3 23 --out tests/golden/qwen35-0-8b/0001"
+  },
+  "created_at": "2026-11-09T01:30:29+00:00"
+}

@@ -28,15 +28,29 @@ def precompute_rope_freqs(dim, max_seq_len, theta=10000.0):
     return sin, cos
 
 
-def rope_cos_sin(head_dim, theta, start, length, device=None, dtype=torch.float32):
+def rope_cos_sin(head_dim, theta, start, length, device=None, dtype=torch.float32, rotary_dim=None):
     """cos/sin for positions [start, start+length), computed on demand.
 
     The table belongs to the *model*, not to each layer: 28 layers x 2 x 40960 x 64 bf16 is
     280 MB on Qwen3-0.6B, all of it duplicates. ``MiniLLM`` computes this once per forward
     and hands ``(cos, sin)`` to every block; a block called directly still gets the same
     values by computing them itself.
+
+    ``rotary_dim`` is the partial-RoPE width: Qwen3.5-0.8B rotates 64 of its 256 head
+    dimensions, so the frequencies are built over 64 (32 pairs) and the returned table is
+    ``(length, rotary_dim // 2)``. ``None`` keeps the full-width behaviour bit for bit.
     """
-    inv_freq = 1.0 / (theta ** (torch.arange(0, head_dim, 2, dtype=torch.float32, device=device) / head_dim))
+    width = head_dim if rotary_dim is None else rotary_dim
+    if rotary_dim is not None:
+        if rotary_dim <= 0 or rotary_dim % 2:
+            raise ValueError(
+                f"rotary_dim must be a positive even number, got {rotary_dim}"
+            )
+        if rotary_dim > head_dim:
+            raise ValueError(
+                f"rotary_dim={rotary_dim} cannot exceed head_dim={head_dim}"
+            )
+    inv_freq = 1.0 / (theta ** (torch.arange(0, width, 2, dtype=torch.float32, device=device) / width))
     positions = torch.arange(start, start + length, dtype=torch.float32, device=device)
     angles = torch.outer(positions, inv_freq)
     return angles.cos().to(dtype), angles.sin().to(dtype)
@@ -72,6 +86,35 @@ def apply_rotary_emb(x: torch.Tensor, cos, sin):
     out0 = x1 * cos - x2 * sin
     out1 = x1 * sin + x2 * cos
     return torch.cat([out0, out1], dim=-1)
+
+
+def apply_rotary_emb_partial(x: torch.Tensor, cos, sin, rotary_dim: int):
+    """GPT-NeoX rotation over the first ``rotary_dim`` dimensions; tail passes through.
+
+    Qwen3.5-0.8B rotates 64 of 256 head dimensions. ``apply_rotary_emb`` pairs the two
+    halves of *its input's* last axis, so rotating a slice and concatenating is the same
+    convention as rotating the whole head when ``rotary_dim == head_dim``.
+
+    ``cos``/``sin`` accept the same two shapes as ``apply_rotary_emb``: ``(T, D/2)`` for a
+    shared prefill table, or ``(B, T, D/2)`` for per-row decode positions. ``D`` is
+    ``rotary_dim`` here, not ``x.shape[-1]``.
+    """
+    head_dim = x.shape[-1]
+    if rotary_dim >= head_dim:
+        # Nothing to preserve; the full-width helper is exactly this case.
+        return apply_rotary_emb(x, cos, sin)
+    if rotary_dim <= 0 or rotary_dim % 2:
+        raise ValueError(
+            f"rotary_dim must be a positive even number, got {rotary_dim}"
+        )
+    expected = rotary_dim // 2
+    if cos.shape[-1] != expected or sin.shape[-1] != expected:
+        raise ValueError(
+            f"partial RoPE with rotary_dim={rotary_dim} needs cos/sin of width "
+            f"{expected}, got cos {tuple(cos.shape)} and sin {tuple(sin.shape)}"
+        )
+    rotated = apply_rotary_emb(x[..., :rotary_dim], cos, sin)
+    return torch.cat([rotated, x[..., rotary_dim:]], dim=-1)
 
 
 # ============================================================

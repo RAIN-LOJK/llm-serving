@@ -49,8 +49,8 @@
 
 ## D2 · 主线只测 Qwen3.5 的文本分支，多模态不进 W0–W8
 
-- **日期**：2026-10-21（提出）
-- **状态**：proposed
+- **日期**：2026-10-21（提出）；2026-11-09（确认）
+- **状态**：accepted（2026-11-09 确认：不接视觉，W5–W7 只测 text decoder）
 - **背景**：目标载体 `Qwen/Qwen3.5-0.8B` 是原生多模态 checkpoint
   （`Qwen3_5ForConditionalGeneration`，视觉塔 100.6M 参数 / ~192 MiB bf16）。
   W0 的双载体对照里，A 是纯文本 `Qwen3-0.6B`；是否要把图像输入纳入测量，需要明确。
@@ -69,7 +69,9 @@
 - **后续可选（未进 ROADMAP）**：W8 之后的 **W9 · 图像前缀复用**——1024×1024 图像约 1024 个 visual token，
   重复图像跨请求时可复用 vision embedding / KV 前缀，与 W4 的 prefix cache、W7 的 StatePool 同源。
   需要多模态 baseline、图像 prompt 集、TTFT 分解里增加 vision encode 分量，约 1 周。
-- **复盘点**：W8 结束；若 D1 通过且时间有余，再评估 W9。
+- **复盘点**：W8 结束。**2026-11-09 确认**：W9（图像前缀复用）不自动继承，
+  需另立 ADR 才能启动；W5 开工前按「只加载 text decoder」执行，加载器显式拒绝
+  `visual.*` / `mtp.*` 并写测试（见 `docs/w5-plan.md` Step 0/4）。
 
 ---
 

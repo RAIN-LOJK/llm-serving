@@ -304,8 +304,16 @@
 
 ### W5 · 混合层实现（一）：全注意力层改造
 
+- **执行计划**：`docs/w5-plan.md`（已收口；随本次改动提交后删除，结论已回填本节与 §12/§13）
 - head_dim 256、输出门控、partial-RoPE（1/4 维）、M-RoPE（文本退化）；只读本地 HF 源码（§14）
 - **验收**：与 HF 单层对拍；因果性测试；改第 t token 不影响 t−1 的输出
+- **实测（2026-11-09）**：`tests/golden/qwen35-0-8b/0001`（L3/L23 × s01/m01）的 9 个 stage
+  （`input_layernorm` / `q_proj` / `q_norm` / `k_norm` / `gate` / `q_rope` / `k_rope` /
+  `attn_gated` / `layer_out`）逐项 `max|Δ| = 0`（CPU fp32；head_dim 256 的 softmax scale
+  = 1/16 是 2 的幂，SDPA 与 eager 的缩放顺序不引入舍入差）。因果性同形状替换 token 后
+  `<t` 的输出 `torch.equal`；增量 decode（`KVcache`）与整段 prefill 一致（fp32 atol 1e-5）；
+  快速门禁 **708 passed**；0.6B `test_align_qwen3` 64/64 不变。`[W5.layer]` 预注册值未改。
+  **未做**：packed prefill / `KvSlab` / `PagedKV` 接入（W6/W7）。
 
 ### W6 · 混合层实现（二）：Gated DeltaNet
 
@@ -464,7 +472,7 @@ python scripts/exp_index.py --check
 | W3 | 连续批处理 | ✅ | `W3-0010/0011`（C1 2.01×）、`W3-0001/0002`（E0）、E1 `W3-0017–0019` + `0006/0007` |
 | W4 | 分页 KV | ✅ | C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（按预注册不报吞吐）；post-fix `0009` **1.074×** 为 record-only addendum；`W4-0001…0006/0008/0009`（0007 over-budget，0008 pre-fix/superseded） |
 | W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
-| W5 | 混合层（一）：全注意力层改造 | ⬜ | — |
+| W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
 | W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
 | W8 | 报告与判据矩阵 | ⬜ | — |
@@ -504,6 +512,8 @@ python scripts/exp_index.py --check
 | 2026-11-08 | v24 | **W4.5 收口后清理 step 1：删除 serial prefill 控制臂**。`MiniLLMEngine` 不再接受/宣告 `prefill` 模式；`Scheduler` 删除 `_packed_mode` 与逐请求准入分支，只走 `prefill_group`；`[engine].prefill` 不再是开关（`serial` 被校验拒绝，`packed` 只作历史 no-op），`max_prefill_tokens` 保留；bench 适配器/manifest 记录常量 `packed`。历史 `W45-0002/0003/0006` 配置保留但不可运行，注释指向 git 历史。gather/lpad/零块/mask-bias 与 `decode="gather"` 留到 step 2。 |
 | 2026-11-08 | v25 | **W4.5 收口后清理 step 2：删除 gather decode 控制臂**。`PagedPool.gather` / gather workspace / `lpad` / `zero_block` / mask/bias pair / `gather_*` 记账，以及 `PagedKV.get`/`set_buffers`/`decode_impl`/`kernel_decode` 均从生产删除；paged decode 恒为 CUDA Triton block-table kernel，CPU/MPS 上 `open_paged_pool`/`PagedKV` 明确报错（seat 臂才是 CPU/MPS 路径）。纯稠密 `gather_pool` / `write_token_reference` / `reference_paged_decode` 移到 `tests/reference/paged.py`，只被测试导入。`[engine].decode` 不再是开关：`gather` 被校验拒绝，`triton`/`auto` 只作历史 no-op；`paged_stats()`/summary 不再有 `lpad`/`gather_*`/`workspace_estimated`，`workspace_mb` 在新 paged 行是结构零（D6 总预算口径保留，历史 summary 仍可读）。`W45-0003` 加 HISTORICAL banner，保留作历史但不可运行。快速门禁保持绿。
 | 2026-11-08 | v26 | **投递打包**：README 改为「单卡 LLM Serving：机制收益边界实测」，加入架构图与 W3/W4/W4.5 结果图，W4 负结果折叠；§9 标注 W5–W7 未完成；删除 `archive/` 与 `docs/w4-plan.md`，`background.md` 移出版本控制；MIT LICENSE；GitHub 只读镜像 `RAIN-LOJK/llm-serving`（不推 legacy tag）。 |
+| 2026-11-09 | v27 | **W5 立项**：D2 → **accepted**（不接视觉/MTP，W5–W7 只测 text decoder；W9 需另立 ADR）。W5 执行计划写入 `docs/w5-plan.md`（临时文件，收口删除，生命周期见文件头）。范围锁定为「6 层全注意力 + partial/M-RoPE + 单层 HF 对拍」，证据与 W1 同型（golden + 集成测试，不新开 results run）；整模型加载与 GDN 留 W6，`StatePool` 留 W7。设计口径：新写 `model/qwen35.py` 不改 0.6B 路径；W5 只做单层加载；文本 M-RoPE 按 1D 64 维实现（本地实测与 HF 逐元素相等）。顺带记录两处参考文档偏差，Step 5 修：0.8B 是 4 个独立投影（非 Qwen3-Next 的 `qkvz/ba` 合并），5.20.2 的 rotary 不读 `mrope_interleaved`。 |
+| 2026-11-09 | v28 | **W5 完成**：`model/qwen35.py`（`(1+w)` 与 gated 两种 norm、输出门控、partial-RoPE 的 6 层全注意力 + block）、`load_layer_weights` 单层加载、golden `tests/golden/qwen35-0-8b/0001`。L3/L23 × s01/m01 的 9 个 stage 逐项 `max|Δ|=0`（CPU fp32；head_dim 256 的 scale=1/16 为 2 的幂，SDPA/eager 缩放顺序无舍入差）；因果性 `torch.equal`；decode==prefill atol 1e-5；快速门禁 708 passed；0.6B 64/64 不变。`[W5.layer]` 预注册值未改（全 0）。未做 packed/slab/paged（W6/W7）。plan 待提交后删除。 |
 
 ---
 
