@@ -58,6 +58,10 @@ def _torch_kernel_fallbacks():
     ``x.is_cuda()`` even when the tiny fixture model runs on CPU -- so the fast gate would
     fail on an otherwise healthy environment. The unit tests are the reference, not the
     kernel speed path; keep them deterministic with and without those packages.
+
+    W6 adds the recurrent delta-rule symbol: transformers resolves both the chunked and the
+    recurrent rule to ``fla``'s Triton kernels, so pinning only the chunked one still fails
+    on the first decode step (PITFALLS P-48).
     """
     try:
         from transformers.models.qwen3_5 import modeling_qwen3_5 as module
@@ -66,7 +70,12 @@ def _torch_kernel_fallbacks():
         return
 
     restored = []
-    for name in ("causal_conv1d_fn", "causal_conv1d_update", "torch_chunk_gated_delta_rule"):
+    for name in (
+        "causal_conv1d_fn",
+        "causal_conv1d_update",
+        "torch_chunk_gated_delta_rule",
+        "torch_recurrent_gated_delta_rule",
+    ):
         resolved = getattr(module, name, None)
         fallback = getattr(resolved, "__wrapped__", None)
         if fallback is not None and fallback is not resolved:

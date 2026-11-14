@@ -473,6 +473,64 @@
 
 ---
 
+## D8 · W6 Gated DeltaNet：三算子、q/k 归一化契约与状态接口
+
+- **日期**：2026-11-14（proposed）；收口时改 accepted
+- **状态**：proposed
+- **背景**：W5 只完成 6 层全注意力；0.8B 的 18 层 `linear_attn`（gated delta-net）没有实现，
+  整模型加载明确报 gap。W6 要补齐 5 类算子中最后 3 类（短卷积、decode 循环、chunked prefill），
+  装配 24 层 3:1 混合模型，并让分块 prefill 与逐步 decode 自洽、全模型 64/64 贪心对齐 HF。
+- **证据**：`docs/w6-plan.md` §1/§6；G0 预演（2026-11-14，随机 fp32、H=2、K=V=32、C=64）：
+  HF chunk vs recurrent 输出 `5.6e-9…1.0e-7`、final state `0…8.3e-7`；
+  fla recurrent vs HF recurrent `4.5e-8…6.0e-8`。未归一化 k 的同一对拍在 scale=0.5 差
+  `8.9e-4`、scale=1.0 差 `6.1e19`、scale=2.0 NaN。正式门禁见 `[W6.gdn]`（当前 `target`）。
+- **判据**：`configs/thresholds.toml [W6.gdn]`；A1–A6 见 `docs/w6-plan.md` §0。
+- **决定**：
+  1. **新模块**：`model/qwen35_gdn.py` 承载 `causal_conv_prefill/decode`、
+     `gated_delta_recurrent`、`gated_delta_chunked`、`Qwen35GDN`、`Qwen35GDNBlock`；
+     `model/qwen35_model.py` 承载 `Qwen35State` 与 `Qwen35Model`；不改 `model/layers.py` 的
+     0.6B 路径（收编 W5 遗留 `D-W5-1`）。
+  2. **三算子口径**：短卷积 kernel=4、`conv_state` 只存 **kernel−1=3** 列（卷积前输入；
+     HF 5.20.2 cache 存 4 列，比较时取 `[..., -3:]`）；decode 循环用
+     `h = h*exp(g); kv=(h*k).sum(K); delta=(v-kv)*beta; h += k⊗delta; o=(h*q).sum(K)`；
+     chunked prefill 用 HF 同一套 WY/UT 公式（`chunk_size=64`、`solve_triangular(...,
+     upper=False, unitriangular=True)`、块内/块间 decay 分离、pad 输出丢弃）。
+  3. **q/k 归一化契约**：算子入口接**原始** q/k，在 fp32 内做 l2norm（eps=1e-6），
+     然后只对 q 乘 `K^-0.5`；layer 不预归一化。原因不是"否则算子不等价"（代数上对任意 k
+     等价），而是 WY 三角求解的条件数随 `‖k‖` 恶化（见证据）；测试不得用未归一化 k
+     做跨端点对拍（P-58）。fla 测试端只选一种 q scale 口径（`scale=K**-0.5` 或
+     q 预乘 + `scale=1.0`），不得双做。
+  4. **分派**：`past_len == 0` 走 chunk（含 T=1 的 1-token prompt）；`past_len > 0` 且
+     `T == 1` 走 recurrent；`past_len > 0` 且 `T > 1` 在模型层 raise（跨调用 chunked
+     prefill 留 W7）。不能只看 T。
+  5. **状态接口**：`Qwen35State` 是唯一每请求状态；全注意力层用 `KVcache`，线性层用
+     `conv_state [B,6144,3]` + `recurrent_state [B,16,128,128]`（fp32，输出 cast 回输入
+     dtype）；`nbytes()/linear_state_bytes()/kv_bytes()` 锁住 §5.6 的字节数。
+     W7 的 `StatePool` 只替换存储/生命周期，不重写层代码。
+  6. **范围**：单序列、fp32/CPU 数值门、无 mask/padding/packed/slab/paged；packed/varlen
+     GDN prefill 与 `StatePool` 留 W7。`chunk_size` 固定 64；不接 Triton GDN kernel。
+     证据 = golden + pytest，不新开 `results/W6`。
+  7. **fixture**：一个 `tests/golden/qwen35-0-8b/0002`（`spec=w6-gdn-v1`），prompt
+     `s01`(36 tok)+`m02`(240 tok)，含 L0/L2 单层 stage 与全模型 logits/greedy/layer hidden；
+     由用户生成并提交，测试只读。
+  8. **W5 遗留**：`D-W5-2`（W5 只做单层加载、整模型留 W6）在 W6 由
+     `load_qwen35_model` 完成；`D-W5-1` 的"新模块"口径继续有效。
+- **后果**：
+  1. 0.8B text decoder 可整模型加载；18 个线性层每请求状态 19.27 MiB fp32
+     （conv 72 KiB + recurrent 1 MiB）×18；6 个全注意力层 KV 24 KiB/token fp32。
+  2. `conv_state` 比 HF cache 少一列：对"下一个 token"的输出等价，但不能直接把我们的
+     状态喂给 HF 的 `causal_conv1d_update`；W7 若改用 HF kernel 需把契约改成 4（P-49）。
+  3. W7 的第一件事是 `StatePool` + packed/varlen GDN 接线；W6 的层代码只依赖
+     `Qwen35State`，不再自己分配状态。
+  4. 没有性能结论；`ROADMAP §12` 的 W6 证据是 golden + pytest，不是 run id。
+- **复盘点**：
+  - `[W6.gdn]` 收口时从 `target` 改 `calibrated`，数值不动；若需改，必须走本决策修订并
+    在正式 golden 之前；
+  - A4 的 64/64 是硬线；near-tie 翻转只改变归因，不改变判定；
+  - W7 接 packed/varlen 时复核 `conv_state=3` vs 4、q/k l2norm 只做一次、状态字节数。
+
+---
+
 ## 模板
 
 ```markdown

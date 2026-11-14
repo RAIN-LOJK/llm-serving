@@ -473,7 +473,7 @@ python scripts/exp_index.py --check
 | W4 | 分页 KV | ✅ | C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（按预注册不报吞吐）；post-fix `0009` **1.074×** 为 record-only addendum；`W4-0001…0006/0008/0009`（0007 over-budget，0008 pre-fix/superseded） |
 | W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
 | W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
-| W6 | 混合层（二）：Gated DeltaNet | ⬜ | — |
+| W6 | 混合层（二）：Gated DeltaNet | 🟡 | 进行中（2026-11-14 立项；证据待 `0002`） |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
 | W8 | 报告与判据矩阵 | ⬜ | — |
 | W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
@@ -514,6 +514,7 @@ python scripts/exp_index.py --check
 | 2026-11-08 | v26 | **投递打包**：README 改为「单卡 LLM Serving：机制收益边界实测」，加入架构图与 W3/W4/W4.5 结果图，W4 负结果折叠；§9 标注 W5–W7 未完成；删除 `archive/` 与 `docs/w4-plan.md`，`background.md` 移出版本控制；MIT LICENSE；GitHub 只读镜像 `RAIN-LOJK/llm-serving`（不推 legacy tag）。 |
 | 2026-11-09 | v27 | **W5 立项**：D2 → **accepted**（不接视觉/MTP，W5–W7 只测 text decoder；W9 需另立 ADR）。W5 执行计划写入 `docs/w5-plan.md`（临时文件，收口删除，生命周期见文件头）。范围锁定为「6 层全注意力 + partial/M-RoPE + 单层 HF 对拍」，证据与 W1 同型（golden + 集成测试，不新开 results run）；整模型加载与 GDN 留 W6，`StatePool` 留 W7。设计口径：新写 `model/qwen35.py` 不改 0.6B 路径；W5 只做单层加载；文本 M-RoPE 按 1D 64 维实现（本地实测与 HF 逐元素相等）。顺带记录两处参考文档偏差，Step 5 修：0.8B 是 4 个独立投影（非 Qwen3-Next 的 `qkvz/ba` 合并），5.20.2 的 rotary 不读 `mrope_interleaved`。 |
 | 2026-11-09 | v28 | **W5 完成**：`model/qwen35.py`（`(1+w)` 与 gated 两种 norm、输出门控、partial-RoPE 的 6 层全注意力 + block）、`load_layer_weights` 单层加载、golden `tests/golden/qwen35-0-8b/0001`。L3/L23 × s01/m01 的 9 个 stage 逐项 `max|Δ|=0`（CPU fp32；head_dim 256 的 scale=1/16 为 2 的幂，SDPA/eager 缩放顺序无舍入差）；因果性 `torch.equal`；decode==prefill atol 1e-5；快速门禁 708 passed；0.6B 64/64 不变。`[W5.layer]` 预注册值未改（全 0）。未做 packed/slab/paged（W6/W7）。plan 待提交后删除。 |
+| 2026-11-14 | v29 | **W6 立项**：`docs/w6-plan.md` 转 `active`；范围冻结为单序列数值门（packed/varlen GDN prefill 留 W7，一个 fixture `0002`，prompt `s01`+`m02`，8–10 天窗口 11-16→11-27）。D8 proposed（3 算子 + q/k l2norm 契约 + `Qwen35State` + W6/W7 边界）；`[W6.gdn]` 预注册阈值先 `target`。`tests/conftest.py` 补第 4 个 kernel pin（`torch_recurrent_gated_delta_rule`，P-48）；开工前快速门禁 712 passed、W5 HF 门禁 2 passed。不改写 v28 的 708（W5 收口记录，与 712 非同一时点）。 |
 
 ---
 
