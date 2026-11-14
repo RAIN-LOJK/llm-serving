@@ -62,5 +62,6 @@
 | W7-0010 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 29.4 | unreviewed | completed | 2026-11-14 | 580276a |
 | W7-0011 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块 | Qwen/Qwen3-0.6B | paged | tok_s 42.9 | unreviewed | completed | 2026-11-14 | 1b2c4de |
 | W7-0013 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 112 | invalid | completed | 2026-11-14 | 9c05ecc |
+| W7-0019 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 224 | unreviewed | completed | 2026-11-14 | c363767 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
