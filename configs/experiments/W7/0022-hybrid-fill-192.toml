@@ -1,0 +1,63 @@
+# W7-0022 · E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0004-hybrid-fill-192.toml
+#
+# 交叉点扫描：ctx=192，与 W7-0023 同 trace；用于 128/192/256 的内存交叉点实测。
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；
+# 本目录只准备配置，不代表任何数字已经测到。
+
+schema = 1
+
+[exp]
+id = "W7-0022"
+stage = "W7"
+type = "fill"
+slug = "hybrid-fill-192"
+title = "E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽"
+hypothesis = ["hybrid_state_pool_and_kv_blocks_fit_the_same_1640_mib_state_budget"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [192]
+max_new_tokens = 128
+arrival = "closed"
+requests = 64
+budgets = [128]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 64
+pool = "paged"
+linear_slots = 64
+kv_blocks = 2048
+block_size = 16
+max_prefill_tokens = 8192
+
+[baseline]
+run_id = "W7-0023"
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E1/E2 是 fill-only 容量/状态记账；与下一号纯臂配对，判据见 [W7.hybrid] capacity_speedup_*。
+mode = "record_only"
+criteria = []
