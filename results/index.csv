@@ -64,4 +64,5 @@ W7-0018,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=
 W7-0019,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 224,unreviewed,completed,2026-11-14,c363767,results/W7/0019-e3-pure-b8-n24
 W7-0020,W7,fill,E1/E2 容量（hybrid fill）：synthetic 128 / B=64 / 64 槽,Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 64,unreviewed,completed,2026-11-14,82823f3,results/W7/0020-hybrid-fill-128
 W7-0021,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 58,unreviewed,completed,2026-11-14,ae88d94,results/W7/0021-pure-fill-128
+W7-0022,W7,fill,E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽,Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 64,unreviewed,completed,2026-11-14,ce27595,results/W7/0022-hybrid-fill-192
 W7-0023,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 192 / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 46,unreviewed,completed,2026-11-14,04f7c79,results/W7/0023-pure-fill-192
