@@ -53,10 +53,33 @@ to ``(B, T, H, K)``, *before* the in-kernel l2norm and before the ``K**-0.5`` q 
 cannot have run yet). ``beta`` is already sigmoid-ed and ``g`` is already log-space
 ``<= 0``: both are captured after HF's projection, never re-derived.
 
-npz keys: ``L{layer}/{prompt}/{stage}`` plus ``{prompt}/input_ids`` and
-``{prompt}/positions``. Everything is stored at the three sampled rows
-``sorted({0, T // 2, T - 1})`` except ``layer_in`` (all ``T``: the test replays the whole
-block) and the two final states (full tensors, ``m02`` only, to keep the fixture small).
+One prefill per prompt feeds **both** W6 deliverables (docs/w6-plan.md §6.1): the layer
+stage table above *and* the full-model gate in
+``tests/integration/test_align_qwen35_model.py``. The same forward therefore also captures
+
+* ``{prompt}/layer_hidden`` -- all 24 ``model.model.layers[i]`` block outputs (residual
+  included; **not** ``hidden_states[-1]``, which is post-final-norm -- P-16), sampled at
+  the same three rows, ``(n_layer, 3, hidden)``;
+* ``{prompt}/logits_last`` -- the prefill's last-position logits, ``(vocab,)`` fp32. The
+  prefill already runs ``logits_to_keep=1``, so the returned ``(1, 1, vocab)`` row is the
+  one the greedy gate needs; it used to be dropped;
+* ``{prompt}/greedy_ids`` (int32, exactly 64) and ``{prompt}/greedy_margins`` (float32,
+  top-1 minus top-2 per step). Step 0 reads the prefill logits, steps 1..63 feed the
+  previous id back through the same ``DynamicCache``. EOS is **not** special-cased (P-55):
+  this is a numerical gate over a fixed number of steps, not a chat demo.
+
+The greedy decode runs only after every prefill quantity has been read, because HF's
+``DynamicCache`` is mutated **in place** by the 63 decode calls: ``final_state`` /
+``final_conv_state`` and the block outputs must describe the prefill, not the 64th token.
+The decode registers no hooks and ``RuleCapture`` is already disabled, so no layer stage is
+(re)recorded during it.
+
+npz keys: ``L{layer}/{prompt}/{stage}`` plus ``{prompt}/input_ids``,
+``{prompt}/positions``, ``{prompt}/layer_hidden``, ``{prompt}/logits_last``,
+``{prompt}/greedy_ids`` and ``{prompt}/greedy_margins``. Everything is stored at the three
+sampled rows ``sorted({0, T // 2, T - 1})`` except ``layer_in`` (all ``T``: the test
+replays the whole block) and the two final states (full tensors, ``m02`` only, to keep the
+fixture small).
 """
 
 from __future__ import annotations
@@ -130,6 +153,10 @@ FULL_STAGES = ("layer_in", "final_state", "final_conv_state")
 #: ~2.3 MB for a 36-token prompt that has no extra chunk boundary to exercise.
 FINAL_STAGES = ("final_state", "final_conv_state")
 FINAL_PROMPTS = ("m02",)
+#: Full-model greedy gate: a fixed number of steps, EOS never special-cased (P-55).
+GREEDY_STEPS = 64
+#: Recorded in meta: the layer test ignores it, the full-model test requires "full".
+SCOPE = ("layer", "full")
 
 
 # ------------------------------------------------------------------ environment pins
@@ -285,6 +312,65 @@ def register_hooks(model, layers: list[int], store: dict, rule: RuleCapture) -> 
     return handles
 
 
+def register_hidden_hooks(model, n_layer: int, store: dict) -> list:
+    """Hook **every** decoder block's output for the prefill (residual included, P-16).
+
+    ``model.model.layers[i]`` returns a bare tensor for a full-attention block and a
+    ``(x, conv_state, recurrent_state)`` tuple for a GDN block, so the hook normalises
+    both. The captured tensor is what the next layer consumes -- the block output, not
+    ``hidden_states[-1]`` (transformers 5.x post-final-norms that row, P-16). Registered
+    next to the W6 layer-stage hooks and removed with them, immediately after the prefill.
+    """
+    handles = []
+
+    def _capture(layer_idx: int):
+        def hook(_module, _inputs, output):
+            tensor = output[0] if isinstance(output, tuple) else output
+            store[(layer_idx, "hidden")] = tensor.detach()
+
+        return hook
+
+    for layer_idx in range(n_layer):
+        handles.append(
+            model.model.layers[layer_idx].register_forward_hook(_capture(layer_idx))
+        )
+    return handles
+
+
+def _top2_margin(logits: torch.Tensor) -> float:
+    """Top-1 minus top-2 for one step (P-55: near-ties are recorded, never relaxed)."""
+    top2 = logits.topk(2).values
+    return float(top2[0] - top2[1])
+
+
+def greedy_decode(model, cache, logits_last: torch.Tensor, steps: int = GREEDY_STEPS):
+    """First id from the prefill logits, then ``steps - 1`` cache-backed decode calls.
+
+    No hooks are registered and ``RuleCapture`` is already disabled, so the decode records
+    no layer stage; EOS is not special-cased, so the result is always exactly ``steps``
+    ids (P-55). ``cache`` is mutated in place by every call -- the caller must have read
+    ``final_state`` / ``final_conv_state`` (and the block outputs) before this runs.
+    """
+    if steps < 1:
+        raise SystemExit(f"greedy steps must be >= 1, got {steps}")
+    vocab = int(logits_last.numel())
+    ids = [int(logits_last.argmax())]
+    margins = [_top2_margin(logits_last)]
+    for _ in range(steps - 1):
+        next_id = torch.tensor([[ids[-1]]], dtype=torch.long, device=logits_last.device)
+        out = model(next_id, past_key_values=cache, use_cache=True, logits_to_keep=1)
+        step_logits = out.logits
+        if tuple(step_logits.shape) != (1, 1, vocab):
+            raise SystemExit(
+                f"greedy decode returned logits {tuple(step_logits.shape)}, expected "
+                f"{(1, 1, vocab)} (logits_to_keep=1)"
+            )
+        step_logits = step_logits[0, -1].to(torch.float32)
+        ids.append(int(step_logits.argmax()))
+        margins.append(_top2_margin(step_logits))
+    return ids, margins
+
+
 def sampled_positions(length: int) -> list[int]:
     return sorted({0, length // 2, length - 1})
 
@@ -396,6 +482,13 @@ def main() -> int:
     n_head = int(text_config.num_attention_heads)
     n_kv_head = int(text_config.num_key_value_heads)
     head_dim = int(getattr(text_config, "head_dim", None) or text_config.hidden_size // n_head)
+    n_layer = int(text_config.num_hidden_layers)
+    layer_types = list(text_config.layer_types)
+    if len(layer_types) != n_layer or len(model.model.layers) != n_layer:
+        raise SystemExit(
+            f"layer_types has {len(layer_types)} entries, model has "
+            f"{len(model.model.layers)} layers, config says n_layer={n_layer}"
+        )
     num_k_heads = int(text_config.linear_num_key_heads)
     num_v_heads = int(text_config.linear_num_value_heads)
     key_head_dim = int(text_config.linear_key_head_dim)
@@ -421,19 +514,27 @@ def main() -> int:
 
             store.clear()
             handles = register_hooks(model, layers, store, rule)
+            # The 24 block outputs ride the same prefill: one forward, both deliverables.
+            handles += register_hidden_hooks(model, n_layer, store)
             rule.enabled = True
             try:
                 # use_cache=True is what makes the HF delta rule return its final state and
-                # write conv/recurrent states into the DynamicCache; logits_to_keep=1 trims
-                # the lm_head matmul we do not need (the fixture stores no logits).
-                cache = model(
-                    input_ids, use_cache=True, logits_to_keep=1
-                ).past_key_values
+                # write conv/recurrent states into the DynamicCache. logits_to_keep=1 keeps
+                # only the last row -- exactly the row ``logits_last`` stores and the seed
+                # for the greedy decode -- instead of a (1, T, 248320) temporary.
+                prefill = model(input_ids, use_cache=True, logits_to_keep=1)
+                cache = prefill.past_key_values
+                logits_last = prefill.logits[0, -1].to(torch.float32)
             finally:
                 rule.enabled = False
                 rule.current_layer = None
                 for handle in handles:
                     handle.remove()
+            if tuple(prefill.logits.shape) != (1, 1, int(text_config.vocab_size)):
+                raise SystemExit(
+                    f"{prompt_id}: prefill logits are {tuple(prefill.logits.shape)}, "
+                    f"expected (1, 1, {int(text_config.vocab_size)})"
+                )
 
             arrays[f"{prompt_id}/input_ids"] = np.asarray(
                 input_ids[0].cpu(), dtype=np.int32
@@ -495,11 +596,19 @@ def main() -> int:
                     # sufficient kernel-1=3. The oldest column never enters the next
                     # token's window, so the slice is exact, not an approximation.
                     conv_state = layer_cache.conv_states[0]
+                    # ``clone()`` is load-bearing: ``.numpy()`` on a CPU tensor shares its
+                    # storage, and the greedy decode below updates HF's conv/recurrent
+                    # states **in place**. Without the copy the fixture would store the
+                    # 64th token's state instead of the prefill's.
                     stages["final_state"] = (
-                        final_state[0].to(torch.float32).cpu().numpy()
+                        final_state[0].to(torch.float32).clone().cpu().numpy()
                     )
                     stages["final_conv_state"] = (
-                        conv_state[0, :, -(kernel - 1):].to(torch.float32).cpu().numpy()
+                        conv_state[0, :, -(kernel - 1):]
+                        .to(torch.float32)
+                        .clone()
+                        .cpu()
+                        .numpy()
                     )
 
                 # P-50: beta is already sigmoid-ed and g is already log-space <= 0. A
@@ -532,6 +641,41 @@ def main() -> int:
                         f"max|ref|={np.abs(tensor).max():.3e}"
                     )
 
+            # --------------------------------------------------- full-model captures
+            # Everything above this line reads prefill tensors: the final states are
+            # already numpy, and the block outputs sit in ``store``. The greedy decode
+            # below mutates ``cache`` **in place** (HF updates conv/recurrent states on
+            # every call), so no prefill quantity may be read after it.
+            hidden = np.stack(
+                [_rows(store[(layer_idx, "hidden")], positions) for layer_idx in range(n_layer)]
+            ).astype(np.float32, copy=False)
+            expected_hidden = (n_layer, len(positions), int(text_config.hidden_size))
+            if hidden.shape != expected_hidden:
+                raise SystemExit(
+                    f"{prompt_id}: layer_hidden is {hidden.shape}, expected "
+                    f"{expected_hidden}"
+                )
+
+            greedy_ids, greedy_margins = greedy_decode(model, cache, logits_last)
+            if len(greedy_ids) != GREEDY_STEPS:
+                raise SystemExit(
+                    f"{prompt_id}: captured {len(greedy_ids)} greedy ids, expected "
+                    f"{GREEDY_STEPS}"
+                )
+
+            arrays[f"{prompt_id}/layer_hidden"] = hidden
+            arrays[f"{prompt_id}/logits_last"] = logits_last.cpu().numpy()
+            arrays[f"{prompt_id}/greedy_ids"] = np.asarray(greedy_ids, dtype=np.int32)
+            arrays[f"{prompt_id}/greedy_margins"] = np.asarray(
+                greedy_margins, dtype=np.float32
+            )
+
+            print(
+                f"  full/{prompt_id}: {length} tokens, logits {tuple(logits_last.shape)}, "
+                f"greedy {len(greedy_ids)} ids (min margin {min(greedy_margins):.3e}), "
+                f"layer_hidden {hidden.shape}"
+            )
+
             prompt_meta.append(
                 {
                     "id": prompt_id,
@@ -542,6 +686,7 @@ def main() -> int:
                         np.asarray(input_ids[0].cpu(), dtype=np.int32).tobytes()
                     ).hexdigest(),
                     "sampled_positions": positions,
+                    "greedy_steps": GREEDY_STEPS,
                     "input_ids": [int(token) for token in input_ids[0].cpu()],
                 }
             )
@@ -553,6 +698,9 @@ def main() -> int:
 
     meta = {
         "spec": SPEC,
+        # What this run captured. The layer test ignores it; the full-model test requires
+        # "full" so a layer-only draft cannot silently pass as a complete fixture.
+        "scope": list(SCOPE),
         "model": {
             "repo": args.model,
             "revision": revision,
@@ -563,7 +711,7 @@ def main() -> int:
             "device": str(device),
             "attn_implementation": "eager",
             "n_params": sum(p.numel() for p in model.parameters()),
-            "n_layer": int(text_config.num_hidden_layers),
+            "n_layer": n_layer,
             "n_head": n_head,
             "n_kv_head": n_kv_head,
             "head_dim": head_dim,
@@ -583,6 +731,19 @@ def main() -> int:
         },
         "prompts": prompt_meta,
         "layers": layers,
+        "full_model": {
+            "n_layer": n_layer,
+            "layer_types": layer_types,
+            "greedy_steps": GREEDY_STEPS,
+            "hidden_positions": "sorted({0, T // 2, T - 1}) per prompt; identical to "
+            "{prompt}/positions",
+            "hidden_rule": "decoder layer output, residual included, hook on model.layers[i]",
+            "logits_rule": "last prefill position only",
+            "margin_rule": "top1 - top2 per greedy step",
+            "greedy_rule": "step 0 from the prefill logits, steps 1..63 one token at a "
+            "time through the prefill's DynamicCache; EOS never special-cased (P-55)",
+            "captured": ["layer_hidden", "logits_last", "greedy_ids", "greedy_margins"],
+        },
         "stages": {
             "sampled": list(SAMPLED_STAGES),
             "hooked": list(HOOKED_STAGES),
@@ -625,10 +786,19 @@ def main() -> int:
             "{prompt}/positions in the npz",
         },
         "tensors": {
-            "npz_keys": "L{layer}/{prompt}/{stage}; plus {prompt}/input_ids and "
-            "{prompt}/positions",
+            "npz_keys": "L{layer}/{prompt}/{stage}; plus {prompt}/input_ids, "
+            "{prompt}/positions, {prompt}/layer_hidden, {prompt}/logits_last, "
+            "{prompt}/greedy_ids and {prompt}/greedy_margins",
             "input_ids": "int32 (T,) token ids the HF reference consumed",
             "positions": "int32 (n_sampled,) rows present for the sampled stages",
+            "layer_hidden": "float32 (n_layer, n_sampled, hidden): every decoder block's "
+            "output (residual included, not hidden_states[-1], P-16) at {prompt}/positions",
+            "logits_last": "float32 (vocab,): the prefill's last-position logits "
+            "(logits_to_keep=1)",
+            "greedy_ids": f"int32 ({GREEDY_STEPS},): the ids the reference produced; EOS "
+            "is not special-cased (P-55)",
+            "greedy_margins": f"float32 ({GREEDY_STEPS},): top-1 minus top-2 of each "
+            "step's logits; a near-tie is recorded, never relaxed",
         },
         "versions": {
             "python": platform.python_version(),
