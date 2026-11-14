@@ -1,0 +1,5 @@
+run_id: W7-0017
+status: completed
+device_class: measure-cuda
+rows: 216 (errors: 0)
+summary: results/W7/0017-e4b-hybrid-seat/summary.json
