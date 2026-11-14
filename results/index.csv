@@ -56,5 +56,6 @@ W7-0009,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 8k / B=64 / 936 块
 W7-0010,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 29.4,unreviewed,completed,2026-11-14,580276a,results/W7/0010-e3-hybrid-b1
 W7-0011,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块",Qwen/Qwen3-0.6B,paged,tok_s 42.9,unreviewed,completed,2026-11-14,1b2c4de,results/W7/0011-e3-pure-b1
 W7-0013,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 112,invalid,completed,2026-11-14,9c05ecc,results/W7/0013-e3-pure-b8
+W7-0015,W7,scenario,E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / static,Qwen/Qwen3.5-0.8B,hybrid,tok_s 74.6,unreviewed,completed,2026-11-14,7037a3d,results/W7/0015-e4a-hybrid-static
 W7-0018,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 166,unreviewed,completed,2026-11-14,b48b811,results/W7/0018-e3-hybrid-b8-n24
 W7-0019,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 224,unreviewed,completed,2026-11-14,c363767,results/W7/0019-e3-pure-b8-n24

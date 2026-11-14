@@ -1,0 +1,5 @@
+run_id: W7-0015
+status: completed
+device_class: measure-cuda
+rows: 10165 (errors: 0)
+summary: results/W7/0015-e4a-hybrid-static/summary.json
