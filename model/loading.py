@@ -18,10 +18,13 @@ under ``model.language_model.``; Qwen3 uses ``model.``)::
 returns None for them so a whole-model load reports the one real gap (W6's
 ``linear_attn.*``) instead of a wall of MTP/vision keys.
 
-``load_layer_weights`` is the W5 entry point: it reads a single full-attention layer and
-returns keys relative to the block (``self_attn.q_proj.weight``), so a block can load it
-with ``strict=True``. Whole-model loading of 0.8B stays a failure until W6 implements the
-18 linear-attention layers.
+``load_layer_weights`` is the W5/W6 single-layer entry point: it reads one layer and
+returns keys relative to the block (``self_attn.q_proj.weight`` or
+``linear_attn.in_proj_qkv.weight``), so a block can load it with ``strict=True``. Which
+kind it expects is decided by ``config.layer_types[layer_idx]``, not guessed from the
+keys. Whole-model loading of the hybrid 0.8B checkpoint stays a failure until Step 4 adds
+the hybrid entry point; ``load_checkpoint`` still builds the all-full-attention
+``MiniLLM`` only.
 
 If a key does not map, the error lists exactly which parameters ``model/`` still has to grow.
 """
@@ -182,9 +185,20 @@ def _describe_mismatch(own: dict, incoming: dict) -> str | None:
     return "\n".join(lines)
 
 
-# ------------------------------------------------------------------ one layer (W5)
+# -------------------------------------------------------------- one layer (W5/W6)
 
 _FULL_ATTENTION = "full_attention"
+_LINEAR_ATTENTION = "linear_attention"
+
+#: The five ``linear_*`` fields that describe Qwen3.5's gated-delta-net layer. A config
+#: without them (Qwen3-0.6B, or an all-full-attention model) has no linear layer to load.
+_LINEAR_FIELDS = (
+    "linear_num_key_heads",
+    "linear_num_value_heads",
+    "linear_key_head_dim",
+    "linear_value_head_dim",
+    "linear_conv_kernel_dim",
+)
 
 
 def _layer_prefixes(layer_idx: int) -> tuple[str, str]:
@@ -216,6 +230,76 @@ def _expected_layer_shapes(config: MiniLLMConfig) -> dict[str, tuple[int, ...]]:
         shapes["self_attn.q_norm.weight"] = (head_dim,)
         shapes["self_attn.k_norm.weight"] = (head_dim,)
     return shapes
+
+
+def _linear_attention_dims(
+    config: MiniLLMConfig,
+) -> tuple[int, int, int, int, int]:
+    """``(conv_dim, value_dim, num_v_heads, head_v_dim, kernel)`` from config.
+
+    Every dimension of a linear layer is derivable from the five ``linear_*`` fields, but
+    only if they are all there. A missing one must raise instead of falling back to a
+    Qwen3-Next/0.8B default: a block built from the wrong head geometry loads without
+    complaint and then computes a different model.
+    """
+    missing = [name for name in _LINEAR_FIELDS if getattr(config, name, None) is None]
+    if missing:
+        raise ValueError(
+            f"layer is linear_attention but config is missing {', '.join(missing)}; "
+            "those five linear_* fields are what Qwen3.5's gated-delta-net layer is "
+            "described by (docs/decisions.md D8)"
+        )
+    num_k_heads = config.linear_num_key_heads
+    num_v_heads = config.linear_num_value_heads
+    head_k_dim = config.linear_key_head_dim
+    head_v_dim = config.linear_value_head_dim
+    kernel = config.linear_conv_kernel_dim
+    if num_k_heads < 1 or num_v_heads < 1 or head_k_dim < 1 or head_v_dim < 1 or kernel < 1:
+        raise ValueError(
+            "the linear_* fields must all be >= 1, got "
+            f"num_k_heads={num_k_heads}, num_v_heads={num_v_heads}, "
+            f"head_k_dim={head_k_dim}, head_v_dim={head_v_dim}, kernel={kernel}"
+        )
+    if num_v_heads % num_k_heads != 0:
+        raise ValueError(
+            f"linear_num_value_heads ({num_v_heads}) must be an integer multiple of "
+            f"linear_num_key_heads ({num_k_heads})"
+        )
+    key_dim = head_k_dim * num_k_heads
+    value_dim = head_v_dim * num_v_heads
+    conv_dim = 2 * key_dim + value_dim
+    return conv_dim, value_dim, num_v_heads, head_v_dim, kernel
+
+
+def _expected_linear_attention_shapes(config: MiniLLMConfig) -> dict[str, tuple[int, ...]]:
+    """Parameter shapes of one linear-attention block, derived from the HF config.
+
+    Mirrors ``Qwen35GDN`` exactly (P-53): four **separate** ``in_proj_*`` matrices, the
+    depthwise conv weight ``(conv_dim, 1, k)``, and only the ``in_proj_qkv`` output is
+    convolved. ``A_log``/``dt_bias`` are per value head; the gated norm is per value-head
+    dim, not model width.
+    """
+    conv_dim, value_dim, num_v_heads, head_v_dim, kernel = _linear_attention_dims(
+        config
+    )
+    hidden = config.n_embd
+    n_inner = config.n_inner if config.n_inner is not None else config.n_embd * 4
+    return {
+        "input_layernorm.weight": (hidden,),
+        "linear_attn.in_proj_qkv.weight": (conv_dim, hidden),
+        "linear_attn.in_proj_z.weight": (value_dim, hidden),
+        "linear_attn.in_proj_b.weight": (num_v_heads, hidden),
+        "linear_attn.in_proj_a.weight": (num_v_heads, hidden),
+        "linear_attn.conv1d.weight": (conv_dim, 1, kernel),
+        "linear_attn.dt_bias": (num_v_heads,),
+        "linear_attn.A_log": (num_v_heads,),
+        "linear_attn.norm.weight": (head_v_dim,),
+        "linear_attn.out_proj.weight": (hidden, value_dim),
+        "post_attention_layernorm.weight": (hidden,),
+        "mlp.gate_proj.weight": (n_inner, hidden),
+        "mlp.up_proj.weight": (n_inner, hidden),
+        "mlp.down_proj.weight": (hidden, n_inner),
+    }
 
 
 def _read_layer_tensors(snapshot: Path, layer_idx: int, dtype: torch.dtype) -> dict[str, torch.Tensor]:
@@ -252,7 +336,14 @@ def _describe_layer_mismatch(
     layer_idx: int,
     expected: dict[str, tuple[int, ...]],
     got: dict[str, torch.Tensor],
+    kind: str,
 ) -> str | None:
+    """Compact report of why one layer does not fit ``kind`` (None when it fits).
+
+    ``kind`` is ``"full-attention"`` or ``"linear-attention"`` and leads the message: a
+    missing ``linear_attn.*`` key and a missing ``self_attn.*`` key have entirely
+    different fixes, and the first line should say which block was being loaded.
+    """
     missing = sorted(set(expected) - set(got))
     unexpected = sorted(set(got) - set(expected))
     shapes = [
@@ -263,12 +354,12 @@ def _describe_layer_mismatch(
     if not (missing or unexpected or shapes):
         return None
 
-    lines = [f"layer {layer_idx} in {snapshot} does not fit the W5 full-attention block:"]
+    lines = [f"layer {layer_idx} in {snapshot} does not fit the {kind} block:"]
     if missing:
         lines.append("  missing from the checkpoint:")
         lines += [f"    {name}" for name in missing]
     if unexpected:
-        lines.append("  checkpoint keys the W5 block does not define:")
+        lines.append(f"  checkpoint keys the {kind} block does not define:")
         lines += [f"    {name}" for name in unexpected]
     if shapes:
         lines.append("  shape mismatch (expected vs checkpoint):")
@@ -281,16 +372,22 @@ def load_layer_weights(
     layer_idx: int,
     dtype: torch.dtype = torch.float32,
 ) -> dict[str, torch.Tensor]:
-    """Load exactly one full-attention layer, keyed relative to the block.
+    """Load exactly one layer, keyed relative to the block.
 
-    W5 loads one layer at a time (D-W5-2): the 18 ``linear_attn`` layers do not exist in
-    ``model/`` yet, so a whole-model load cannot succeed. Requesting a linear-attention
-    layer raises instead of returning ``self_attn`` keys that would silently fit nothing.
+    The W5/W6 single-layer entry point. ``config.layer_types[layer_idx]`` selects which
+    block is expected: ``full_attention`` gives ``self_attn.*`` keys for
+    ``Qwen35FullAttentionBlock``, ``linear_attention`` gives ``linear_attn.*`` keys for
+    ``Qwen35GDNBlock``. Either way the returned keys are the block's ``state_dict``
+    names, so ``block.load_state_dict(..., strict=True)`` works, and the expected-shape
+    table is complete enough that a missing or misshaped key fails here instead of
+    producing a partially-filled layer.
 
-    The returned keys are what a W5 block's ``state_dict`` uses
-    (``self_attn.q_proj.weight``, ``input_layernorm.weight``, ``mlp.*``, ...), so the
-    block can be filled with ``block.load_state_dict(..., strict=True)``. Tensors come back
-    on CPU; the caller owns the device move.
+    Whole-model loading is a different function: ``load_checkpoint`` still builds the
+    all-full-attention ``MiniLLM`` and rejects the 0.8B hybrid. The hybrid whole-model
+    entry point (``Qwen35Model``) arrives in W6 Step 4; this function and its per-layer
+    dispatch are what Step 3's single-layer golden test uses in the meantime.
+
+    Tensors come back on CPU; the caller owns the device move.
     """
     from transformers import AutoConfig
 
@@ -304,20 +401,27 @@ def load_layer_weights(
             f"(expected 0..{config.n_layer - 1})"
         )
     layer_type = config.layer_types[layer_idx]
-    if layer_type != _FULL_ATTENTION:
+    if layer_type == _FULL_ATTENTION:
+        expected = _expected_layer_shapes(config)
+        kind = "full-attention"
+    elif layer_type == _LINEAR_ATTENTION:
+        expected = _expected_linear_attention_shapes(config)
+        kind = "linear-attention"
+    else:
+        # MiniLLMConfig rejects unknown kinds, so this only fires if layer_types was
+        # mutated after construction; still better than guessing a block.
         raise ValueError(
-            f"layer {layer_idx} is {layer_type!r}: load_layer_weights() loads one "
-            "full_attention layer; linear_attention (gated delta-net) is the W6 to-do"
+            f"layer {layer_idx} is {layer_type!r}; load_layer_weights() knows "
+            f"{_FULL_ATTENTION!r} and {_LINEAR_ATTENTION!r}"
         )
 
-    expected = _expected_layer_shapes(config)
     mapped: dict[str, torch.Tensor] = {}
     for tail, tensor in _read_layer_tensors(snapshot, layer_idx, dtype).items():
         local = map_hf_key(tail)  # drops the per-layer rotary cache, if present
         if local is not None:
             mapped[local] = tensor
 
-    problem = _describe_layer_mismatch(snapshot, layer_idx, expected, mapped)
+    problem = _describe_layer_mismatch(snapshot, layer_idx, expected, mapped, kind)
     if problem:
         raise RuntimeError(problem)
 

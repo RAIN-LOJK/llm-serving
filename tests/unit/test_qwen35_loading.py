@@ -6,13 +6,16 @@ Three layers of coverage, cheapest first:
    out-of-scope heads (``mtp.``, ``visual.``) are dropped rather than half-mapped.
 2. **Synthetic tiny snapshot** — a real ``config.json`` plus a fake layer in
    ``model.safetensors``: ``load_layer_weights`` returns repo-relative keys, and missing
-   or misshaped keys fail loudly instead of producing a partial block.
-3. **The local 0.8B snapshot** (marked ``hf``, skipped without it) — real layer shapes,
-   and the whole-model load still fails with the W6 ``linear_attn.*`` gap and no partial
-   ``load_state_dict``.
+   or misshaped keys fail loudly instead of producing a partial block. Both layer kinds
+   are covered: W5's full attention (``self_attn.*``, layer 3) and W6's linear attention
+   (``linear_attn.*``, layer 0).
+3. **The local 0.8B snapshot** (marked ``hf``, skipped without it) — real layer shapes
+   for both kinds, and the whole-model load still fails with the W6 ``linear_attn.*`` gap
+   and no partial ``load_state_dict`` (Step 4 changes that).
 
-``load_layer_weights`` returns keys *relative to the block* (``self_attn.q_proj.weight``),
-so a W5 block can do ``block.load_state_dict(load_layer_weights(...), strict=True)``.
+``load_layer_weights`` returns keys *relative to the block* (``self_attn.q_proj.weight``
+or ``linear_attn.in_proj_qkv.weight``), so a block can do
+``block.load_state_dict(load_layer_weights(...), strict=True)``.
 """
 
 from __future__ import annotations
@@ -20,7 +23,15 @@ from __future__ import annotations
 import pytest
 import torch
 
-from model.loading import cached_snapshot, config_from_hf, load_checkpoint, load_layer_weights, map_hf_key
+from model.config import MiniLLMConfig
+from model.loading import (
+    _expected_linear_attention_shapes,
+    cached_snapshot,
+    config_from_hf,
+    load_checkpoint,
+    load_layer_weights,
+    map_hf_key,
+)
 from model.minillm import MiniLLM
 
 MODEL = "Qwen/Qwen3.5-0.8B"
@@ -112,25 +123,52 @@ EXPECTED_TINY = {
     "mlp.down_proj.weight": (16, 32),
 }
 
+# Shapes a W6 linear-attention block must have for TINY_TEXT: key_dim = 2*4 = 8,
+# value_dim = 2*4 = 8, so conv_dim = 2*8 + 8 = 24.
+EXPECTED_LINEAR_TINY = {
+    "input_layernorm.weight": (16,),
+    "linear_attn.in_proj_qkv.weight": (24, 16),
+    "linear_attn.in_proj_z.weight": (8, 16),
+    "linear_attn.in_proj_b.weight": (2, 16),
+    "linear_attn.in_proj_a.weight": (2, 16),
+    "linear_attn.conv1d.weight": (24, 1, 4),
+    "linear_attn.dt_bias": (2,),
+    "linear_attn.A_log": (2,),
+    "linear_attn.norm.weight": (4,),
+    "linear_attn.out_proj.weight": (16, 8),
+    "post_attention_layernorm.weight": (16,),
+    "mlp.gate_proj.weight": (32, 16),
+    "mlp.up_proj.weight": (32, 16),
+    "mlp.down_proj.weight": (16, 32),
+}
+
 
 def _write_tiny_snapshot(
     directory,
     *,
     prefix="model.language_model.layers.3.",
     text_overrides=None,
+    layer_kind="full_attention",
     **overrides,
 ):
-    """config.json + one synthetic layer in model.safetensors; returns nothing."""
+    """config.json + one synthetic layer in model.safetensors; returns nothing.
+
+    ``layer_kind`` picks which block's key/shape table to write: ``full_attention``
+    (W5, layer 3 of ``TINY_TEXT``) or ``linear_attention`` (W6, layer 0). ``overrides``
+    replaces a shape or, with ``None``, drops the key -- that is how the missing-key
+    guards are built.
+    """
     config_class = pytest.importorskip(
         "transformers.models.qwen3_5.configuration_qwen3_5"
     ).Qwen3_5TextConfig
     from safetensors.torch import save_file
 
+    if layer_kind not in ("full_attention", "linear_attention"):
+        raise ValueError(f"unknown layer_kind={layer_kind!r}")
+    expected = EXPECTED_LINEAR_TINY if layer_kind == "linear_attention" else EXPECTED_TINY
     text = {**TINY_TEXT, **(text_overrides or {})}
     config_class(**text).save_pretrained(directory)
-    tensors = {
-        prefix + name: torch.zeros(shape) for name, shape in EXPECTED_TINY.items()
-    }
+    tensors = {prefix + name: torch.zeros(shape) for name, shape in expected.items()}
     for name, shape in overrides.items():
         key = prefix + name
         if shape is None:
@@ -186,10 +224,80 @@ def test_unexpected_layer_key_is_reported(tmp_path):
         load_layer_weights(tmp_path, 3)
 
 
-def test_linear_attention_layer_is_refused(tmp_path):
-    _write_tiny_snapshot(tmp_path)
-    with pytest.raises(ValueError, match=r"linear_attention.*W6"):
+# ------------------------------------------------- W6: one linear-attention layer
+
+
+def _write_tiny_linear_snapshot(directory, **overrides):
+    """config.json + a synthetic linear layer 0 (TINY_TEXT's LLLF schedule)."""
+    _write_tiny_snapshot(
+        directory,
+        prefix="model.language_model.layers.0.",
+        layer_kind="linear_attention",
+        **overrides,
+    )
+
+
+def test_linear_attention_layer_returns_block_relative_weights(tmp_path):
+    """W6 replaces W5's refusal: layer 0 now loads the gated-delta-net key set."""
+    from transformers import AutoConfig
+
+    from model.qwen35_gdn import Qwen35GDNBlock
+
+    _write_tiny_linear_snapshot(tmp_path)
+    weights = load_layer_weights(tmp_path, 0, dtype=torch.float16)
+
+    assert set(weights) == set(EXPECTED_LINEAR_TINY)
+    assert {name: tuple(tensor.shape) for name, tensor in weights.items()} == (
+        EXPECTED_LINEAR_TINY
+    )
+    # Same dtype contract as the full-attention test: the cast happens in the reader.
+    assert all(tensor.dtype == torch.float16 for tensor in weights.values())
+
+    # The loader's table and the module's parameters are the same names, and a half
+    # tensor is cast into the fp32 parameter by load_state_dict itself; `strict=True` is
+    # what makes a drifting key set a test failure instead of a silent partial load.
+    config = config_from_hf(AutoConfig.from_pretrained(tmp_path, local_files_only=True))
+    block = Qwen35GDNBlock(config)
+    assert set(block.state_dict()) == set(EXPECTED_LINEAR_TINY)
+    block.load_state_dict(weights, strict=True)
+    assert block.linear_attn.conv1d.weight.dtype == torch.float32
+    assert block.linear_attn.conv1d.weight.shape == (24, 1, 4)
+
+
+def test_missing_linear_attention_key_is_reported(tmp_path):
+    _write_tiny_linear_snapshot(tmp_path, **{"linear_attn.A_log": None})
+    with pytest.raises(
+        RuntimeError, match=r"(?s)linear-attention block:.*linear_attn\.A_log"
+    ):
         load_layer_weights(tmp_path, 0)
+
+
+def test_wrong_linear_attention_shape_is_reported(tmp_path):
+    """A non-depthwise conv weight must fail on shape, not load and compute garbage."""
+    _write_tiny_linear_snapshot(
+        tmp_path, **{"linear_attn.conv1d.weight": (24, 4, 4)}
+    )
+    with pytest.raises(
+        RuntimeError, match=r"conv1d\.weight.*\(24, 1, 4\).*\(24, 4, 4\)"
+    ):
+        load_layer_weights(tmp_path, 0)
+
+
+def test_linear_shapes_require_the_linear_config_fields():
+    """A hand-built config can schedule a linear layer without the five linear_* fields.
+
+    No HF snapshot can express this (``Qwen3_5TextConfig`` rejects ``None``), but
+    ``MiniLLMConfig`` can, and the loader must name the missing field instead of
+    falling back to 0.8B/Qwen3-Next defaults.
+    """
+    config = MiniLLMConfig(
+        n_embd=16,
+        n_head=2,
+        n_layer=1,
+        layer_types=["linear_attention"],
+    )
+    with pytest.raises(ValueError, match=r"linear_key_head_dim"):
+        _expected_linear_attention_shapes(config)
 
 
 def test_layer_index_out_of_range_is_refused(tmp_path):
@@ -274,6 +382,31 @@ def test_real_layer_weights_have_qwen35_shapes():
     assert weights["mlp.down_proj.weight"].shape == (1024, 3584)
     assert all(tensor.dtype == torch.float32 for tensor in weights.values())
     assert not any(name.startswith("linear_attn.") for name in weights)
+
+
+@pytest.mark.hf
+def test_real_linear_layer_weights_have_qwen35_shapes():
+    """Layer 0 of 0.8B is linear_attention: the gated-delta-net geometry, from the file."""
+    snapshot = _snapshot_or_skip()
+    weights = load_layer_weights(snapshot, 0)
+
+    # key_dim = 16 * 128 = 2048, value_dim = 16 * 128 = 2048, conv_dim = 6144.
+    assert weights["linear_attn.in_proj_qkv.weight"].shape == (6144, 1024)
+    assert weights["linear_attn.in_proj_z.weight"].shape == (2048, 1024)
+    assert weights["linear_attn.in_proj_b.weight"].shape == (16, 1024)
+    assert weights["linear_attn.in_proj_a.weight"].shape == (16, 1024)
+    assert weights["linear_attn.conv1d.weight"].shape == (6144, 1, 4)  # depthwise
+    assert weights["linear_attn.A_log"].shape == (16,)
+    assert weights["linear_attn.dt_bias"].shape == (16,)
+    assert weights["linear_attn.norm.weight"].shape == (128,)  # head_v_dim, not hidden
+    assert weights["linear_attn.out_proj.weight"].shape == (1024, 2048)
+    assert weights["input_layernorm.weight"].shape == (1024,)
+    assert weights["post_attention_layernorm.weight"].shape == (1024,)
+    assert weights["mlp.gate_proj.weight"].shape == (3584, 1024)
+    assert weights["mlp.up_proj.weight"].shape == (3584, 1024)
+    assert weights["mlp.down_proj.weight"].shape == (1024, 3584)
+    assert all(tensor.dtype == torch.float32 for tensor in weights.values())
+    assert not any(name.startswith("self_attn.") for name in weights)
 
 
 @pytest.mark.hf

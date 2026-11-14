@@ -63,14 +63,21 @@ Contract (load-bearing, see ``docs/decisions.md`` D8 and ``tests/conftest.py``)
 * ``g`` is log-space (``<= 0``) and ``beta`` is already sigmoid-ed; the operators apply
   neither sigmoid nor softplus (P-50). ``T >= 1``: there is no empty-sequence path.
 
-This module is inference-only and has no ``nn.Module`` yet (Step 2 adds
-``Qwen35GDN``/``Qwen35GDNBlock``); it imports neither ``fla`` nor ``transformers``.
+The operators are pure functions that own no state. ``Qwen35GDN`` (W6 Step 2) is the
+layer that owns the four projections, the depthwise conv and the gated norm, and
+``Qwen35GDNBlock`` wraps it with the two pre-norms and the shared ``MLP``. The module
+imports neither ``fla`` nor ``transformers``.
 """
 
 from __future__ import annotations
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+
+from model.config import MiniLLMConfig
+from model.layers import MLP
+from model.qwen35 import Qwen35RMSNorm, Qwen35RMSNormGated
 
 __all__ = [
     "l2norm",
@@ -79,6 +86,8 @@ __all__ = [
     "gated_delta_recurrent",
     "gated_delta_chunked",
     "compute_beta_g",
+    "Qwen35GDN",
+    "Qwen35GDNBlock",
 ]
 
 #: fp32 l2norm epsilon, fixed by HF ``l2norm`` / fla's kernel (D8, decision 3).
@@ -603,3 +612,301 @@ def compute_beta_g(
     beta = b.sigmoid()
     g = -A_log.float().exp() * F.softplus(a.float() + dt_bias)
     return beta, g
+
+
+# ============================================================
+# Linear-attention layer (W6 Step 2)
+# ============================================================
+
+#: Prefill chunk size, fixed by D-W6-6: "chunked prefill" is one forward's algorithm,
+#: not a cross-call partial prefill, so this is not a config knob.
+_CHUNK_SIZE = 64
+
+#: The five ``linear_*`` fields a Qwen3.5 gated-delta-net layer is described by. A config
+#: without them (Qwen3-0.6B, or a full-attention-only model) cannot build this layer.
+_LINEAR_FIELDS = (
+    "linear_num_key_heads",
+    "linear_num_value_heads",
+    "linear_key_head_dim",
+    "linear_value_head_dim",
+    "linear_conv_kernel_dim",
+)
+
+
+def _checked_linear_field(config: MiniLLMConfig, name: str) -> int:
+    """One ``linear_*`` field: present, a positive ``int``, or a clear ``ValueError``.
+
+    ``bool`` is rejected explicitly even though it is an ``int`` subclass: ``True`` as a
+    head count would silently mean one head, and a head count of one is a real (if odd)
+    configuration, so the typo has to be caught here rather than diagnosed from shapes.
+    """
+    value = getattr(config, name, None)
+    if value is None:
+        raise ValueError(
+            f"Qwen35GDN needs config.{name}: it is one of the five linear_* fields that "
+            "describe a Qwen3.5 gated-delta-net layer. A config without them "
+            "(Qwen3-0.6B, or a full-attention-only model) has no linear-attention layer."
+        )
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(
+            f"config.{name} must be a positive int, got {value!r} "
+            f"({type(value).__name__})"
+        )
+    if value < 1:
+        raise ValueError(f"config.{name} must be >= 1, got {value}")
+    return value
+
+
+def _check_layer_input(x: torch.Tensor, hidden: int) -> None:
+    if not isinstance(x, torch.Tensor):
+        raise TypeError(f"Qwen35GDN expects a torch.Tensor, got {type(x).__name__}")
+    if not x.is_floating_point():
+        raise TypeError(f"Qwen35GDN expects a floating-point tensor, got {x.dtype}")
+    if x.dim() != 3:
+        raise ValueError(f"Qwen35GDN expects (B, T, hidden), got shape {tuple(x.shape)}")
+    if x.shape[-1] != hidden:
+        raise ValueError(
+            f"Qwen35GDN expects hidden={hidden} as the last dimension, got "
+            f"{x.shape[-1]} (shape {tuple(x.shape)})"
+        )
+    if x.shape[1] < 1:
+        raise ValueError("Qwen35GDN needs T >= 1; empty sequences are not a path")
+
+
+def _checked_past_len(past_len: int) -> int:
+    """``past_len`` is a dispatch key only (P-56), so it must be an honest int."""
+    if isinstance(past_len, bool) or not isinstance(past_len, int):
+        raise TypeError(
+            "past_len must be a non-negative int (0 = prefill, > 0 = decode), got "
+            f"{type(past_len).__name__}"
+        )
+    if past_len < 0:
+        raise ValueError(f"past_len must be >= 0, got {past_len}")
+    return past_len
+
+
+class Qwen35GDN(nn.Module):
+    """Qwen3.5's gated-delta-net linear-attention layer (HF ``Qwen3_5GatedDeltaNet``).
+
+    Four **independent** input projections, mirroring HF exactly (P-53):
+
+    * ``in_proj_qkv`` -> ``(B, T, 2*key_dim + value_dim)``. This is the only projection
+      whose output reaches the short conv, and it is split into q/k/v *after* the conv:
+      HF convolves the concatenated tensor, and splitting first would convolve three
+      separately-initialized channels -- a different layer.
+    * ``in_proj_z`` -> the output gate of the gated norm (``value_dim``).
+    * ``in_proj_b`` / ``in_proj_a`` -> beta logits / decay logits (``num_v_heads`` each).
+
+    Qwen3-Next packs these as ``qkvz``/``ba``; 0.8B does **not**, so nothing is fused
+    here. ``z``, ``b`` and ``a`` skip the conv entirely: convolving them would apply
+    three depthwise filters HF never runs.
+
+    q/k go into the delta rule **raw**. :func:`gated_delta_chunked` /
+    :func:`gated_delta_recurrent` own the fp32 l2norm and the ``K**-0.5`` scale (D8,
+    decision 3); pre-normalizing in the layer would apply the norm twice.
+
+    ``forward`` dispatches on ``past_len``, **not** on ``T`` alone (P-56):
+    ``past_len == 0`` is a chunk-prefill -- including a 1-token prompt, which HF also
+    sends through the chunked path -- and ``past_len > 0`` is single-token decode
+    against the caller's states. ``past_len`` never enters the arithmetic (a delta-net
+    layer has no positions); it only selects the endpoint and validates the states.
+    Cross-call chunked prefill (``past_len > 0`` with ``T > 1``) is W7.
+
+    State is **not** allocated or pooled here (D-W6-2): the caller keeps ``conv_state``
+    ``(B, conv_dim, k - 1)`` and ``recurrent_state`` ``(B, H_v, K, V)`` across calls and
+    passes back what ``forward`` returned. The recurrent state is always fp32 (HF
+    behaviour); the conv state follows the input dtype.
+    """
+
+    def __init__(self, config: MiniLLMConfig):
+        super().__init__()
+        num_k_heads = _checked_linear_field(config, "linear_num_key_heads")
+        num_v_heads = _checked_linear_field(config, "linear_num_value_heads")
+        head_k_dim = _checked_linear_field(config, "linear_key_head_dim")
+        head_v_dim = _checked_linear_field(config, "linear_value_head_dim")
+        kernel_size = _checked_linear_field(config, "linear_conv_kernel_dim")
+        if num_v_heads % num_k_heads != 0:
+            raise ValueError(
+                f"linear_num_value_heads ({num_v_heads}) must be an integer multiple of "
+                f"linear_num_key_heads ({num_k_heads}): the operators repeat q/k "
+                "num_v_heads // num_k_heads times (GQA) and would otherwise lose heads"
+            )
+
+        self.hidden_size = config.n_embd
+        self.num_k_heads = num_k_heads
+        self.num_v_heads = num_v_heads
+        self.head_k_dim = head_k_dim
+        self.head_v_dim = head_v_dim
+        self.key_dim = head_k_dim * num_k_heads
+        self.value_dim = head_v_dim * num_v_heads
+        self.conv_dim = 2 * self.key_dim + self.value_dim
+        self.conv_kernel_size = kernel_size
+        self.layer_norm_epsilon = config.norm_eps
+        # 0.8B sets hidden_act="silu"; the conv operators reject anything else. Kept as an
+        # attribute (HF has one) for the layer tests, not as a knob.
+        self.activation = _CONV_ACTIVATION
+
+        self.conv1d = nn.Conv1d(
+            self.conv_dim,
+            self.conv_dim,
+            kernel_size=kernel_size,
+            groups=self.conv_dim,
+            bias=False,
+            padding=kernel_size - 1,
+        )
+        self.dt_bias = nn.Parameter(torch.ones(num_v_heads))
+        self.A_log = nn.Parameter(torch.log(torch.empty(num_v_heads).uniform_(0.01, 16)))
+        self.norm = Qwen35RMSNormGated(head_v_dim, eps=config.norm_eps)
+        self.out_proj = nn.Linear(self.value_dim, self.hidden_size, bias=False)
+        self.in_proj_qkv = nn.Linear(self.hidden_size, self.conv_dim, bias=False)
+        self.in_proj_z = nn.Linear(self.hidden_size, self.value_dim, bias=False)
+        self.in_proj_b = nn.Linear(self.hidden_size, num_v_heads, bias=False)
+        self.in_proj_a = nn.Linear(self.hidden_size, num_v_heads, bias=False)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor | None = None,
+        recurrent_state: torch.Tensor | None = None,
+        past_len: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(out, new_conv_state, new_recurrent_state)``; ``out`` matches ``x``.
+
+        ``past_len == 0`` requires both states to be ``None`` (a fresh request starts
+        empty; W6 supports no prefix states). ``past_len > 0`` requires exactly one token
+        and both states, and returns the updated pair. Neither argument is mutated.
+        """
+        _check_layer_input(x, self.hidden_size)
+        past_len = _checked_past_len(past_len)
+        batch, seq_len, _ = x.shape
+
+        if past_len == 0:
+            if conv_state is not None or recurrent_state is not None:
+                given = ", ".join(
+                    f"{name}={tuple(getattr(value, 'shape', ()))}"
+                    for name, value in (
+                        ("conv_state", conv_state),
+                        ("recurrent_state", recurrent_state),
+                    )
+                    if value is not None
+                )
+                raise ValueError(
+                    "Qwen35GDN: past_len=0 is a prefill and must start from empty state, "
+                    f"but got {given}. Prefix states are not supported in W6; prefill "
+                    "the whole prefix in one call."
+                )
+        else:
+            if seq_len > 1:
+                raise NotImplementedError(
+                    f"Qwen35GDN: past_len={past_len} with T={seq_len} would be a "
+                    "cross-call chunked prefill, which is not supported (W7). Decode one "
+                    "token at a time, or prefill the whole sequence in a single call "
+                    "with past_len=0."
+                )
+            if conv_state is None or recurrent_state is None:
+                raise ValueError(
+                    "Qwen35GDN: past_len="
+                    f"{past_len} is a decode step and needs both states, but conv_state "
+                    f"is {'None' if conv_state is None else 'set'} and recurrent_state "
+                    f"is {'None' if recurrent_state is None else 'set'}. Feed the states "
+                    "returned by the prefill (past_len=0) call."
+                )
+
+        # 1. Project once; the conv consumes the concatenated q/k/v, so the transpose to
+        #    channels-first happens before the split, exactly as in HF.
+        mixed_qkv = self.in_proj_qkv(x).transpose(1, 2)
+
+        # 2. Short conv, prefill or single-token decode; the state stays pre-activation.
+        if past_len == 0:
+            mixed_qkv, new_conv_state = causal_conv_prefill(
+                mixed_qkv, self.conv1d.weight, self.activation
+            )
+        else:
+            mixed_qkv, new_conv_state = causal_conv_decode(
+                mixed_qkv, conv_state, self.conv1d.weight, self.activation
+            )
+        mixed_qkv = mixed_qkv.transpose(1, 2)
+
+        # 3. Split after the conv (P-53) and give the operators head-major views; the
+        #    operators do the GQA repeat, l2norm and q scale themselves.
+        query, key, value = torch.split(
+            mixed_qkv, [self.key_dim, self.key_dim, self.value_dim], dim=-1
+        )
+        query = query.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
+        key = key.reshape(batch, seq_len, self.num_k_heads, self.head_k_dim)
+        value = value.reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+
+        # 4. beta already sigmoid-ed, g already log-space <= 0 (P-50): the operators
+        #    re-apply neither.
+        beta, g = compute_beta_g(
+            self.in_proj_b(x), self.in_proj_a(x), self.A_log, self.dt_bias
+        )
+
+        # 5. Raw q/k in, per D8 decision 3. Prefill is the chunked WY/UT form (including
+        #    T == 1); decode is the recurrent form seeded by the caller's state.
+        if past_len == 0:
+            core, new_recurrent_state = gated_delta_chunked(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                chunk_size=_CHUNK_SIZE,
+                initial_state=None,
+                output_final_state=True,
+            )
+        else:
+            core, new_recurrent_state = gated_delta_recurrent(
+                query,
+                key,
+                value,
+                g,
+                beta,
+                initial_state=recurrent_state,
+                output_final_state=True,
+            )
+
+        # 6. Output gate and gated norm, in HF's flattened (B*T, head_v_dim) layout.
+        z = self.in_proj_z(x).reshape(batch, seq_len, self.num_v_heads, self.head_v_dim)
+        core = core.reshape(-1, self.head_v_dim)
+        z = z.reshape(-1, self.head_v_dim)
+        normed = self.norm(core, z).reshape(batch, seq_len, self.value_dim)
+
+        # 7. Back to model width.
+        out = self.out_proj(normed)
+        return out, new_conv_state, new_recurrent_state
+
+
+class Qwen35GDNBlock(nn.Module):
+    """Pre-norm residual block around :class:`Qwen35GDN`, with carried state.
+
+    ``x + linear_attn(input_layernorm(x))`` then ``x + mlp(post_attention_layernorm(x))``
+    -- the same residual shape as ``Qwen35FullAttentionBlock``, and the same ``MLP``.
+
+    ``forward`` returns ``(x, new_conv_state, new_recurrent_state)`` rather than a single
+    tensor, which is the one signature difference from the full-attention block: the
+    linear-attention state is per-request, so the caller (``Qwen35State`` in Step 4) has
+    to write it back. Swallowing the states inside the block would make the block own
+    storage, which is exactly what W7's ``StatePool`` has to replace (D-W6-2).
+    """
+
+    def __init__(self, config: MiniLLMConfig):
+        super().__init__()
+        self.input_layernorm = Qwen35RMSNorm(config.n_embd, config.norm_eps)
+        self.linear_attn = Qwen35GDN(config)
+        self.post_attention_layernorm = Qwen35RMSNorm(config.n_embd, config.norm_eps)
+        self.mlp = MLP(config)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        conv_state: torch.Tensor | None = None,
+        recurrent_state: torch.Tensor | None = None,
+        past_len: int = 0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        attn_out, new_conv_state, new_recurrent_state = self.linear_attn(
+            self.input_layernorm(x), conv_state, recurrent_state, past_len
+        )
+        x = x + attn_out
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x, new_conv_state, new_recurrent_state
