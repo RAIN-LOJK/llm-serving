@@ -26,7 +26,7 @@ PROMPTS = ROOT / "bench" / "prompts.json"
 
 
 # --------------------------------------------------------------------------- factory
-def test_factory_wires_paged_and_keeps_hybrid_loud():
+def test_factory_wires_paged_and_hybrid():
     engine = build_engine(
         {"name": "dummy"},
         {"impl": "paged", "max_batch": 4, "block_size": 16, "kv_blocks": 64},
@@ -34,8 +34,12 @@ def test_factory_wires_paged_and_keeps_hybrid_loud():
     assert isinstance(engine, PagedEngine)
     assert engine.impl == "paged"
     assert (engine.block_size, engine.kv_blocks, engine.max_batch) == (16, 64, 4)
-    with pytest.raises(NotImplementedError, match="W7"):
-        build_engine({"name": "x"}, {"impl": "hybrid"})
+    # W7 Step 2: the hybrid arm is wired, but constructing it must not load weights.
+    from bench.engines.hybrid import HybridEngine
+
+    hybrid = build_engine({"name": "x"}, {"impl": "hybrid"})
+    assert isinstance(hybrid, HybridEngine)
+    assert hybrid.impl == "hybrid"
 
 
 def test_paged_arm_refuses_per_request_generate():
@@ -77,8 +81,18 @@ def test_fill_run_stops_after_admission_and_reports_capacity():
         assert row["decode_event_ms"] == 0.0
         assert "paged_stats" not in row
         assert "blocks_in_use" in row and "workspace_mb" in row
-    # Every request was admitted eventually; fill generates no tokens.
-    assert all(req["state"] == "finished" for req in result.request_rows)
+        # W7 §5.4: admitted requests stay resident, so nothing retires before the drain.
+        assert row["retired"] == 0
+    # Cross-step residency: the first pass fills the pool and the second pass (same
+    # resident set) admits nothing, which is where the run stops. Eight blocks cannot
+    # hold all eight dummy requests, so the tail stays queued -- that is the honest
+    # capacity answer, not an error.
+    assert [row["admitted"] for row in result.step_rows][-1] == 0
+    admitted = [req for req in result.request_rows if req["state"] == "finished"]
+    queued = [req for req in result.request_rows if req["state"] == "queued"]
+    assert admitted and queued
+    assert len(admitted) == max(row["active"] for row in result.step_rows)
+    # Fill generates no tokens, for residents and for the queued tail alike.
     assert all(req["out_tokens"] == 0 for req in result.request_rows)
     capacity = result.summary["capacity"]
     assert capacity["peak_concurrency"] == max(row["active"] for row in result.step_rows)
@@ -114,12 +128,20 @@ def test_fill_request_rows_carry_the_block_account():
         result = engine.run_trace(trace)
     finally:
         engine.close()
-    for row in result.request_rows:
+    admitted = [row for row in result.request_rows if row["admitted"]]
+    queued = [row for row in result.request_rows if not row["admitted"]]
+    assert admitted and queued, "the 8-block pool cannot hold all four requests"
+    for row in admitted:
         assert row["blocks_reserved"] >= row["blocks_written"] >= 1
         # kv_own_mb is this request's reservation, not pool / max_batch.
         assert row["kv_own_mb"] is not None
         assert row["kv_own_mb"] > 0.0
         assert row["block_size"] == 16
+    # A queued request was never prefilled: it owns no block and wrote no KV.
+    for row in queued:
+        assert row["state"] == "queued"
+        assert row["blocks_reserved"] == 0 and row["blocks_written"] == 0
+        assert row["kv_own_mb"] is None
 
 
 def test_fill_scheduler_is_a_scheduler_subclass():

@@ -1,0 +1,65 @@
+# W7-0014 · E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0014-e4a-hybrid-continuous.toml
+# 8k+128 的预留是 ceil(8320/16)=520 块/请求；B=8 最坏 8×520=4160 块，故取 4200，
+# 避免准入节流污染 TPOT/P2/P3（E3/E4a 是延迟/机制探针，不是 1640 容量对）。
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；
+# 本目录只准备配置，不代表任何数字已经测到。
+
+schema = 1
+
+[exp]
+id = "W7-0014"
+stage = "W7"
+type = "scenario"
+slug = "e4a-hybrid-continuous"
+title = "E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous"
+hypothesis = ["continuous_batching_still_beats_static_on_the_hybrid_engine"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048, 8192]
+max_new_tokens = 128
+arrival = "poisson"
+rate = 11.0
+requests = 128
+budgets = [16, 32, 64, 128]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 8
+pool = "paged"
+linear_slots = 8
+kv_blocks = 4200
+block_size = 16
+max_prefill_tokens = 8192
+
+[baseline]
+run_id = "W7-0015"
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E4a 全部 record_only；只报 continuous/static tok/s 比值，纯臂引用 W45-0010/0011，标 trace 差异。
+mode = "record_only"
+criteria = []

@@ -12,6 +12,7 @@ from bench.engines.base import Engine, GenerationResult
 from bench.engines.continuous import ContinuousEngine
 from bench.engines.dummy import DummyEngine
 from bench.engines.hf import HFEngine
+from bench.engines.hybrid import HybridEngine
 from bench.engines.minillm import ServeEngine
 from bench.engines.paged import PagedEngine
 
@@ -21,14 +22,15 @@ __all__ = [
     "ContinuousEngine",
     "DummyEngine",
     "HFEngine",
+    "HybridEngine",
     "PagedEngine",
     "ServeEngine",
     "build_engine",
 ]
 
-_NOT_YET = {
-    "hybrid": "hybrid attention lives in serve/state_pool.py (W7)",
-}
+#: Impls that are still unwired. W7 Step 2 wires ``hybrid``; keep this empty-but-present
+#: so a future arm still fails with the stage that owns it instead of ``unknown impl``.
+_NOT_YET: dict[str, str] = {}
 
 
 def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = None) -> Engine:
@@ -102,6 +104,26 @@ def build_engine(model_cfg: dict[str, Any], engine_cfg: dict[str, Any] | None = 
             kv_blocks=int(engine_cfg.get("kv_blocks", 1)),
             fill=bool(engine_cfg.get("_fill", False)),
             max_prefill_tokens=int(engine_cfg.get("max_prefill_tokens", 8192)),
+        )
+    if impl == "hybrid":
+        # W7 (D9): the Qwen3.5 hybrid arm. Per-request prefill in Step 2 and no fill-only
+        # residency yet; the adapter raises for those instead of pretending.
+        return HybridEngine(
+            name=name,
+            revision=model_cfg.get("revision"),
+            dtype=str(model_cfg.get("dtype", engine_cfg.get("dtype", "float32"))),
+            device=device,
+            model_path=model_cfg.get("path"),
+            max_batch=int(engine_cfg.get("max_batch", 1)),
+            policy=str(engine_cfg.get("_policy", "continuous")),
+            vocab_size=int(engine_cfg.get("vocab_size", 1024)),
+            seed=int(engine_cfg.get("seed", 0)),
+            fill=bool(engine_cfg.get("_fill", False)),
+            max_prefill_tokens=int(engine_cfg.get("max_prefill_tokens", 8192)),
+            linear_slots=int(engine_cfg.get("linear_slots", 1)),
+            kv_blocks=int(engine_cfg.get("kv_blocks", 1)),
+            block_size=int(engine_cfg.get("block_size", 16)),
+            pool=str(engine_cfg.get("pool", "paged")),
         )
     if impl in _NOT_YET:
         raise NotImplementedError(f"engine impl={impl!r}: {_NOT_YET[impl]}")

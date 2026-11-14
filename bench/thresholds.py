@@ -673,6 +673,485 @@ def _memory_ratio(summary: Mapping[str, Any]) -> tuple[float | None, float | Non
     return ratio, peak_over_driver, per_bucket
 
 
+# ------------------------------------------------------------------------ W7 (D9)
+#
+# W7 pairs a hybrid arm (Qwen3.5-0.8B, six full-attention layers + 18 linear-state
+# layers) with a pure 0.6B arm under the same 1640 MiB state budget. The pairing is
+# *not* the W4.5 mechanism pairing: the two arms run different models and different
+# attention backends, so only the protocol keys (dtype/device/max_new_tokens) and the
+# workload geometry (synthetic context + fill/capacity basis) may be compared.
+#
+# Cross-model synthetic traces share ``trace_sha256`` after W7's cap: ``bench/run.py``
+# draws synthetic ids below ``min(model.vocab_size, 151936)``, so the 0.6B (151936) and
+# 0.8B (248320) arms see identical ids for the same contexts/seed. The evaluators still
+# pair on the recorded context/budget *and* require the hash to match; a mismatch is a
+# workload difference, not a capacity result.
+
+_W7_TOTAL_BUDGET_MB = 1640.0
+_W7_CAPACITY_CONTEXTS = {
+    "capacity_speedup_512_min": 512,
+    "capacity_speedup_2k_min": 2048,
+    "capacity_speedup_8k_min": 8192,
+}
+
+
+def _w7_capacity(summary: Mapping[str, Any]) -> Mapping[str, Any]:
+    return _block(summary, "capacity")
+
+
+def _w7_nominal_context(group: Mapping[str, Any]) -> int | None:
+    """The prompt context a group belongs to: ``context - out_tokens``.
+
+    ``bench.scenario`` keys a group by ``prompt + generated`` (D5/P-30), not by the
+    prompt alone. For a fill probe ``out_tokens`` is 0; for a scenario run the group's
+    own median output length recovers the prompt context without guessing a bucket.
+    """
+    context = _number(group.get("context"))
+    out = _number((group.get("out_tokens") or {}).get("median"))
+    if context is None or out is None:
+        return None
+    return int(round(context - out))
+
+
+def _w7_single_context(summary: Mapping[str, Any]) -> tuple[int | None, str | None]:
+    """The one context a fill probe ran at, or a reason it cannot be established."""
+    raw = _w7_capacity(summary).get("context_tokens")
+    if raw is not None:
+        value = _number(raw)
+        if value is None or value <= 0 or not float(value).is_integer():
+            return None, "capacity.context_tokens is not a positive integer"
+        return int(value), None
+    groups = summary.get("groups") or []
+    contexts = sorted(
+        {
+            context
+            for context in (_w7_nominal_context(group) for group in groups)
+            if context is not None
+        }
+    )
+    if not contexts:
+        return None, (
+            "summary records neither capacity.context_tokens nor a groups[] entry "
+            "with context - out_tokens"
+        )
+    if len(contexts) > 1:
+        return None, (
+            f"summary mixes prompt contexts {contexts}; a single-context fill probe is "
+            "required for a capacity/P1 pairing"
+        )
+    return contexts[0], None
+
+
+def _w7_weighted_median(values: Sequence[tuple[float, int]]) -> float:
+    ordered = sorted(values)
+    total = sum(weight for _, weight in ordered)
+    cumulative = 0
+    for value, weight in ordered:
+        cumulative += weight
+        if cumulative * 2 >= total:
+            return value
+    return ordered[-1][0]
+
+
+def _w7_group_series(
+    summary: Mapping[str, Any], context: int, metric: str
+) -> tuple[float | None, int | None, int, str | None]:
+    """``(weighted median, batch, n_groups, reason)`` for one prompt context."""
+    selected: list[tuple[float, int, int]] = []
+    for group in summary.get("groups") or []:
+        if _w7_nominal_context(group) != int(context):
+            continue
+        value = _number((group.get(metric) or {}).get("median"))
+        if value is None:
+            continue
+        try:
+            batch = int(group.get("batch") or 1)
+        except (TypeError, ValueError):
+            batch = 1
+        selected.append((value, max(1, int(group.get("n") or 1)), batch))
+    if not selected:
+        return None, None, 0, f"summary has no groups[] entry for prompt context {context}"
+    # Scenario request rows do not carry a per-request ``batch`` (the run's width is
+    # ``[engine].max_batch``), so ``bench.scenario`` keys a scenario group with batch=1.
+    # The protocol's ``max_batch`` is the authoritative width; only fall back to the
+    # group field when the summary has no protocol block.
+    protocol_batch: int | None = None
+    raw_batch = (summary.get("protocol") or {}).get("max_batch")
+    if isinstance(raw_batch, int) and not isinstance(raw_batch, bool) and raw_batch >= 1:
+        protocol_batch = raw_batch
+    batches = sorted({batch for _, _, batch in selected})
+    if protocol_batch is None and len(batches) != 1:
+        return None, None, len(selected), (
+            f"prompt context {context} is spread over batches {batches}; one run must "
+            "measure one batch"
+        )
+    value = _w7_weighted_median([(value, weight) for value, weight, _ in selected])
+    return value, protocol_batch if protocol_batch is not None else batches[0], len(selected), None
+
+
+def _w7_pair_problems(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *,
+    require_batch: bool,
+) -> list[str]:
+    """Protocol-level pairing for W7: same dtype/device/protocol, same pool width."""
+    problems = _protocol_mismatches(summary, baseline, mechanism=False)
+    ours_hash = (summary.get("protocol") or {}).get("trace_sha256")
+    theirs_hash = (baseline.get("protocol") or {}).get("trace_sha256")
+    if ours_hash is None or theirs_hash is None:
+        problems.append(
+            f"trace_sha256: missing from an arm ({ours_hash!r} vs baseline {theirs_hash!r})"
+        )
+    elif ours_hash != theirs_hash:
+        problems.append(f"trace_sha256: {ours_hash!r} vs baseline {theirs_hash!r}")
+    if require_batch:
+        ours = (summary.get("protocol") or {}).get("max_batch")
+        theirs = (baseline.get("protocol") or {}).get("max_batch")
+        if ours is None or theirs is None:
+            problems.append(f"max_batch: missing from an arm ({ours!r} vs baseline {theirs!r})")
+        elif ours != theirs:
+            problems.append(f"max_batch: {ours!r} vs baseline {theirs!r}")
+    return problems
+
+
+def _w7_state_budget(
+    summary: Mapping[str, Any], baseline: Mapping[str, Any]
+) -> tuple[list[str], list[str]]:
+    """``(missing, over_budget)`` for both fill arms against the 1640 MiB state budget.
+
+    A missing ledger is a data gap (pending); an explicit value above the budget is an
+    invalid run (D9-8 / plan §6.4), never silently clamped.
+    """
+    missing: list[str] = []
+    over: list[str] = []
+    for label, arm in (("ours", summary), ("baseline", baseline)):
+        value = _number(_ledger_value(arm, "state_total_mb"))
+        if value is None:
+            missing.append(
+                f"state_total_mb: missing from {label} "
+                "(capacity.state_total_mb is required for the W7 budget check)"
+            )
+        elif value > _W7_TOTAL_BUDGET_MB:
+            over.append(
+                f"state_total_mb: {label} {value:.3f} MiB > {_W7_TOTAL_BUDGET_MB:.0f} MiB"
+            )
+    return missing, over
+
+
+def _check_w7_capacity_speedup(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    limit: float,
+    context: int,
+) -> dict[str, Any]:
+    """E1/E2: hybrid/pure ``peak_concurrency`` at one pre-registered fill context."""
+    if not baseline:
+        return {"status": "pending", "reason": "no paired pure 0.6B fill summary"}
+    ours_ctx, ours_error = _w7_single_context(summary)
+    ref_ctx, ref_error = _w7_single_context(baseline)
+    if ours_error or ref_error:
+        return {
+            "status": "pending",
+            "reason": "; ".join(
+                part
+                for part in (
+                    f"ours: {ours_error}" if ours_error else "",
+                    f"baseline: {ref_error}" if ref_error else "",
+                )
+                if part
+            ),
+        }
+    problems = _w7_pair_problems(summary, baseline, require_batch=True)
+    if ours_ctx != int(context) or ref_ctx != int(context):
+        problems.append(
+            f"context_tokens: ours {ours_ctx!r}, baseline {ref_ctx!r}, criterion {context}"
+        )
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "fill arms are not the same context/device/dtype pair",
+        }
+    missing_budget, over_budget = _w7_state_budget(summary, baseline)
+    if missing_budget:
+        return {"status": "pending", "reason": "; ".join(missing_budget)}
+    if over_budget:
+        return {
+            "status": "invalid",
+            "problems": over_budget[:6],
+            "reason": "a fill arm is over the 1640 MiB state budget; do not judge a ratio",
+        }
+
+    mine, reference = _peak_concurrency(summary), _peak_concurrency(baseline)
+    if mine is None or reference is None:
+        return {"status": "pending", "reason": "capacity.peak_concurrency missing from an arm"}
+    try:
+        mine_value, reference_value = float(mine), float(reference)
+    except (TypeError, ValueError):
+        return {"status": "pending", "reason": "capacity.peak_concurrency is not numeric"}
+    if reference_value <= 0.0:
+        return {"status": "pending", "reason": "baseline peak_concurrency is not positive"}
+
+    ratio = mine_value / reference_value
+    entry: dict[str, Any] = {
+        "status": "pass" if ratio >= limit else "fail",
+        "value": round(ratio, 3),
+        "target": limit,
+        "context_tokens": int(context),
+        "ours_peak_concurrency": mine_value,
+        "baseline_peak_concurrency": reference_value,
+        "state_total_mb": _ledger_value(summary, "state_total_mb"),
+        "baseline_state_total_mb": _ledger_value(baseline, "state_total_mb"),
+        "budget_mb": _W7_TOTAL_BUDGET_MB,
+        "reason": "fill-only allocator capacity at the named context; hybrid / pure, "
+        "both arms inside the same 1640 MiB state budget",
+    }
+    return entry
+
+
+def _check_w7_p1_state_ratio(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    limit: float,
+) -> dict[str, Any]:
+    """P1: per-sequence state at 8k, hybrid vs pure. Ratio is pure / hybrid."""
+    if not baseline:
+        return {"status": "pending", "reason": "no paired pure 0.6B fill summary"}
+    ours_ctx, ours_error = _w7_single_context(summary)
+    ref_ctx, ref_error = _w7_single_context(baseline)
+    if ours_error or ref_error:
+        return {
+            "status": "pending",
+            "reason": "; ".join(
+                part
+                for part in (
+                    f"ours: {ours_error}" if ours_error else "",
+                    f"baseline: {ref_error}" if ref_error else "",
+                )
+                if part
+            ),
+        }
+    problems = _w7_pair_problems(summary, baseline, require_batch=True)
+    if ours_ctx != 8192 or ref_ctx != 8192:
+        problems.append(
+            f"context_tokens: ours {ours_ctx!r}, baseline {ref_ctx!r}, P1 endpoint is 8192"
+        )
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "P1 requires the 8k fill pair on the same device/dtype",
+        }
+
+    ours_peak, ref_peak = _peak_concurrency(summary), _peak_concurrency(baseline)
+    if ours_peak is None or ref_peak is None:
+        return {"status": "pending", "reason": "capacity.peak_concurrency missing from an arm"}
+    try:
+        ours_peak_value, ref_peak_value = float(ours_peak), float(ref_peak)
+    except (TypeError, ValueError):
+        return {"status": "pending", "reason": "capacity.peak_concurrency is not numeric"}
+    if ours_peak_value <= 0.0 or ref_peak_value <= 0.0:
+        return {"status": "pending", "reason": "capacity.peak_concurrency is not positive"}
+
+    used_ours = _number(_w7_capacity(summary).get("state_used_mb"))
+    used_ref = _number(_w7_capacity(baseline).get("state_used_mb"))
+    if used_ours is not None and used_ref is not None:
+        basis = "capacity.state_used_mb / peak_concurrency (written KV + linear slot)"
+        ours_per = used_ours / ours_peak_value
+        ref_per = used_ref / ref_peak_value
+        used_total_ours, used_total_ref = used_ours, used_ref
+    else:
+        total_ours = _number(_w7_capacity(summary).get("state_total_mb"))
+        total_ref = _number(_w7_capacity(baseline).get("state_total_mb"))
+        if total_ours is None or total_ref is None:
+            return {
+                "status": "pending",
+                "reason": "capacity.state_used_mb (or state_total_mb) missing from an arm; "
+                "request rows are not in summary.json, so the ratio cannot be computed",
+            }
+        basis = (
+            "capacity.state_total_mb / peak_concurrency (reserved; integer floor can "
+            "amplify the 8k ratio)"
+        )
+        ours_per = total_ours / ours_peak_value
+        ref_per = total_ref / ref_peak_value
+        used_total_ours, used_total_ref = total_ours, total_ref
+
+    if ours_per <= 0.0:
+        return {"status": "pending", "reason": "hybrid per-sequence state is not positive"}
+    ratio = ref_per / ours_per
+    return {
+        "status": "pass" if ratio >= limit else "fail",
+        "value": round(ratio, 3),
+        "target": limit,
+        "context_tokens": 8192,
+        "basis": basis,
+        "ours_state_mb_per_seq": round(ours_per, 3),
+        "baseline_state_mb_per_seq": round(ref_per, 3),
+        "ours_state_mb": used_total_ours,
+        "baseline_state_mb": used_total_ref,
+        "ours_peak_concurrency": ours_peak_value,
+        "baseline_peak_concurrency": ref_peak_value,
+        "reason": "per-sequence state at 8k: pure / hybrid; P1 passes when the hybrid "
+        "sequence costs <= 1/limit of the pure one",
+    }
+
+
+def _check_w7_tpot_growth(
+    summary: Mapping[str, Any], limit: float, *, mode: str
+) -> dict[str, Any]:
+    """P3: TPOT(8k) / TPOT(512) from the per-context groups of one scenario arm."""
+    tpot_512, batch_512, n_512, error_512 = _w7_group_series(summary, 512, "tpot_ms")
+    tpot_8k, batch_8k, n_8k, error_8k = _w7_group_series(summary, 8192, "tpot_ms")
+    if error_512 or error_8k:
+        return {
+            "status": "pending",
+            "reason": "; ".join(part for part in (error_512, error_8k) if part),
+        }
+    if batch_512 != batch_8k:
+        return {
+            "status": "pending",
+            "reason": f"512 is at batch {batch_512}, 8k at batch {batch_8k}; one growth "
+            "ratio needs one batch",
+        }
+    if tpot_512 is None or tpot_8k is None or tpot_512 <= 0.0:
+        return {"status": "pending", "reason": "TPOT at 512 or 8k is missing/non-positive"}
+    growth = tpot_8k / tpot_512
+    if mode == "max":
+        status = "pass" if growth <= limit else "fail"
+        direction = "hybrid TPOT growth must stay <= target"
+    elif mode == "min":
+        status = "pass" if growth >= limit else "fail"
+        direction = "pure TPOT growth must reach >= target"
+    else:  # pragma: no cover - internal misuse
+        raise ValueError(f"unknown W7 growth mode {mode!r}")
+    return {
+        "status": status,
+        "value": round(growth, 3),
+        "target": limit,
+        "batch": batch_512,
+        "tpot_512_ms": round(tpot_512, 3),
+        "tpot_8k_ms": round(tpot_8k, 3),
+        "n_groups_512": n_512,
+        "n_groups_8k": n_8k,
+        "reason": f"TPOT(8k)/TPOT(512) from per-context groups; {direction}",
+    }
+
+
+def _check_w7_p2_latency(
+    summary: Mapping[str, Any],
+    baseline: Mapping[str, Any] | None,
+    limit: float,
+) -> dict[str, Any]:
+    """P2-latency: hybrid/pure TTFT and TPOT at 512. Split results are 口径依赖."""
+    if not baseline:
+        return {"status": "pending", "reason": "no paired pure 0.6B scenario summary"}
+    problems = _w7_pair_problems(summary, baseline, require_batch=True)
+    if problems:
+        return {
+            "status": "invalid",
+            "problems": problems[:6],
+            "reason": "512 latency pair is not the same device/dtype/batch",
+        }
+    ours_ttft, ours_batch, _, ours_ttft_error = _w7_group_series(summary, 512, "ttft_ms")
+    ours_tpot, _, _, ours_tpot_error = _w7_group_series(summary, 512, "tpot_ms")
+    ref_ttft, ref_batch, _, ref_ttft_error = _w7_group_series(baseline, 512, "ttft_ms")
+    ref_tpot, _, _, ref_tpot_error = _w7_group_series(baseline, 512, "tpot_ms")
+    errors = [
+        part
+        for part in (
+            f"ours TTFT: {ours_ttft_error}" if ours_ttft_error else "",
+            f"ours TPOT: {ours_tpot_error}" if ours_tpot_error else "",
+            f"baseline TTFT: {ref_ttft_error}" if ref_ttft_error else "",
+            f"baseline TPOT: {ref_tpot_error}" if ref_tpot_error else "",
+        )
+        if part
+    ]
+    if errors:
+        return {"status": "pending", "reason": "; ".join(errors)}
+    if ours_batch != ref_batch:
+        return {
+            "status": "invalid",
+            "problems": [f"batch: {ours_batch!r} vs baseline {ref_batch!r}"],
+            "reason": "the 512 latency pair must run the same batch",
+        }
+    if not ours_ttft or not ours_tpot or not ref_ttft or not ref_tpot:
+        return {"status": "pending", "reason": "TTFT/TPOT at 512 is missing or non-positive"}
+    ttft_ratio = ours_ttft / ref_ttft
+    tpot_ratio = ours_tpot / ref_tpot
+    if ttft_ratio >= limit and tpot_ratio >= limit:
+        status = "pass"
+        reason = "both TTFT and TPOT show hybrid >= target slower than pure at 512"
+    elif ttft_ratio < limit and tpot_ratio < limit:
+        status = "fail"
+        reason = "neither TTFT nor TPOT is materially worse at 512"
+    else:
+        status = "口径依赖"
+        reason = "TTFT and TPOT disagree on materiality at 512; report both, do not force a pass"
+    return {
+        "status": status,
+        "target": limit,
+        "batch": ours_batch,
+        "ttft_ratio": round(ttft_ratio, 3),
+        "tpot_ratio": round(tpot_ratio, 3),
+        "ours_ttft_ms": round(ours_ttft, 3),
+        "baseline_ttft_ms": round(ref_ttft, 3),
+        "ours_tpot_ms": round(ours_tpot, 3),
+        "baseline_tpot_ms": round(ref_tpot, 3),
+        "reason": reason,
+    }
+
+
+def _w7_memory_crossover(summary: Mapping[str, Any]) -> tuple[float | None, str | None, str | None]:
+    """An explicitly recorded memory-crossover measurement, and where it came from."""
+    paths = (
+        ("memory_crossover", "ctx_tokens"),
+        ("memory_crossover", "context_tokens"),
+        ("memory_crossover", "prompt_tokens"),
+        ("crossover", "memory_ctx_tokens"),
+        ("crossover", "memory_context_tokens"),
+        ("crossover", "memory", "ctx_tokens"),
+        ("capacity", "memory_crossover_ctx"),
+        ("memory_crossover_ctx",),
+    )
+    for path in paths:
+        node: Any = summary
+        for part in path:
+            if not isinstance(node, Mapping):
+                node = None
+                break
+            node = node.get(part)
+        if node is None:
+            continue
+        value = _number(node)
+        if value is None:
+            return None, None, f"{'.'.join(path)} is present but not numeric"
+        return value, ".".join(path), None
+    return None, None, None
+
+
+def _check_w7_memory_crossover(
+    summary: Mapping[str, Any], limit: float
+) -> dict[str, Any]:
+    value, path, error = _w7_memory_crossover(summary)
+    if error:
+        return {"status": "pending", "reason": error}
+    if value is None:
+        return {
+            "status": "pending",
+            "reason": "summary does not record a measured memory crossover "
+            "(e.g. memory_crossover.ctx_tokens); refusing to infer one from capacity ratios",
+        }
+    return {
+        "status": "pass" if value <= limit else "fail",
+        "value": round(value, 3),
+        "target": limit,
+        "source": path,
+        "reason": "measured memory crossover in prompt tokens; explicit summary field only",
+    }
+
+
 # ------------------------------------------------------------------------------ evaluate
 
 def evaluate(
@@ -813,6 +1292,25 @@ def evaluate(
             # W4.5 C4: same active buckets on both arms; the decode kernel is the
             # variable, so a different attn_decode is expected, not a mismatch.
             entry.update(_check_decode_step_ratio(summary, baseline, float(limit)))
+        elif name == "p1_state_ratio_8k_min":
+            entry.update(_check_w7_p1_state_ratio(summary, baseline, float(limit)))
+        elif name in _W7_CAPACITY_CONTEXTS:
+            entry.update(
+                _check_w7_capacity_speedup(
+                    summary,
+                    baseline,
+                    float(limit),
+                    _W7_CAPACITY_CONTEXTS[name],
+                )
+            )
+        elif name == "hybrid_tpot_growth_max":
+            entry.update(_check_w7_tpot_growth(summary, float(limit), mode="max"))
+        elif name == "pure_tpot_growth_min":
+            entry.update(_check_w7_tpot_growth(summary, float(limit), mode="min"))
+        elif name == "p2_latency_material_ratio":
+            entry.update(_check_w7_p2_latency(summary, baseline, float(limit)))
+        elif name == "memory_crossover_ctx_max":
+            entry.update(_check_w7_memory_crossover(summary, float(limit)))
         elif name == "packed_prefill_ttft_p99_speedup_min":
             entry.update(
                 _check_ttft_ratio(

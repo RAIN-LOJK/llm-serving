@@ -1,0 +1,64 @@
+# W7-0017 · E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0017-e4b-hybrid-seat.toml
+#
+# E4b 是 record-only 的 seat baseline（不是生产路径），与 0016 同 workload、同 1640 预算：
+#   linear 37 × 18.6328 = 689.4 MiB
+#   slab   37 行 × (6 层 × 2050 列 × 2 KV head × 256 dim × 2 B × 2) ≈ 37 × 24.0 = 888.0 MiB
+#   合计 ≈1578.3 MiB ≤ 1640
+# max_len 取 2048 + budget 1 + 1 = 2050；seat 每行是一条整 slab 行，故 max_batch=37。
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；
+# 本目录只准备配置，不代表任何数字已经测到。
+
+schema = 1
+
+[exp]
+id = "W7-0017"
+stage = "W7"
+type = "fill"
+slug = "e4b-hybrid-seat"
+title = "E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行"
+hypothesis = ["the_seat_baseline_is_the_hybrid_paged_denominator"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048]
+max_new_tokens = 1
+arrival = "closed"
+requests = 64
+budgets = [1]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 37
+pool = "seat"
+linear_slots = 37
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E4b seat 是 baseline-only（不是生产路径）；slab 不设 kv_blocks，容量记账按实际 slab 报。
+# 与 0016 配对：同 mixed-context workload、同 1640 预算，paged/seat 峰值只报不判。
+mode = "record_only"
+criteria = []

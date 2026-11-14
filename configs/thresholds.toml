@@ -114,6 +114,29 @@ status = "target"
 basis_run = ""
 state_estimate_error_max = 0.20
 
+[W7.hybrid]
+# W7 pre-registration (docs/w7-plan.md §5.7, docs/decisions.md D9): targets only, no run
+# yet. `basis_run` stays empty until the W7 closeout; closeout may only set
+# status="calibrated" and fill basis_run, never lower a value.
+status = "target"
+basis_run = ""
+greedy_tokens_exact = 64
+
+# P1 / capacity under the same 1640 MiB state budget (KV blocks + linear state slots +
+# workspace); weights are excluded, and the pure arm keeps W4 C1's basis. 512/2k/8k are
+# the capacity speedups at those contexts.
+p1_state_ratio_8k_min = 5.0
+capacity_speedup_512_min = 2.0
+capacity_speedup_2k_min = 4.0
+capacity_speedup_8k_min = 6.0
+
+# P3 endpoints are 512 -> 8k (32k is recorded but not judged); the memory crossover is
+# in prompt tokens, and P2-latency is the hybrid/pure ratio at 512.
+memory_crossover_ctx_max = 256
+p2_latency_material_ratio = 1.10
+hybrid_tpot_growth_max = 1.10
+pure_tpot_growth_min = 1.15
+
 [W45.paged]
 # W4.5 (docs/decisions.md D7). Targets, not measurements; calibrated 2026-11-06.
 # The lines were frozen after the E0/E2 dry run and did **not** change at closeout.

@@ -261,6 +261,12 @@ def test_scenario_run_writes_all_three_row_kinds(tmp_path: Path):
         assert row["context"] > 0
     # A bucket at context=0 only would leave the memory criterion permanently pending.
     assert any(group["context"] > 0 for group in summary["groups"]), summary["groups"]
+    # W7 P3 recovers the prompt context as `group.context - out_tokens`; the per-group
+    # output length must therefore be summarized, not only kept on the request row.
+    assert any(
+        (group.get("out_tokens") or {}).get("median") is not None
+        for group in summary["groups"]
+    ), summary["groups"]
     assert check_root(root) == []
 
 

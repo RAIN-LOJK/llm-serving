@@ -1,0 +1,70 @@
+# W7-0016 · E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0016-e4b-hybrid-paged.toml
+#
+# E4b 是同 1640 MiB 状态预算下的 mixed-context record-only 配对（不是生产容量线）：
+#   linear 48 × 18.6328 = 894.4 MiB
+#   KV    3970 × 0.1875 = 744.4 MiB
+#   合计 1638.8 MiB ≤ 1640
+# 48 个驻留请求在 [512,2048] 上各 24 条：24×33 + 24×129 = 3888 块 ≤ 3970；
+# 下一对再要 162 块会超预算，所以预测 peak ≈48。seat 臂 37 行，比值只报不判。
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；
+# 本目录只准备配置，不代表任何数字已经测到。
+
+schema = 1
+
+[exp]
+id = "W7-0016"
+stage = "W7"
+type = "fill"
+slug = "e4b-hybrid-paged"
+title = "E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块"
+hypothesis = ["paged_kv_keeps_a_capacity_edge_over_the_hybrid_seat_baseline"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048]
+max_new_tokens = 1
+arrival = "closed"
+requests = 64
+budgets = [1]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 64
+pool = "paged"
+linear_slots = 48
+kv_blocks = 3970
+block_size = 16
+max_prefill_tokens = 8192
+
+[baseline]
+run_id = "W7-0017"
+
+[measure]
+warmup = 1
+repeats = 3
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E4b record_only；paged 臂与 seat 臂同 workload、同 1640 预算，容量比只报不判；
+# 纯臂引用 W4-0002/0003（历史 trace，标方向差异）。
+mode = "record_only"
+criteria = []

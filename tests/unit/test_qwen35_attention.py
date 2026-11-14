@@ -71,7 +71,12 @@ def _tables(cfg, start: int, length: int):
 
 
 class _FakePacked:
-    """Minimal object that claims the packed-prefill protocol, for the guard test."""
+    """Minimal object that claims the packed-prefill protocol, for the layout guards.
+
+    W7 Step 3 implements the packed path, so these guards are now about *when* a layer
+    may take it: the container's token axis, the per-token cos/sin and this layer's
+    compact layer index. A rejected container must never reach ``write``/``attend``.
+    """
 
     packed_prefill = True
     cu_seqlens = [0, 1, 2]
@@ -84,10 +89,10 @@ class _FakePacked:
         return 0
 
     def write(self, layer, k, v):
-        raise AssertionError("the W5 layer must not write through a packed container")
+        raise AssertionError("a rejected packed container must not reach write()")
 
     def attend(self, q, k, v):
-        raise AssertionError("the W5 layer must not attend through a packed container")
+        raise AssertionError("a rejected packed container must not reach attend()")
 
 
 # ------------------------------------------------------------------- shapes / layout
@@ -339,8 +344,16 @@ def test_attention_rejects_masks_and_unsupported_containers(cfg, attn):
     with pytest.raises(NotImplementedError, match="chunked-prefill"):
         attn(x, past_keys_values=cache)
 
-    with pytest.raises(NotImplementedError, match="packed-prefill"):
+    # Packed prefill (W7 Step 3) needs the packed token axis, per-token cos/sin and this
+    # layer's compact full-attention index; each is rejected before any projection.
+    with pytest.raises(ValueError, match="one token axis"):
         attn(x, past_keys_values=_FakePacked())
+    cos, sin = _tables(cfg, 0, 2)
+    with pytest.raises(ValueError, match="compact full-attention index"):
+        attn(torch.randn(1, 2, cfg.n_embd), past_keys_values=_FakePacked(), cos=cos, sin=sin)
+    indexed = Qwen35Attention(cfg, layer_index=0)
+    with pytest.raises(ValueError, match="per-token cos/sin"):
+        indexed(torch.randn(1, 2, cfg.n_embd), past_keys_values=_FakePacked())
 
     slab = KvSlab(n_layer=1, batch=1, n_kv_head=cfg.n_kv_head, head_dim=cfg.head_dim, max_len=8)
     with pytest.raises(NotImplementedError, match="slab/paged"):

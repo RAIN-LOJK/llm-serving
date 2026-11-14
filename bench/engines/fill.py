@@ -8,19 +8,24 @@ run is trying to hold fixed.
 Two pieces live here, both selected only by ``[exp].type = "fill"``:
 
 * :class:`FillScheduler` -- a :class:`serve.scheduler.Scheduler` subclass that admits
-  (through the engine's optional ``can_admit_group`` hook, so a paged pool that cannot
-  reserve the packed group refuses the FIFO head) and then finishes every resident
-  request without a decode call. It reuses the base admission loop, timestamps and
-  release path; only :meth:`~serve.scheduler.Scheduler.step` / ``run`` are replaced.
+  one FIFO group per step (through the engine's optional ``can_admit_group`` hook, so a
+  paged pool that cannot reserve the packed group refuses the FIFO head) and then
+  **keeps every admitted request resident**: it never decodes and never releases
+  mid-run. It reuses the base admission loop, timestamps and release path; only
+  :meth:`~serve.scheduler.Scheduler.step` / ``run`` are replaced.
 * :func:`run_fill_trace` -- the seat-arm runner (``impl="continuous"``), mirroring
   :meth:`bench.engines.continuous.ContinuousEngine.run_trace` but stopping after
   admission. The paged arm builds its own trace row inside
   :class:`bench.engines.paged.PagedEngine`; both share :func:`capacity_block`.
 
-The fill step row's ``active`` means "admitted in this admission pass", not
-"still running at the end of the step" (a fill step retires everything it admits,
-so the next pass measures the same budget from an empty pool). The base scheduler's
-end-of-step occupancy is untouched for non-fill runs.
+Cross-step residency is the W7 fill semantics (``docs/w7-plan.md`` §5.4): a fill probe
+asks "how many requests fit **at the same time**", so releasing a group at the end of its
+step would measure one admission pass (the group size), not the pool's capacity. The step
+row's ``active`` therefore means "resident after this admission pass" and ``admitted``
+means "newly admitted by it"; ``retired`` stays 0 until the final drain. The run stops at
+the first pass that admits nothing and then finishes every resident (``t_finish`` stamped)
+so request/step/trace accounting is complete and the engine can be closed with no leak.
+The base scheduler's decode/retire loop is untouched for non-fill runs.
 
 ``bench/engines/paged.py`` imports :data:`W4_TOTAL_BUDGET_MB`. D6 freezes the W4
 total budget (KV + workspace) at 1640 MiB; the seat arm's reservation is whatever
@@ -90,7 +95,14 @@ def _prefill_timings(
 
 
 class FillScheduler(Scheduler):
-    """Admission + reservation only; no decode, no KV growth after prefill."""
+    """Admission + reservation only; residents accumulate across steps until full.
+
+    A step admits one FIFO group through the base ``_admit`` (one packed prefill), reads
+    the engine's pool ledger **after** admission (the resident set is the capacity
+    answer), and keeps every member resident: no decode, no release, no retirement.
+    ``run`` stops at the first pass that admits nothing, then releases every resident once
+    (the final drain) so every request has a ``t_finish`` and the pool is clean.
+    """
 
     def step(self) -> dict:
         self._admitted_this_step = 0
@@ -99,12 +111,17 @@ class FillScheduler(Scheduler):
         self._step_origin = self.now()
 
         admitted = self._admit()
+        # Fill-only: the argmax the packed prefill returns is not a generated token, so it
+        # never counts as output. Requests stay resident; nothing here decodes.
+        for req in admitted:
+            req.out = []
         prefill_ms, prefill_groups, pack_wait_ms, prefill_shared_ms = _prefill_timings(
             admitted, getattr(self, "_step_groups", None)
         )
 
-        # The resident set is the capacity answer, so the pool's ledger must be read
-        # *before* anything is released (after release, every block is free again).
+        # ``active`` is the resident count after this pass, and the pool's ledger must be
+        # read while those requests still hold their slots/blocks (before the final drain,
+        # after which every block is free again).
         resident = len(self._active)
         stats: dict[str, Any] | None = None
         if resident:
@@ -114,16 +131,6 @@ class FillScheduler(Scheduler):
                     stats = dict(provider() or {})
                 except Exception:  # noqa: BLE001 - instrumentation must not fail a fill run
                     stats = None
-
-        # No decode: finish every resident request now. ``_release`` returns its seat
-        # (and, on the paged arm, its blocks) to the free list. Fill-only means
-        # "prefill + reserve", so the first-token argmax the prefill returned is not a
-        # generated token and is not counted.
-        for req in list(self._active):
-            req.out = []
-            req.t_finish = self.now()
-            req.state = "finished"
-            self._release(req)
 
         step_ms = (self.now() - self._step_origin) * 1000.0
         now = self.now()
@@ -160,16 +167,36 @@ class FillScheduler(Scheduler):
         return row
 
     def run(self) -> list[Request]:
-        """Drain the queue; stop when a pass admits nothing (capacity exhausted)."""
+        """Admit until a pass admits nothing, then release every resident once.
+
+        Residency is the point: a pass that admits nothing while residents are still held
+        means ``can_admit_group`` refused the FIFO head against the *current* pool, i.e.
+        capacity is exhausted -- that is the answer, not an error. The drain stamps
+        ``t_finish`` on every resident and calls the base release path, so no seat, slot or
+        block survives the run (the adapter still owns ``close_pool``).
+        """
         self._closed = True
-        while self._queue or self._active:
-            row = self.step()
-            if not self._active and not row["admitted"] and not row["retired"]:
-                # Every seat is free and the FIFO head still cannot be admitted: the
-                # pool is out of capacity for it (``can_admit_group`` refused). Leaving
-                # it queued is the honest outcome of a fill probe, not an error.
-                break
+        try:
+            while self._queue:
+                row = self.step()
+                if not row["admitted"]:
+                    break
+        finally:
+            self._drain()
         return sorted(self._all, key=lambda r: r.id)
+
+    def _drain(self) -> None:
+        """Finish every resident request at one timestamp (idempotent, leak-free)."""
+        residents = list(self._active)
+        if not residents:
+            return
+        drained_at = self.now()
+        for req in residents:
+            # No generated tokens: the prefill argmax was already dropped at admission.
+            req.out = []
+            req.t_finish = drained_at
+            req.state = "finished"
+            self._release(req)
 
 
 def capacity_block(

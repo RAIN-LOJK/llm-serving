@@ -20,10 +20,23 @@ things differ from the Qwen3-0.6B path and each changes the numbers:
 the GDN blocks into the 24-layer hybrid model in ``model/qwen35_model.py``.
 
 Scope (W5 plan §1): single-layer inference. A growing ``KVcache`` is supported because
-W6's decode needs it. Chunked prefill (``past_len > 0`` with ``T > 1``), explicit
-``attention_mask``, the packed-prefill container and the slab/paged decode containers
-raise ``NotImplementedError`` -- silently treating them as a plain cache would produce
-wrong numbers, and there is no fallback implementation to pick instead (D4).
+W6's decode needs it. W7 Step 2 adds the two **decode containers** for ``T == 1``: the
+seat arm (``model/slab.py::KvSlab`` + ``hand_baddbmm``) and the paged arm
+(``model/paged.py::PagedKV`` + the Triton block-table kernel). Both address the six
+full-attention layers by their **compact** index (``0..5``, D9-5), which
+``Qwen35Model`` assigns at construction; the growing-cache path keeps using the actual
+24-layer index. W7 Step 3 adds the **packed group prefill** container
+(``model/packed.py::PackedPrefill``): one ``(1, total_tokens)`` token axis, varlen
+attention per request segment, and the same compact index for the write sinks -- the
+packed layer calls ``packed.write(self.layer_index, k, v)``, so the sinks it is given are
+indexed compactly too (``PagedWriteSink``/``SlabWriteSink`` directly, no 24->6 adapter:
+the packed path never sees the actual layer index).
+
+Chunked prefill (``past_len > 0`` with ``T > 1``), explicit ``attention_mask``, and a
+decode container with ``T > 1`` raise ``NotImplementedError`` -- silently treating them as
+a plain cache would produce wrong numbers, and there is no fallback implementation to pick
+instead (D4). The packed path is not a fallback either: a container that is neither a
+packed prefill nor a decode container keeps the growing-cache path.
 """
 
 from __future__ import annotations
@@ -115,10 +128,27 @@ class Qwen35Attention(nn.Module):
     arithmetic:
 
     ``_project`` -> ``q_norm``/``k_norm`` -> ``_rope`` -> ``_attend`` -> ``_merge``
+
+    ``layer_index`` is this block's **compact** full-attention index (``0..5`` for the
+    24-layer ``LLLF x 6`` stack, D9-5), assigned by ``Qwen35Model``. The decode
+    containers and the packed-prefill write sinks address the six full-attention layers
+    by that index; the growing ``KVcache`` path keeps addressing them by the actual
+    24-layer index (``idx``). A block built without one (the single-layer unit tests)
+    still runs the growing-cache path and rejects a decode/packed container instead of
+    writing into layer 0 of the wrong stack.
     """
 
-    def __init__(self, config: MiniLLMConfig):
+    def __init__(self, config: MiniLLMConfig, layer_index: int | None = None):
         super().__init__()
+        if layer_index is not None:
+            if isinstance(layer_index, bool) or not isinstance(layer_index, int):
+                raise TypeError(
+                    f"layer_index must be an int (the compact full-attention index), got "
+                    f"{layer_index!r}"
+                )
+            if layer_index < 0:
+                raise ValueError(f"layer_index must be >= 0, got {layer_index}")
+        self.layer_index = layer_index
         if not config.attn_output_gate:
             raise ValueError(
                 "Qwen35Attention requires config.attn_output_gate=True: this class only "
@@ -217,6 +247,65 @@ class Qwen35Attention(nn.Module):
             y = self.backend_decode.decode(q, k, v)
         return y.transpose(1, 2)
 
+    def _attend_decode(self, decode, q, k, v):
+        """One decode token per row through a seat/paged container; ``(B, T, H, D)`` in/out.
+
+        ``decode`` is a ``KvSlab`` (seat arm: write, then ``get`` + ``hand_baddbmm`` with
+        the container's prebuilt additive bias) or a ``PagedKV`` (production arm: write,
+        then the Triton block-table kernel, which reads the pool and masks by its int32
+        seqlen). The container owns the mask, so nothing here reads ``past_len``; the
+        position each row writes at is ``decode.pos[row]``, and this step's column is
+        already allowed (``build_mask(next_token=True)`` ran once in
+        ``Qwen35Model.forward_decode_batch``).
+
+        The layer address is the **compact** full-attention index (D9-5), never ``idx``:
+        a 24-layer ``idx`` would write into another layer's slot of a 6-layer container.
+        """
+        if self.layer_index is None:
+            raise ValueError(
+                "a slab/paged decode container needs this layer's compact full-attention "
+                "index (0..5), but this Qwen35Attention was built without one; "
+                "Qwen35Model assigns it at construction. A directly-built single layer "
+                "has nowhere to write in a 6-layer container."
+            )
+        layer = self.layer_index
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        decode.write(layer, k, v)
+        if getattr(decode, "block_table_decode", False):
+            # W4.5 (D7): the paged container owns the kernel; it has no dense gather and
+            # no additive bias, so ``attend`` is the whole call.
+            y = decode.attend(layer, q)
+        else:
+            k_all, v_all = decode.get(layer)
+            # The seat mask is identical for every layer, so the container already turned
+            # it into the additive bias once at the step boundary (``build_mask``).
+            y = self.backend_decode.decode(q, k_all, v_all, bias=decode.bias)
+        return y.transpose(1, 2)
+
+    def _attend_packed(self, packed, q, k, v):
+        """Packed group prefill: write the group's K/V, then one varlen call; ``(1, T, H, D)``.
+
+        The container slices the packed token axis by ``cu_seqlens`` and calls each
+        request's one-shot ``set_kv`` with that request's ``(1, n_kv_head, length, D)``
+        K/V, so the layer never materialises a padded ``(B, T_max)`` batch and never grows
+        a ``KVcache``. ``attend`` returns the packed layout ``(1, T, H, D)`` directly (the
+        varlen backend has no batch dimension), so unlike ``_attend`` there is no
+        transpose back.
+
+        The layer address is the **compact** full-attention index (D9-5), exactly like
+        the decode containers: a 24-layer ``idx`` would miss every 6-layer sink.
+        """
+        layer = self.layer_index
+        if layer is None:  # pragma: no cover - forward() rejects this before projecting
+            raise ValueError(
+                "the packed-prefill path needs this layer's compact full-attention index "
+                "(0..5), but this Qwen35Attention was built without one"
+            )
+        packed.write(layer, k, v)
+        return packed.attend(q, k, v)
+
     def _merge(self, y: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
         """``o_proj(y * sigmoid(gate))`` -- the gate multiplies *after* attention.
 
@@ -247,41 +336,77 @@ class Qwen35Attention(nn.Module):
                 "single-sequence prefill/decode, and padding support would have to "
                 "follow model/layers.py::Attention's mask construction (W6)."
             )
-        if as_packed_prefill(past_keys_values) is not None:
-            raise NotImplementedError(
-                "Qwen35Attention does not support the packed-prefill container yet: its "
-                "varlen path lives in model/layers.py::Attention (W4.5) and has no "
-                "Qwen3.5 wiring (W6)."
-            )
-        if as_decode_container(past_keys_values) is not None:
-            raise NotImplementedError(
-                "Qwen35Attention does not support the slab/paged decode containers yet "
-                "(KvSlab.fill_from / PagedKV are W6/W7 work); pass a growing KVcache."
-            )
+        packed = as_packed_prefill(past_keys_values)
+        if packed is not None:
+            if x.shape[0] != 1 or x.shape[1] != int(packed.total_tokens):
+                raise ValueError(
+                    "the packed-prefill path is one token axis of packed.total_tokens "
+                    f"tokens (B == 1); got x={tuple(x.shape)} for "
+                    f"total_tokens={packed.total_tokens}. Pack every request's tokens on "
+                    "that axis and pass cu_seqlens; do not pad a (B, T_max) batch."
+                )
+            if cos is None or sin is None:
+                raise ValueError(
+                    "the packed-prefill path needs per-token cos/sin from the model (each "
+                    "request has its own 0-based position axis); do not call the layer "
+                    "directly with a PackedPrefill"
+                )
+            if self.layer_index is None:
+                raise ValueError(
+                    "the packed-prefill path needs this layer's compact full-attention "
+                    "index (0..5) to address the group's one-shot write sinks, but this "
+                    "Qwen35Attention was built without one; Qwen35Model assigns it at "
+                    "construction. A directly-built single layer has no 6-layer sink."
+                )
+        decode = as_decode_container(past_keys_values)
+        if decode is not None:
+            if packed is not None:
+                raise ValueError(
+                    "a container cannot be both a packed prefill and a decode container: "
+                    "packed prefill writes whole prompts, decode advances one token per row"
+                )
+            if x.shape[1] != 1:
+                raise NotImplementedError(
+                    "Qwen35Attention's slab/paged decode containers are decode-only "
+                    f"(T == 1); got T={x.shape[1]}. Prefill keeps the growing KVcache "
+                    "and hands over with KvSlab.fill_from() / PagedPool.write_prefill."
+                )
+            if cos is None or sin is None:
+                raise ValueError(
+                    "the slab/paged decode path needs per-row cos/sin from the model: "
+                    "rows sit at different positions, so the layer cannot derive one "
+                    "table from a scalar past_len"
+                )
 
         _, seq, _ = x.shape
-        past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
-        if past_len > 0 and seq > 1:
-            raise NotImplementedError(
-                "Qwen35Attention has no chunked-prefill path (past_len > 0 with T > 1); "
-                "see _attend()."
-            )
-        if cos is None or sin is None:
-            cos, sin = rope_cos_sin(
-                self.head_dim,
-                self.rope_theta,
-                past_len,
-                seq,
-                x.device,
-                x.dtype,
-                rotary_dim=self.rotary_dim,
-            )
+        if decode is None and packed is None:
+            past_len = 0 if past_keys_values is None else past_keys_values.past_len(idx)
+            if past_len > 0 and seq > 1:
+                raise NotImplementedError(
+                    "Qwen35Attention has no chunked-prefill path (past_len > 0 with "
+                    "T > 1); see _attend()."
+                )
+            if cos is None or sin is None:
+                cos, sin = rope_cos_sin(
+                    self.head_dim,
+                    self.rope_theta,
+                    past_len,
+                    seq,
+                    x.device,
+                    x.dtype,
+                    rotary_dim=self.rotary_dim,
+                )
 
         q, gate, k, v = self._project(x)
         q = self.q_norm(q)
         k = self.k_norm(k)
         q, k = self._rope(q, k, cos, sin)
-        y = self._attend(q, k, v, idx, past_keys_values)
+        if packed is not None:
+            y = self._attend_packed(packed, q, k, v)
+        elif decode is not None:
+            y = self._attend_decode(decode, q, k, v)
+        else:
+            y = self._attend(q, k, v, idx, past_keys_values)
         return self._merge(y, gate)
 
 
@@ -297,13 +422,15 @@ class Qwen35FullAttentionBlock(nn.Module):
     can be dropped where the model expects one; the MLP is reused verbatim (Qwen3.5's
     SwiGLU has the same layout). The two norms are the zero-centered Qwen3.5 ones, and
     they are applied at ``n_embd`` width, not per head -- q_norm/k_norm live in
-    ``self_attn`` and act on ``head_dim``.
+    ``self_attn`` and act on ``head_dim``. ``layer_index`` is the compact full-attention
+    index (``0..5``) the W7 decode containers address; see ``Qwen35Attention``.
     """
 
-    def __init__(self, config: MiniLLMConfig):
+    def __init__(self, config: MiniLLMConfig, layer_index: int | None = None):
         super().__init__()
+        self.layer_index = layer_index
         self.input_layernorm = Qwen35RMSNorm(config.n_embd, config.norm_eps)
-        self.self_attn = Qwen35Attention(config)
+        self.self_attn = Qwen35Attention(config, layer_index=layer_index)
         self.post_attention_layernorm = Qwen35RMSNorm(config.n_embd, config.norm_eps)
         self.mlp = MLP(config)
 

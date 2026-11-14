@@ -18,8 +18,9 @@ memory account:
   ``bench/thresholds.py`` can answer C1/C2 without re-parsing rows.
 
 A fill run (``[exp].type = "fill"``) goes through
-:class:`bench.engines.fill.FillScheduler`: prefill + reserve, no decode. Its capacity is
-``max(step_row["active"])``, i.e. the allocator answer D6 asks for. W4.5's Triton decode
+:class:`bench.engines.fill.FillScheduler`: prefill + reserve, no decode, and (W7 §5.4)
+every admitted request stays resident across steps. Its capacity is
+``max(step_row["active"])`` -- the resident set, i.e. the allocator answer D6 asks for. W4.5's Triton decode
 owns no gather workspace, so the paged arm reports ``workspace_mb = 0.0``: that is a real
 zero, not a missing estimate. W4's gather-era ``workspace_estimated`` provenance is gone
 with the control arm.
@@ -266,7 +267,7 @@ class PagedEngine(ContinuousEngine):
             }
         )
         peak = max((int(row.get("active") or 0) for row in step_rows), default=0)
-        summary["capacity"] = capacity_block(
+        capacity = capacity_block(
             peak_concurrency=peak,
             kv_mb=kv_pool,
             workspace_mb=workspace,
@@ -279,6 +280,23 @@ class PagedEngine(ContinuousEngine):
             seat_unused_mb=None,
             workload_sha256=trace.sha256,
         )
+        # W7 additive ledger: the pure arm has no linear state, so its *used* state is
+        # the written KV at the resident-set high-water mark. ``kv_live_mb`` is already a
+        # real per-step measurement from the paged engine (never the analytic 112 KiB);
+        # ``state_total_mb`` is the reservation the 1640 MiB budget check compares.
+        live = [
+            float(row["kv_live_mb"])
+            for row in step_rows
+            if isinstance(row.get("kv_live_mb"), (int, float))
+            and not isinstance(row.get("kv_live_mb"), bool)
+        ]
+        capacity["kv_used_mb"] = max(live, default=None)
+        capacity["state_used_mb"] = capacity["kv_used_mb"]
+        capacity["state_total_mb"] = total
+        contexts = sorted({len(a.prompt_ids) for a in trace.arrivals})
+        if len(contexts) == 1:
+            capacity["context_tokens"] = contexts[0]
+        summary["capacity"] = capacity
         return TraceResult(
             request_rows=request_rows,
             step_rows=step_rows,
@@ -403,13 +421,25 @@ def _paged_request_row(
     this request's **reserved** bytes (``blocks_reserved * block_size * per_token``),
     not ``pool / max_batch`` (D6). ``blocks_written`` counts only blocks that hold a
     written token (the last partial block counts; the engine uses the same rule).
+
+    A fill run that stops at capacity leaves a queued tail. Those requests were never
+    prefilled, so they own no blocks: their account is ``blocks_*=0`` / ``kv_own_mb=None``
+    rather than the reservation they would have made had they been admitted.
     """
     row = _request_row(request, prompt_id, kv_pool_mb, max_batch, repeat)
     out_tokens = len(request.out)
-    written_tokens = len(request.prompt_ids) + out_tokens
-    written_blocks = max(1, -(-written_tokens // block_size))
+    admitted = request.t_admitted is not None and request.state != "aborted"
+    written_tokens = len(request.prompt_ids) + out_tokens if admitted else 0
+    written_blocks = max(1, -(-written_tokens // block_size)) if written_tokens else 0
     reserved = reserved_blocks if reserved_blocks is not None else written_blocks
-    row["kv_own_mb"] = reserved * block_size * per_token_bytes / 2**20 if per_token_bytes else None
+    if not admitted:
+        reserved = 0
+    row["admitted"] = admitted
+    row["kv_own_mb"] = (
+        reserved * block_size * per_token_bytes / 2**20
+        if per_token_bytes and admitted
+        else None
+    )
     row["blocks_reserved"] = int(reserved)
     row["blocks_written"] = int(written_blocks)
     row["block_size"] = int(block_size)

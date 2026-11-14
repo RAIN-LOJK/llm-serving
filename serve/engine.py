@@ -1,5 +1,6 @@
 import time
 from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 
@@ -7,6 +8,69 @@ from model import KVcache, KvSlab, MiniLLM, PagedKV, PagedPool
 from model.attention import DECODE_BACKEND
 from model.packed import PackedPrefill
 from serve.block_manager import BlockManager, FragStats
+
+__all__ = [
+    "EngineOutput",
+    "MiniLLMEngine",
+    "PagedWriteSink",
+    "SchedulerEngine",
+    "SeatEngine",
+    "SlabWriteSink",
+]
+
+
+@runtime_checkable
+class SchedulerEngine(Protocol):
+    """The engine surface ``serve/scheduler.py`` depends on (W7 D9-4).
+
+    Both :class:`MiniLLMEngine` (0.6B, pure attention) and
+    :class:`serve.hybrid_engine.Qwen35Engine` (0.8B, hybrid) satisfy this structurally;
+    there is no inheritance and no runtime registration, so the scheduler never names a
+    model. The seat hooks are deliberately **not** part of this protocol: a paged engine
+    has no slab, and the scheduler only reaches for ``slab`` / ``freeze_seat`` on
+    ``engine.paged == False`` (see :class:`SeatEngine`).
+
+    ``device``/``eos_token_id``/``max_position`` are intentionally loosely typed: the
+    scheduler only reads them and the unit-test fakes use strings/``None``.
+    """
+
+    paged: bool
+    max_prefill_tokens: int
+    vocab_size: int
+    device: Any
+    eos_token_id: int | None
+    max_position: int | None
+
+    def can_admit_group(self, requests: list[dict]) -> bool: ...
+
+    def prefill_group(self, requests: list[dict]) -> torch.Tensor: ...
+
+    def decode_batch(self, tokens: list[int], slab: Any = None) -> torch.Tensor: ...
+
+    def release_request(self, request_id: Any) -> None: ...
+
+    def paged_stats(self) -> dict: ...
+
+    def close_pool(self) -> None: ...
+
+    @property
+    def pool_kv_mb(self) -> float | None: ...
+
+
+@runtime_checkable
+class SeatEngine(SchedulerEngine, Protocol):
+    """Optional seat hooks the scheduler reaches only when ``paged`` is False.
+
+    ``MiniLLMEngine`` also exposes ``activate_seat``/``prefill_into_seat`` for direct
+    callers and the W2 hand-off; the scheduler itself uses only ``slab`` (the row-count
+    check) and ``freeze_seat`` (parking/retirement), so those two are the optional
+    contract. ``Qwen35Engine``'s seat arm implements exactly them.
+    """
+
+    @property
+    def slab(self) -> Any: ...
+
+    def freeze_seat(self, seat: int) -> None: ...
 
 # The slab bucket is a multiple of this many columns (D4). The old
 # "start at 256, double" rounded 2048 + 128 up to 4096, so every decode step read

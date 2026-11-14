@@ -536,6 +536,97 @@
 
 ---
 
+## D9 · 双状态管理：线性状态槽、6 层分页 KV 与同一调度器
+
+- **日期**：2026-11-14
+- **状态**：proposed
+- **背景**：W6 已把 0.8B 混合模型做到单序列、CPU fp32、数值门（D8 与 golden
+  `tests/golden/qwen35-0-8b/0002`），但还没有每请求状态池、没有分页 KV、没有
+  批量/packed 路径，`bench` 的 `impl="hybrid"` 仍是 `NotImplementedError`。W7 要在
+  **同一个 `Scheduler`** 下服务 0.6B（纯注意力）与 0.8B（3:1 混合），先把双状态
+  生命周期、6 层分页 KV、packed GDN prefill 与 bf16/CUDA 数值门定死，再量容量、
+  交叉点、P1–P3 与 E4 机制迁移。本决策是 Step 0 的预注册：实现边界与口径在此冻结，
+  证据留给正式 run 与收口。
+- **证据**：**预注册，尚无 W7 run**（2026-11-14）。`results/` 没有 W7 目录；
+  `configs/thresholds.toml` 的 `[W7.state]` 与 `[W7.hybrid]` 都是
+  `status="target"`、`basis_run=""`。本决策不是测量结论；Step 0 的 G0 只是 pytest
+  数值门（`tests/integration/test_align_qwen35_bf16.py`），不是 run。W6 的 fp32
+  golden `0002` 只作 bf16 差异的诊断基准，不作通过依据；W4 C1 的 1640 MiB /
+  3.111× 是纯臂同口径的历史参照。
+- **判据**：`configs/thresholds.toml [W7.state]`（`state_estimate_error_max=0.20`）
+  与 `[W7.hybrid]`（`greedy_tokens_exact=64`；P1 5×；容量 512/2k/8k =
+  2.0/4.0/6.0×；内存交叉点 ≤256 prompt token；P2 1.10；P3 混合 ≤1.10、纯 ≥1.15）；
+  A1–A6 见 `ROADMAP.md` §5 W7。
+- **决定**：
+  1. **D9-1 · 双资源、一句柄**：`StatePool` 管**线性状态槽**（`linear_slots`；
+     每槽 bf16 18.63 MiB = conv 0.633 + recurrent fp32 18.000），
+     `BlockManager`/`PagedPool` 管 KV 块；`RequestHandle` 把
+     `{slot, block_table, length}` 绑成一个生命周期。不复制块管理器；`reserve`
+     必须原子（slot 与 block_table 要么都拿到，要么都没有），`release` 同时归还
+     两者且**幂等**；失败回滚不留半分配。
+  2. **D9-2 · 紧凑活跃槽**：`StatePool` 用 free list + 活跃区 `[0:B)`；释放时把
+     **最后一个活跃槽换入空洞**，并更新被换请求的 `handle.slot`，然后归还末尾槽。
+     GDN 批量 decode 直接读 `[0:B)` 视图，避免每步 gather 约 18 MiB 状态；换入
+     拷贝只发生在释放，不在 decode 热路径。
+  3. **D9-3 · 状态接口不变，只换存储**：`PooledQwen35State` 实现/继承
+     `Qwen35State` 的公开接口（`.kv`、`.past_len`、`.conv_state`、
+     `.recurrent_state`、setter、`.advance`、`.cull`），只替换存储与生命周期；
+     `model/qwen35.py` 只加 **paged / varlen / seat 容器分支**，不改 GDN 算子与
+     注意力数学。`Qwen35Model.forward` 的 `isinstance` 由子类满足（或 Step 1 改
+     结构化检查）；层代码只按容器类型分支，不按模型分支。
+  4. **D9-4 · 调度器只依赖协议**：`Scheduler` 只依赖引擎协议；
+     `MiniLLMEngine`（0.6B，行为冻结）与 `Qwen35Engine`（0.8B）是两个实现，
+     调度器源码不出现模型分支。同一份 trace 可分别跑两模型；“同一调度器”不要求
+     同进程同时加载两个模型。
+  5. **D9-5 · 分页只覆盖 6 层全注意力**：混合模型的 paged KV **只覆盖 6 个
+     full-attention 层**（层号 3/7/11/15/19/23，映射为紧凑 0..5）；18 个线性层走
+     `StatePool`。`PagedPool` 不按 24 层分配；bf16 KV = 6 层 × 2(K,V) × 2 kv_head
+     × 256 × 2 B = **12 KiB/token**（fp32 24 KiB/token）。
+  6. **D9-6 · packed prefill 先分段**：packed group prefill 中，全注意力层走
+     **varlen**；GDN 先按 **segment 循环**（chunked）计算并把状态写回池，先正确
+     后融合。真正 fused varlen GDN **不是本期硬门**；GDN 分段 prefill 代价单独报，
+     不实现逐请求 prefill 控制臂。
+  7. **D9-7 · bf16 正式口径 + strict G0**：正式数字统一 `dtype="bfloat16"`、
+     `device="cuda"` 并 pin revision；A0/G0 是“与 HF **同 dtype、同设备**贪心
+     **64/64**”（0.8B `s01`/`m02`，0.6B 同一 `s01`/`m02` token ids），EOS 不特判、
+     固定 64 步。
+     W6 fp32 golden 只作交叉核对；bf16 near-tie 逐步记录 top1−top2 margin，解释
+     只用于诊断，**不静默放宽** 64/64。若 G0 失败，先查 GDN fp32 内部、
+     RoPE/norm/loader，不进入池/调度实现。
+  8. **D9-8 · 1640 MiB 状态预算**：容量主口径 = **同 1640 MiB 状态预算**
+     （KV 块 + 线性状态槽 + workspace）；权重不计入（0.6B 1.14 GiB vs 0.8B
+     1.44 GiB 的差不是机制），总卡预算只作辅助列。纯臂与 W4 C1 同口径；混合臂
+     把线性状态并入，是**扩展口径**。512/2k/8k 容量、P1 与 P3 都按此预算与
+     512→8k 端点判定。
+- **后果**：
+  1. **池生命周期成为唯一释放点**：`finish`、`abort`、`close` 三条路径都走同一个
+     `release_request`；泄漏、回滚、双释放与换入后的句柄更新都可单测。`used`/
+     `reserved`/`slack` 分开记账，解析式 18.633 MiB 只作交叉核对，不作记账输入。
+  2. **bf16 near-tie 是真实风险，不是放宽理由**：同 dtype 对拍仍可能出现
+     `margin=0` 的精确并列；按 argmax 的稳定 tie-break 记录，报告必须给出每步
+     margin 与首个翻转，但 64/64 硬门不变。fp32 golden 与 bf16 的 token 差异只用于
+     解释，不能替代 G0。
+  3. **容量/P1/P3 结论绑定 1640 MiB 与 512→8k**：权重差、绝对 tok/s 与 32k 端点
+     都不是机制因果；纯/混合是扩展口径，报告必须标口径，不能把混合臂的线性状态
+     偷偷摊到权重里。
+  4. **D9 只在 W7 收口转 accepted**：A6 全过、`[W7.*]` 已 calibrated、证据/图/索引
+     回填之后，才把本决策从 proposed 改 accepted；此前阈值保持 target、
+     `[W7.hybrid]` 数值不得下调。若 G0 失败，W7 标 `blocked`，D9 保持 proposed。
+- **复盘点**：
+  - **池生命周期**：alloc/release/复用/中途失败回滚/双释放/`close()` 后无泄漏；
+    紧凑换入后被换请求的 `handle.slot` 是否更新；`release` 是否幂等、未知 id 是否
+    报错而不是静默；`used/reserved/slack` 是否与手算和真实张量一致。
+  - **bf16 near-tie**：G0 的每步 top1−top2 margin 是否记录；出现 `margin=0` 时
+    tie-break 是否可解释；若 G0 失败，是否先查 GDN fp32、RoPE/norm/loader，而不是
+    改阈值或退回 fp32 混用。
+  - **1640 MiB 口径**：`kv_total + linear_state + workspace ≤1640`；权重不计；
+    纯臂是否仍与 W4 C1 同口径、混合臂是否明确标为扩展口径；P3 是否只判 512→8k。
+  - **收口条件**：D9 是否在 W7 closeout（A6）才 accepted；`[W7.state]` 与
+    `[W7.hybrid]` 是否只改 `status`/`basis_run`、数值未动；临时 plan 删除前是否
+    已把持久结论回填到 ROADMAP/hybrid_attention/PITFALLS。
+
+---
+
 ## 模板
 
 ```markdown

@@ -43,6 +43,12 @@ SCHEMA_VERSION = 1
 TYPES = {"probe", "microbench", "scenario", "smoke", "fill"}
 IMPLS = {"dummy", "hf", "minillm", "continuous", "paged", "hybrid"}
 TIMERS = {"auto", "perf_counter", "cuda_event"}
+
+#: W7 synthetic traces are shared across carriers. The 0.6B vocab (151936) is the
+#: smaller of the two, so ids drawn below it are valid for both models and the paired
+#: pure/hybrid traces hash identically. Prompt workloads still tokenize per model.
+SYNTHETIC_VOCAB_CAP = 151936
+
 RUN_ID_RE = re.compile(r"^(?P<stage>[A-Z]\d+)-(?P<seq>\d{4})$")
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +143,77 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
                 f"[engine].impl='paged' (got {kv_blocks!r})"
             )
 
+    # ---- W7 hybrid contract (D9) --------------------------------------
+    # Only `impl="hybrid"` gains required fields. The hybrid engine owns a linear-state
+    # slot pool (`linear_slots`) plus a KV container (`pool="paged"` block table, or the
+    # `pool="seat"` baseline slab). A paged pool needs its block geometry; a seat pool
+    # allocates rows up front, so `kv_blocks`/`block_size` are optional provenance there.
+    hybrid_pool = str(engine.get("pool", "paged"))
+    if engine.get("impl") == "hybrid":
+        linear_slots = engine.get("linear_slots")
+        if (
+            not isinstance(linear_slots, int)
+            or isinstance(linear_slots, bool)
+            or linear_slots < 1
+        ):
+            errors.append(
+                "[engine].linear_slots is required and must be an integer >= 1 when "
+                f"[engine].impl='hybrid' (got {linear_slots!r})"
+            )
+        if hybrid_pool not in {"paged", "seat"}:
+            errors.append(
+                f"[engine].pool must be 'paged' or 'seat' when [engine].impl='hybrid' "
+                f"(got {hybrid_pool!r})"
+            )
+        elif hybrid_pool == "paged":
+            block_size = engine.get("block_size")
+            if (
+                not isinstance(block_size, int)
+                or isinstance(block_size, bool)
+                or block_size not in {16, 32}
+            ):
+                errors.append(
+                    "[engine].block_size is required and must be 16 or 32 when "
+                    "[engine].impl='hybrid' and [engine].pool='paged' "
+                    f"(got {block_size!r})"
+                )
+            kv_blocks = engine.get("kv_blocks")
+            if (
+                not isinstance(kv_blocks, int)
+                or isinstance(kv_blocks, bool)
+                or kv_blocks < 1
+            ):
+                errors.append(
+                    "[engine].kv_blocks is required and must be an integer >= 1 when "
+                    "[engine].impl='hybrid' and [engine].pool='paged' "
+                    f"(got {kv_blocks!r})"
+                )
+        else:
+            # Seat baseline (§2.7): the slab is `max_batch` rows of `max_len` columns, so
+            # `kv_blocks` is unused; `block_size` keeps its engine default (16).
+            if "block_size" in engine:
+                block_size = engine.get("block_size")
+                if (
+                    not isinstance(block_size, int)
+                    or isinstance(block_size, bool)
+                    or block_size not in {16, 32}
+                ):
+                    errors.append(
+                        "[engine].block_size must be 16 or 32 when [engine].pool='seat' "
+                        f"(got {block_size!r})"
+                    )
+            if "kv_blocks" in engine:
+                kv_blocks = engine.get("kv_blocks")
+                if (
+                    not isinstance(kv_blocks, int)
+                    or isinstance(kv_blocks, bool)
+                    or kv_blocks < 1
+                ):
+                    errors.append(
+                        "[engine].kv_blocks must be an integer >= 1 when present "
+                        f"([engine].pool='seat'; got {kv_blocks!r})"
+                    )
+
     # ---- W4.5 attention-path contract (D7) ----------------------------
     # These keys are additive: W0–W4 configs never write them, so their validation is
     # unchanged. Production prefill is ALWAYS the packed FIFO group now; the old
@@ -147,7 +224,18 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     # the packing budget and stays. `decode` has no production switch either: paged decode
     # is always the Triton block-table kernel, `triton`/`auto` are historical no-ops, and
     # `gather` (W4.5's control arm) is rejected with its deletion notice.
-    if "prefill" in engine and engine.get("prefill") != "packed":
+    # `prefill` is provenance on the hybrid arm. Step 3 now runs one packed varlen forward
+    # per FIFO group, so `packed` is the production value; `per_request` stays accepted
+    # only so a Step-2 config remains readable (the manifest always records what ran).
+    # `serial` was the deleted W4.5 control arm and stays rejected everywhere.
+    if engine.get("impl") == "hybrid":
+        if "prefill" in engine and engine.get("prefill") not in {"per_request", "packed"}:
+            errors.append(
+                "[engine].prefill on the hybrid arm must be 'packed' (W7 Step 3) or the "
+                "legacy 'per_request'; the serial control arm was deleted (got "
+                f"{engine.get('prefill')!r})."
+            )
+    elif "prefill" in engine and engine.get("prefill") != "packed":
         errors.append(
             "[engine].prefill is no longer a switch: production W4.5 prefill is always "
             "packed (D7); the serial control arm was deleted (got "
@@ -181,10 +269,20 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             "[engine].decode must be 'auto' or 'triton' (legacy no-ops); 'gather' was "
             f"deleted (got {decode!r})"
         )
-    elif decode == "triton" and engine.get("impl") != "paged":
+    elif decode == "triton" and engine.get("impl") not in {"paged", "hybrid"}:
         errors.append(
             "[engine].decode='triton' requires [engine].impl='paged' "
             "(only the block-table pool had a paged decode kernel)"
+        )
+    elif (
+        decode == "triton"
+        and engine.get("impl") == "hybrid"
+        and hybrid_pool != "paged"
+    ):
+        errors.append(
+            "[engine].decode='triton' requires [engine].impl='paged' semantics: on the "
+            "hybrid arm that means [engine].pool='paged' (the seat baseline decodes with "
+            "hand_baddbmm)"
         )
 
     workload = cfg.get("workload") or {}
@@ -245,17 +343,24 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
     # ---- W3 scenario contract (docs/decisions.md D5) ----------------
     # W4 (D6): `impl="paged"` is a scheduler arm too -- the paged pool replaces the seat
     # slabs, but the trace path and the `[scheduler]` knob are the same, so it joins the
-    # scenario predicate. Closed W0/W2/W3 configs never write `paged`, so their results
+    # scenario predicate. W7 Step 2 adds `impl="hybrid"` (the same Scheduler drives the
+    # Qwen3.5 engine). Closed W0/W2/W3 configs never write any of them, so their results
     # are unchanged.
     policy = str((cfg.get("scheduler") or {}).get("policy", "")) if "scheduler" in cfg else ""
-    scenario = workload.get("arrival") == "poisson" or engine.get("impl") in {"continuous", "paged"}
-    scheduler_impls = {"continuous", "paged"}
+    scenario = workload.get("arrival") == "poisson" or engine.get("impl") in {
+        "continuous",
+        "paged",
+        "hybrid",
+    }
+    scheduler_impls = {"continuous", "paged", "hybrid"}
     if "scheduler" in cfg and not isinstance(cfg.get("scheduler"), dict):
         errors.append("[scheduler] must be a table")
     if "scheduler" in cfg and engine.get("impl") not in scheduler_impls:
         # A knob that changes nothing is worse than no knob: it would be recorded in the
         # manifest as if it had steered the run.
-        errors.append("[scheduler] is only valid with [engine].impl='continuous' or 'paged'")
+        errors.append(
+            "[scheduler] is only valid with [engine].impl='continuous', 'paged' or 'hybrid'"
+        )
     if engine.get("impl") in scheduler_impls and policy not in {"static", "continuous"}:
         errors.append("[scheduler].policy must be 'static' or 'continuous'")
     if workload.get("arrival") == "poisson":
@@ -283,8 +388,8 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
             # already waiting at t=0, so the seats stay full until the trace drains and
             # ``req_s`` measures sustained throughput rather than one wave's tail. Fewer
             # requests than seats would leave the pool partly idle and measure neither.
-            # (Paged arms are exempt: there ``max_batch`` is a scheduling limit, not a
-            # memory bound -- a fill probe with ``requests < max_batch`` is legal.)
+            # (Paged and hybrid arms are exempt: there ``max_batch`` is a scheduling limit,
+            # not a memory bound -- a fill probe with ``requests < max_batch`` is legal.)
             if int(requests) < int(engine.get("max_batch", 1)):
                 errors.append(
                     "[workload].requests must be >= [engine].max_batch for a closed batch "
@@ -302,7 +407,7 @@ def validate_config(cfg: dict[str, Any]) -> list[str]:
         # arm has no trace to run it on, so the config would silently fail at run time.
         if engine.get("impl") not in scheduler_impls:
             errors.append(
-                "[exp].type='fill' requires [engine].impl='continuous' or 'paged'"
+                "[exp].type='fill' requires [engine].impl='continuous', 'paged' or 'hybrid'"
             )
     if scenario and [int(b) for b in workload.get("batch_sizes", [1])] != [1]:
         errors.append(
@@ -743,6 +848,12 @@ def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
     the (constant) production prefill mode and its packing budget on both arms, plus the
     resolved ``decode`` kernel on the paged arm; no existing key is renamed.
     ``fill_only`` stays additive.
+
+    W7's hybrid arm (D9) has its own concurrency unit: a linear-state slot **plus** a
+    block table (paged) or a slab row (seat). Its KV pool covers only the six
+    full-attention layers (D9-5), so it must not inherit the paged branch's 24-layer
+    block geometry assumptions. Step 3 runs one packed varlen forward per FIFO group,
+    so its ``prefill`` is ``"packed"`` exactly like the paged/continuous arms.
     """
     impl = str(getattr(engine, "impl", ""))
     entry: dict[str, Any] = {
@@ -754,7 +865,33 @@ def _scheduler_manifest(engine: Any, *, fill_only: bool) -> dict[str, Any]:
         "prefill": "packed",
         "max_prefill_tokens": int(getattr(engine, "max_prefill_tokens", 8192)),
     }
-    if impl == "paged":
+    if impl == "hybrid":
+        hybrid_pool = str(getattr(engine, "pool", "paged"))
+        entry.update(
+            {
+                # W7 Step 2 owns slots + KV; the scheduler still admits the same FIFO
+                # group it always did.
+                "seats": (
+                    "linear_slots_plus_block_tables"
+                    if hybrid_pool == "paged"
+                    else "one_kvslab_one_row_each"
+                ),
+                "free_rows": "not_applicable" if hybrid_pool == "paged" else "masked_in_forward",
+                "pool": hybrid_pool,
+                "linear_slots": int(getattr(engine, "linear_slots", 0)),
+                "kv_blocks": (
+                    int(getattr(engine, "kv_blocks", 0))
+                    if hybrid_pool == "paged"
+                    else None
+                ),
+                "block_size": int(getattr(engine, "block_size", 16)),
+                "decode": str(getattr(engine, "decode_impl", "paged-triton")),
+                # Step 3 (D9-6): one packed varlen forward per FIFO group; the GDN
+                # layers loop over its segments. The actual backend is in engine.attn.
+                "prefill": "packed",
+            }
+        )
+    elif impl == "paged":
         entry.update(
             {
                 "seats": "paged_blocks",
@@ -794,8 +931,9 @@ def _build_trace(
     arrival = workload.get("arrival", "closed")
 
     if workload.get("kind") == "synthetic":
+        synthetic_vocab = min(int(engine.vocab_size), SYNTHETIC_VOCAB_CAP)
         prompt_ids_by_ctx = {
-            int(ctx): synthetic_ids(int(ctx), engine.vocab_size, seed + int(ctx) * 1000)
+            int(ctx): synthetic_ids(int(ctx), synthetic_vocab, seed + int(ctx) * 1000)
             for ctx in workload.get("context_lengths", [])
         }
         entries = [(f"ctx{ctx}", ids) for ctx, ids in prompt_ids_by_ctx.items()]
@@ -851,9 +989,18 @@ def _flatten_scenario(
         "policy": str(manifest.get("scheduler", {}).get("policy")),
         "max_batch": int(manifest.get("scheduler", {}).get("max_batch", 1)),
     }
-    if manifest.get("scheduler", {}).get("seats") == "paged_blocks":
-        common["block_size"] = int(manifest["scheduler"].get("block_size", 0))
-        common["kv_blocks"] = int(manifest["scheduler"].get("kv_blocks", 0))
+    scheduler = manifest.get("scheduler", {})
+    if scheduler.get("seats") == "paged_blocks":
+        common["block_size"] = int(scheduler.get("block_size", 0))
+        common["kv_blocks"] = int(scheduler.get("kv_blocks", 0))
+    elif "pool" in scheduler:
+        # W7 hybrid: keep the block geometry beside the linear-slot budget so a row is
+        # readable without the manifest (the two arms' pool shapes never mix).
+        common["pool"] = str(scheduler.get("pool"))
+        common["linear_slots"] = int(scheduler.get("linear_slots", 0))
+        common["block_size"] = int(scheduler.get("block_size", 16))
+        if scheduler.get("kv_blocks") is not None:
+            common["kv_blocks"] = int(scheduler["kv_blocks"])
     # Memory fields belong to measured request outcomes only: the memory account in
     # bench/thresholds.py groups on request rows, and a step row's lifetime is not a run
     # peak (the per-request arm likewise writes these on its measured row alone).
@@ -886,10 +1033,11 @@ def _execute(
     exp_type = str((cfg.get("exp") or {}).get("type") or "")
     # W4: `type="fill"` is a scheduler capacity probe (prefill + reserve, no decode), so
     # it rides the scenario path even on a closed seat arm. `paged` joins the W3 predicate;
-    # both are additive -- closed W0/W2/W3 configs never write either.
+    # W7 Step 2 adds `hybrid` (the same closed-arrival trace route as continuous/paged).
+    # All of these are additive -- closed W0/W2/W3 configs never write them.
     if (
         workload.get("arrival") == "poisson"
-        or (engine_override or engine_impl) in {"continuous", "paged"}
+        or (engine_override or engine_impl) in {"continuous", "paged", "hybrid"}
         or exp_type == "fill"
     ):
         return _scenario_execute(
@@ -1210,6 +1358,10 @@ def _summary(
         "cache_mb",
         "cache_prefill_mb",
         "mem_delta_mb",
+        # W7 P3/P2: a scenario group is keyed by prompt + generated tokens; the
+        # per-group output length recovers the prompt context without guessing. This is
+        # a summary of an existing request-row measurement, not a new metric.
+        "out_tokens",
     )
     # Scenario runs write three row kinds into one stream. `overall`/`groups`/`stability`
     # keep the W2 meaning exactly by reading request rows only; the trace-level numbers go
@@ -1267,7 +1419,11 @@ def _summary(
         warnings.append("measure protocol deviates from warmup=3/repeats=5; explain in notes.md")
     if manifest.get("type") in {"microbench", "scenario"} and not cfg.get("baseline", {}).get("run_id"):
         warnings.append("no paired baseline run_id; mechanism conclusions are incomplete")
-    if isinstance(cfg.get("engine"), dict) and "prefill" in cfg["engine"]:
+    if (
+        isinstance(cfg.get("engine"), dict)
+        and "prefill" in cfg["engine"]
+        and cfg["engine"].get("impl") != "hybrid"
+    ):
         warnings.append(
             "[engine].prefill is a legacy no-op; production prefill is always packed (D7)"
         )
@@ -1290,16 +1446,20 @@ def _summary(
         "attn_decode": attn.get("decode"),
     }
     # W4.5 (D7): the scheduler always prefills packed groups, so the mode is constant
-    # provenance, not a switch. A per-request arm (``impl="minillm"``) has no scheduler
-    # block and omits both keys rather than inventing a mode it never runs.
+    # provenance, not a switch. W7's hybrid arm is the one exception in Step 2: its
+    # engine still loops per request (packed GDN prefill is Step 3), so its manifest says
+    # so and the summary must not upgrade the claim. A per-request arm
+    # (``impl="minillm"``) has no scheduler block and omits both keys rather than
+    # inventing a mode it never runs.
     if "prefill" in scheduler_meta:
-        protocol["prefill_mode"] = "packed"
+        protocol["prefill_mode"] = str(scheduler_meta.get("prefill", "packed"))
         protocol["max_prefill_tokens"] = int(
             engine_meta.get("max_prefill_tokens", scheduler_meta.get("max_prefill_tokens", 8192))
         )
     if (
         str(engine_meta.get("impl") or "") == "paged"
         or scheduler_meta.get("seats") == "paged_blocks"
+        or "pool" in scheduler_meta
     ):
         protocol["decode"] = scheduler_meta.get(
             "decode", engine_meta.get("decode", "auto")
@@ -1440,11 +1600,21 @@ def _scenario_blocks(
         "max_batch": int((manifest.get("scheduler") or {}).get("max_batch", 1)),
     }
     # W4 (D6): the paged arm's scheduler unit and block geometry are pairing provenance.
-    # The seat arm never writes these keys, so its protocol block is unchanged.
+    # The seat arm never writes these keys, so its protocol block is unchanged. W7's
+    # hybrid arm records its own (slot + block/slab) geometry under the same idea.
     scheduler = manifest.get("scheduler") or {}
     if scheduler.get("seats") == "paged_blocks":
         blocks["protocol"].update(
             {
+                "block_size": scheduler.get("block_size"),
+                "kv_blocks": scheduler.get("kv_blocks"),
+            }
+        )
+    elif "pool" in scheduler:
+        blocks["protocol"].update(
+            {
+                "pool": scheduler.get("pool"),
+                "linear_slots": scheduler.get("linear_slots"),
                 "block_size": scheduler.get("block_size"),
                 "kv_blocks": scheduler.get("kv_blocks"),
             }
