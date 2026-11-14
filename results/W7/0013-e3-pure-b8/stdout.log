@@ -1,0 +1,5 @@
+run_id: W7-0013
+status: completed
+device_class: measure-cuda
+rows: 700 (errors: 0)
+summary: results/W7/0013-e3-pure-b8/summary.json

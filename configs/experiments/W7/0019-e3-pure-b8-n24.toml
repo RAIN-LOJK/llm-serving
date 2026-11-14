@@ -1,0 +1,61 @@
+# W7-0019 · E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0019-e3-pure-b8-n24.toml
+#
+# W7-0013 已跑但实测 peak_concurrency=4（8 条被 3 个 context 分掉），不能当 B=8；
+# 本 run 用 N=24（每 context 8 条）重跑，并 supersedes W7-0013。8k+128 预留 520 块/请求；
+# 8×520=4160 块，故沿用 4200，避免准入节流污染 TPOT/P2/P3。延迟/机制探针，不按 1640 判。
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行。
+
+schema = 1
+
+[exp]
+id = "W7-0019"
+stage = "W7"
+type = "scenario"
+slug = "e3-pure-b8-n24"
+title = "E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块"
+hypothesis = ["pure_attention_is_the_paired_baseline_for_the_crossover"]
+seed = 0
+supersedes = "W7-0013"
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048, 8192]
+max_new_tokens = 128
+arrival = "closed"
+requests = 24
+budgets = [128]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "paged"
+device = "cuda"
+max_batch = 8
+kv_blocks = 4200
+block_size = 16
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E3 不是容量探针：8k 请求要 520 块，B=8 最坏 8×520=4160 块；4200 块避免准入节流，保证 8k TPOT 不被排队污染（块预算不按 1640 判，只报）。
+mode = "record_only"
+criteria = []
