@@ -335,16 +335,20 @@
   预注册值未改，`status=calibrated`。**未做**：packed/varlen GDN prefill、`StatePool`、
   `KvSlab`/`PagedKV` 接线（W7）；**没有 `results/W6` run**。
 
-### W7 · 双状态管理与跨代对照
+### W7 · 双状态管理与跨代对照（✅ 2026-11-14）
 
 - **第一件事**：GDN 的 packed/varlen prefill 接线 + `StatePool`（W6 已冻结单序列状态接口；见 D8）
 - `StatePool`：线性层状态（每请求常数大小）与 KV 块（分页）统一句柄与生命周期（唯一先例见 §14）
 - 重跑 W3/W4 的机制，得到"混合架构下机制收益如何变化"
 - **验收**：
-  - [ ] 同一调度器下两种模型都能跑，输出正确
-  - [ ] 每序列状态占用与 §3.1 解析式估算误差 < 20%
-  - [ ] P1–P3 三条预测逐条判真假（`docs/hybrid_attention.md`）
-  - [ ] 给出**交叉点**：上下文多长时混合架构开始占优
+  - [x] 同一调度器下两种模型都能跑，输出正确：0.8B B=1/B=8 **8/8 token hash 全等**；G0 bf16 与 HF **64/64**
+  - [x] 每序列状态占用与解析式误差 **0.83% / 0.48% / 0.18%**（512/2k/8k），<20%
+  - [x] P1–P3 有服务化复核：P1 **true**（7.816×）；P2-memory **false**（512 混合小 2.27×）；P2-latency **true**（B=1/B=8 TTFT 3.89×/8.78×，TPOT 1.285×/1.283×）；P3 **不可归因**（混合平坦，但纯臂只有 +10.0%/+4.3%，未达 1.15）
+  - [x] 交叉点：prefill **190.8 prompt token**（实测区间 [128,192]；预留口径 62.8）；容量比 **2.70/6.17/14.0×**（512/2k/8k，同 1640 MiB）
+- **实现**：`serve/state_pool.py`、`serve/hybrid_engine.py`、`bench/engines/hybrid.py`、packed GDN prefill、paged/seat 双池；同一 `Scheduler`，`MiniLLMEngine` 行为冻结。D9 已 accepted；`[W7.state]/[W7.hybrid]` 已 calibrated。
+- **E4（record-only）**：continuous/static **1.498×**（纯历史 1.863×）；paged/seat 容量 **48/37=1.297×**（纯历史 3.111×）。seat 仅 baseline，生产仍 paged。
+- **证据**：23 有效 run；E1/E2 `W7-0004…0009`；E3 TPOT 修正版 `W7-0026…0029`；E4a `W7-0014/0015`；E4b `W7-0016/0017`；交叉点 `W7-0020…0025`。旧 `W7-0010/0011/0018/0019`（wall TPOT）与 `W7-0013`（只到 4 行）为 invalid。
+- **测量修正**：请求级 TPOT 改为每请求 `decode_event_ms` 累加（P-60）；此前 wall-clock 会把其他请求的 8k prefill 算进短请求，产生 91 ms/512 token 的伪影。
 
 ### W8 · 报告与判据矩阵
 
@@ -401,7 +405,7 @@
 
 ## 9. 简历映射（数字留空，实测后填）
 
-> **状态（2026-11-14）**：W0–W6 已完成；W7–W8 未开始。下面带 `<实测>` 的条目是简历模板，不是已完成事实；投递时只写 W0–W6 的数字，W7–W8 留在“计划/进行中”。
+> **状态（2026-11-14）**：W0–W7 已完成；W8 未开始。W7 的数字已回填；W8 仍留在“进行中”。
 
 > **统一 serving 引擎：跨两代注意力架构的单卡推理实现** 2026.10 — 2027.01
 > - 基于手写 PyTorch 解码器实现单卡 serving：packed prefill + 连续批处理、分页 KV cache、双状态管理；
@@ -411,9 +415,10 @@
 > - 实现 Qwen3.5 的 **3:1 混合注意力**（Gated DeltaNet 分块 prefill + 逐步 decode、短卷积、输出门控、partial/M-RoPE），
 >   分块与逐步两条路径逐 token 自洽
 > - 统一状态管理：分页 KV 覆盖 25% 全注意力层 + 常数大小状态池覆盖 75% 线性层；
->   相对静态批处理吞吐 `<实测>`×，同显存最大并发 `<实测>` → `<实测>`
-> - 跨代对照：同量级下测得混合架构每序列显存 `<实测>`×、显存**交叉点**约 `<实测>` token，
->   并给出「KV cache 退场后调度与缓存如何改写」的判据
+>   相对静态批处理吞吐 **1.498×**，同显存最大并发 512/2k/8k **2.70×/6.17×/14.0×**
+> - 跨代对照：同量级下 8k 每序列显存 **7.82×**、显存**交叉点**约 **191 token**；
+>   同 1640 MiB 状态预算下 8k 并发 **14 vs 1**；混合 continuous/static **1.498×**、
+>   paged/seat 容量 **1.297×**；并给出「KV cache 退场后调度与缓存如何改写」的判据
 
 技能栏：`推理工程（PagedAttention / 连续批处理 / 混合注意力状态管理 / KV cache）`、
 `Gated DeltaNet（分块并行 + 循环形式）`、`性能测量（TTFT/TPOT、P50–P95、memory/compute-bound 判定）`、
@@ -488,7 +493,7 @@ python scripts/exp_index.py --check
 | W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
 | W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
 | W6 | 混合层（二）：Gated DeltaNet | ✅ | `tests/golden/qwen35-0-8b/0002`；`test_qwen35_gdn*`、`test_qwen35_model`、`test_qwen35_loading`、`test_align_qwen35_gdn/model`；快速门禁 874 |
-| W7 | 双状态管理 + 跨代对照 | ⬜ | — |
+| W7 | 双状态管理 + 跨代对照 | ✅ | A1 8/8 token hash、G0 64/64；E1 误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×、P2-latency true、P3 不可归因；交叉点 190.8；E4a 1.498×、E4b 48/37=1.297×；`W7-0001…0029`（5 invalid） |
 | W8 | 报告与判据矩阵 | ⬜ | — |
 | W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
 
@@ -564,3 +569,4 @@ python scripts/exp_index.py --check
 
 - `olmo_hybrid/modeling_olmo_hybrid.py` 里的同名 `torch_*_gated_delta_rule` 与 `qwen3_5` 版**逐行相同**，不能当第三个独立对拍端点。
 - 0.8B 的 `config.json` 里**没有** `use_qk_l2norm_in_kernel`（走 `Qwen3NextGatedDeltaNet` 的类默认），`partial_rotary_factor` / `mrope_section` 也**不在顶层**（在 `rope_parameters` 内）——与 P-17 同类坑。
+| 2026-11-14 | v31 | **W7 完成**：双状态池 + 同一 Scheduler 的 0.8B hybrid 服务化；A1–A6 完成。E1 状态误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×；P2-memory false、P2-latency true；P3 不可归因（纯臂 +10.0%/+4.3%）；内存交叉点 190.8（[128,192]）；E4a 1.498×、E4b 48/37=1.297×。请求级 TPOT 修正为每请求 decode step 累加（P-60），旧 E3 四条与 0013 invalid；正式 E3 证据 `W7-0026…0029`。D9 accepted；`[W7.state]/[W7.hybrid]` calibrated；临时 plan 删除。 |

@@ -1,5 +1,5 @@
 # W7-0026 · E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0026-e3-hybrid-b1-tpot.toml
 #
 # TPOT 修正：使用每请求 decode_event 累加（P-60）；本 run supersedes 旧归因。

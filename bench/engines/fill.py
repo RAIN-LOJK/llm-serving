@@ -18,7 +18,7 @@ Two pieces live here, both selected only by ``[exp].type = "fill"``:
   admission. The paged arm builds its own trace row inside
   :class:`bench.engines.paged.PagedEngine`; both share :func:`capacity_block`.
 
-Cross-step residency is the W7 fill semantics (``docs/w7-plan.md`` §5.4): a fill probe
+Cross-step residency is the W7 fill semantics (`docs/hybrid_attention.md` §4 / `ROADMAP.md` §5 W7): a fill probe
 asks "how many requests fit **at the same time**", so releasing a group at the end of its
 step would measure one admission pass (the group size), not the pool's capacity. The step
 row's ``active`` therefore means "resident after this admission pass" and ``admitted``

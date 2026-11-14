@@ -110,16 +110,17 @@ greedy_tokens_exact = 64
 decode_prefill_atol = 1e-4
 
 [W7.state]
-status = "target"
-basis_run = ""
+# W7 closeout: values unchanged; basis is the 8k fill run (E1 covers 512/2k/8k).
+status = "calibrated"
+basis_run = "W7-0008"
 state_estimate_error_max = 0.20
 
 [W7.hybrid]
-# W7 pre-registration (docs/w7-plan.md §5.7, docs/decisions.md D9): targets only, no run
-# yet. `basis_run` stays empty until the W7 closeout; closeout may only set
-# status="calibrated" and fill basis_run, never lower a value.
-status = "target"
-basis_run = ""
+# W7 closeout: values unchanged (pre-registered targets; never lowered). Basis is the
+# corrected hybrid B=8 E3 run; capacity/P1 also cite W7-0004…0009, crossover W7-0020…0025.
+# P-60: request TPOT is now per-request decode-step accumulation, not finish-first.
+status = "calibrated"
+basis_run = "W7-0028"
 greedy_tokens_exact = 64
 
 # P1 / capacity under the same 1640 MiB state budget (KV blocks + linear state slots +

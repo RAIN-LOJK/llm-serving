@@ -7,7 +7,7 @@ Inputs (read-only; every plotted number comes from these files):
 * ``results/W7/0006-hybrid-fill-2k``  + ``0007-pure-fill-2k``
 * ``results/W7/0008-hybrid-fill-8k``  + ``0009-pure-fill-8k``
 * ``results/W7/0010-e3-hybrid-b1`` / ``0011-e3-pure-b1``
-* ``results/W7/0018-e3-hybrid-b8-n24`` / ``0019-e3-pure-b8-n24``
+* ``results/W7/0028-e3-hybrid-b8-tpot`` / ``0029-e3-pure-b8-tpot``
 * ``results/W7/0020…0025`` -- 128/192/256 crossover scan (hybrid/pure pairs)
 
 Outputs (``figures/`` by default):
@@ -61,7 +61,7 @@ NEUTRAL = "#8a8984"
 CAPACITY_NAME = "fig_w7_capacity.png"
 CROSSOVER_NAME = "fig_w7_crossover.png"
 
-#: The plan's pre-registered contexts (docs/w7-plan.md §5.4/§5.5).
+#: The W7 pre-registered contexts (docs/hybrid_attention.md §4).
 CONTEXTS = (512, 2048, 8192)
 CAPACITY_RUNS = {
     512: ("W7-0004", "W7-0005"),
@@ -69,10 +69,10 @@ CAPACITY_RUNS = {
     8192: ("W7-0008", "W7-0009"),
 }
 E3_RUNS = {
-    (1, "hybrid"): "W7-0010",
-    (1, "pure"): "W7-0011",
-    (8, "hybrid"): "W7-0018",
-    (8, "pure"): "W7-0019",
+    (1, "hybrid"): "W7-0026",
+    (1, "pure"): "W7-0027",
+    (8, "hybrid"): "W7-0028",
+    (8, "pure"): "W7-0029",
 }
 SCAN_RUNS = {
     128: ("W7-0020", "W7-0021"),
@@ -422,7 +422,7 @@ def _crossover_figure(
     _header(
         fig,
         "W7 crossover: per-sequence state and TPOT vs context",
-        "left: fill probes W7-0004…0009 + scan W7-0020…0025; right: E3 W7-0010/0011 + W7-0018/0019; ratios are pure / hybrid",
+        "left: fill probes W7-0004…0009 + scan W7-0020…0025; right: E3 W7-0026/0027 + W7-0028/0029; ratios are pure / hybrid",
         "source: results/W7/*/summary.json · capacity.state_used_mb|state_total_mb and groups[].tpot_ms · no value is hardcoded",
     )
     return fig

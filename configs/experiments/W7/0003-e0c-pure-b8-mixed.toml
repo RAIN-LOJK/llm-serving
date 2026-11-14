@@ -1,5 +1,5 @@
 # W7-0003 · E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0003-e0c-pure-b8-mixed.toml
 #
 # 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；

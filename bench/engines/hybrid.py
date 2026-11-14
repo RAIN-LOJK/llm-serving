@@ -28,8 +28,7 @@ Fill residency (W7 Step 3)
 --------------------------
 ``[exp].type = "fill"`` runs through :class:`~bench.engines.fill.FillScheduler`, the same
 fill-only scheduler the 0.6B arms use: one FIFO group per step, packed prefill, then the
-whole group stays **resident** until a pass cannot admit anymore (``docs/w7-plan.md``
-§5.4). That is what makes ``capacity.peak_concurrency`` the pool's cross-step capacity
+whole group stays **resident** until a pass cannot admit anymore (`docs/hybrid_attention.md` §4 / `ROADMAP.md` §5 W7). That is what makes ``capacity.peak_concurrency`` the pool's cross-step capacity
 (the number E2 predicts) instead of one group's size. Residents are released by the
 scheduler's final drain; ``close_pool`` stays the adapter's job.
 

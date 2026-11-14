@@ -1,5 +1,5 @@
 # W7-0016 · E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0016-e4b-hybrid-paged.toml
 #
 # E4b 是同 1640 MiB 状态预算下的 mixed-context record-only 配对（不是生产容量线）：

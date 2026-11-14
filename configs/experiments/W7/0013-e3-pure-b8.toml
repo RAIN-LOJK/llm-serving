@@ -1,5 +1,5 @@
 # W7-0013 · E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0013-e3-pure-b8.toml
 # 8k+128 的预留是 ceil(8320/16)=520 块/请求；B=8 最坏 8×520=4160 块，故取 4200，
 # 避免准入节流污染 TPOT/P2/P3（E3/E4a 是延迟/机制探针，不是 1640 容量对）。

@@ -539,7 +539,7 @@
 ## D9 · 双状态管理：线性状态槽、6 层分页 KV 与同一调度器
 
 - **日期**：2026-11-14
-- **状态**：proposed
+- **状态**：accepted（2026-11-14 收口）
 - **背景**：W6 已把 0.8B 混合模型做到单序列、CPU fp32、数值门（D8 与 golden
   `tests/golden/qwen35-0-8b/0002`），但还没有每请求状态池、没有分页 KV、没有
   批量/packed 路径，`bench` 的 `impl="hybrid"` 仍是 `NotImplementedError`。W7 要在
@@ -547,14 +547,15 @@
   生命周期、6 层分页 KV、packed GDN prefill 与 bf16/CUDA 数值门定死，再量容量、
   交叉点、P1–P3 与 E4 机制迁移。本决策是 Step 0 的预注册：实现边界与口径在此冻结，
   证据留给正式 run 与收口。
-- **证据**：预注册于 2026-11-14；正式 run 已完成（同日）。`[W7.state]` 与
-  `[W7.hybrid]` 仍是 `status="target"`、`basis_run=""`，D9 仍是 **proposed**。
-  关键证据（详见 `docs/hybrid_attention.md` §4 与 `results/W7/`）：
+- **证据**：预注册于 2026-11-14；正式 run 已完成（同日），D9 于收口转 accepted。
+  `[W7.state]`/`[W7.hybrid]` 已 calibrated（basis `W7-0008` / `W7-0028`）。关键证据（详见 `docs/hybrid_attention.md` §4 与 `results/W7/`）：
   G0 bf16 64/64；E0b 8/8 token hash 全等（`W7-0001/0002`）；E1 三点状态误差
   0.83%/0.48%/0.18%；容量 2.70×/6.17×/14.0×（`W7-0004…0009`）；P1 7.816×；
-  P2-memory 512 混合小 2.27×；P2-latency B=1 材料差、B=8 口径依赖；
-  P3 纯臂只有 +9.8%，判“不可归因”；E4a 1.498×、E4b 48/37=1.297×（record-only）。
-  `W7-0013` 的 B=8 只到 4 行，已标 invalid，由 `W7-0019` supersede；
+  P2-memory 512 混合小 2.27×；P2-latency B=1/B=8 均材料差（TTFT 3.89×/8.78×，
+  TPOT 1.285×/1.283×）；P3 混合平坦但纯臂只有 +10.0%/+4.3%，判“不可归因”；
+  E4a 1.498×、E4b 48/37=1.297×（record-only）。
+  `W7-0013` 的 B=8 只到 4 行、`W7-0010/0011/0018/0019` 的 TPOT 归因错误（P-60），
+  均为 invalid；正式 E3 证据是 `W7-0026…0029`。
   内存交叉点由 128/192/256/512 扫描 bracket 到 [128,192]，线性插值 190.8（`W7-0020…0025`）。
   W6 的 fp32 golden `0002` 只作 bf16 差异诊断；W4 C1 的 1640 MiB / 3.111× 是纯臂
   同口径的历史参照。
@@ -614,9 +615,8 @@
   3. **容量/P1/P3 结论绑定 1640 MiB 与 512→8k**：权重差、绝对 tok/s 与 32k 端点
      都不是机制因果；纯/混合是扩展口径，报告必须标口径，不能把混合臂的线性状态
      偷偷摊到权重里。
-  4. **D9 只在 W7 收口转 accepted**：A6 全过、`[W7.*]` 已 calibrated、证据/图/索引
-     回填之后，才把本决策从 proposed 改 accepted；此前阈值保持 target、
-     `[W7.hybrid]` 数值不得下调。若 G0 失败，W7 标 `blocked`，D9 保持 proposed。
+  4. **D9 在 W7 收口转 accepted**：A6 全过、`[W7.*]` 已 calibrated、证据/图/索引
+     回填后，2026-11-14 已转 accepted；`[W7.hybrid]` 数值未下调。
 - **复盘点**：
   - **池生命周期**：alloc/release/复用/中途失败回滚/双释放/`close()` 后无泄漏；
     紧凑换入后被换请求的 `handle.slot` 是否更新；`release` 是否幂等、未知 id 是否

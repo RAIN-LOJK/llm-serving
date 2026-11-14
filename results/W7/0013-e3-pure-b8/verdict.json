@@ -1,8 +1,8 @@
 {
   "run_id": "W7-0013",
   "verdict": "invalid",
-  "reviewer": null,
-  "reviewed_at": null,
-  "decision_id": null,
-  "notes": "E3 B=8 口径错误：requests=8 被 3 个 context 分掉，实测 peak_concurrency=4；不能作为 B=8 证据。保留为 invalid，由 W7-0019 重跑。"
+  "reviewer": "rainhome",
+  "reviewed_at": "2026-11-14",
+  "decision_id": "D9",
+  "notes": "E3 B=8 口径错误：requests=8 被 3 个 context 分掉，实测 peak_concurrency=4；不能作为 B=8 证据。保留为 invalid，由 W7-0019 重跑，后因 P-60 归因修复再由 W7-0029 supersede。"
 }

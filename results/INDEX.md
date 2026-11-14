@@ -50,33 +50,33 @@
 | W45-0010 | W45 | scenario | E4b（可选）static / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 157 | pass | completed | 2026-11-06 | 0141fce |
 | W45-0011 | W45 | scenario | E4b（可选）continuous / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 293 | pass | completed | 2026-11-06 | b97c45d |
 | W45-0012 | W45 | scenario | E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 329 | pass | completed | 2026-11-06 | f333483 |
-| W7-0001 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 31.9 | unreviewed | completed | 2026-11-14 | 1a3e902 |
-| W7-0002 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 219 | unreviewed | completed | 2026-11-14 | 22b31fa |
-| W7-0003 | W7 | scenario | E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3-0.6B | continuous | tok_s 340 | unreviewed | completed | 2026-11-14 | c8cc70b |
-| W7-0004 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 512 / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 62 | unreviewed | completed | 2026-11-14 | ed7b6bd |
-| W7-0005 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 23 | unreviewed | completed | 2026-11-14 | 43eb9e7 |
-| W7-0006 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 2k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | unreviewed | completed | 2026-11-14 | 90f379d |
-| W7-0007 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 2k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 6 | unreviewed | completed | 2026-11-14 | 4fdcca4 |
-| W7-0008 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 8k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 14 | unreviewed | completed | 2026-11-14 | 1b2c4de |
-| W7-0009 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 8k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 1 | unreviewed | completed | 2026-11-14 | 5a61a92 |
-| W7-0010 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 29.4 | unreviewed | completed | 2026-11-14 | 580276a |
-| W7-0011 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块 | Qwen/Qwen3-0.6B | paged | tok_s 42.9 | unreviewed | completed | 2026-11-14 | 1b2c4de |
+| W7-0001 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 31.9 | pass | completed | 2026-11-14 | 1a3e902 |
+| W7-0002 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 219 | pass | completed | 2026-11-14 | 22b31fa |
+| W7-0003 | W7 | scenario | E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3-0.6B | continuous | tok_s 340 | pass | completed | 2026-11-14 | c8cc70b |
+| W7-0004 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 512 / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 62 | pass | completed | 2026-11-14 | ed7b6bd |
+| W7-0005 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 23 | pass | completed | 2026-11-14 | 43eb9e7 |
+| W7-0006 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 2k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | pass | completed | 2026-11-14 | 90f379d |
+| W7-0007 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 2k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 6 | pass | completed | 2026-11-14 | 4fdcca4 |
+| W7-0008 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 8k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 14 | pass | completed | 2026-11-14 | 1b2c4de |
+| W7-0009 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 8k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 1 | pass | completed | 2026-11-14 | 5a61a92 |
+| W7-0010 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 29.4 | invalid | completed | 2026-11-14 | 580276a |
+| W7-0011 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块 | Qwen/Qwen3-0.6B | paged | tok_s 42.9 | invalid | completed | 2026-11-14 | 1b2c4de |
 | W7-0013 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 112 | invalid | completed | 2026-11-14 | 9c05ecc |
-| W7-0014 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous | Qwen/Qwen3.5-0.8B | hybrid | tok_s 112 | unreviewed | completed | 2026-11-14 | db11f05 |
-| W7-0015 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / static | Qwen/Qwen3.5-0.8B | hybrid | tok_s 74.6 | unreviewed | completed | 2026-11-14 | 7037a3d |
-| W7-0016 | W7 | fill | E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 48 | unreviewed | completed | 2026-11-14 | 8aea209 |
-| W7-0017 | W7 | fill | E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | unreviewed | completed | 2026-11-14 | c7c59d2 |
-| W7-0018 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 166 | unreviewed | completed | 2026-11-14 | b48b811 |
-| W7-0019 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 224 | unreviewed | completed | 2026-11-14 | c363767 |
-| W7-0020 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 128 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | unreviewed | completed | 2026-11-14 | 82823f3 |
-| W7-0021 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 58 | unreviewed | completed | 2026-11-14 | ae88d94 |
-| W7-0022 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | unreviewed | completed | 2026-11-14 | ce27595 |
-| W7-0023 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 192 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 46 | unreviewed | completed | 2026-11-14 | 04f7c79 |
-| W7-0024 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 256 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | unreviewed | completed | 2026-11-14 | fc3b9f0 |
-| W7-0025 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 256 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 39 | unreviewed | completed | 2026-11-14 | 497807b |
-| W7-0026 | W7 | scenario | E3 P2/P3 修正（hybrid）：B=1，每请求 decode 归因 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 32 | unreviewed | completed | 2026-11-14 | 54a3c7f |
-| W7-0027 | W7 | scenario | E3 P2/P3 修正（pure）：B=1，每请求 decode 归因 | Qwen/Qwen3-0.6B | paged | tok_s 43.4 | unreviewed | completed | 2026-11-14 | 3f4cd9a |
-| W7-0028 | W7 | scenario | E3 P2/P3 修正（hybrid）：B=8，N=24，每请求 decode 归因 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 168 | unreviewed | completed | 2026-11-14 | f55c119 |
-| W7-0029 | W7 | scenario | E3 P2/P3 修正（pure）：B=8，N=24，每请求 decode 归因 | Qwen/Qwen3-0.6B | paged | tok_s 226 | unreviewed | completed | 2026-11-14 | f975590 |
+| W7-0014 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous | Qwen/Qwen3.5-0.8B | hybrid | tok_s 112 | pass | completed | 2026-11-14 | db11f05 |
+| W7-0015 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / static | Qwen/Qwen3.5-0.8B | hybrid | tok_s 74.6 | pass | completed | 2026-11-14 | 7037a3d |
+| W7-0016 | W7 | fill | E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 48 | pass | completed | 2026-11-14 | 8aea209 |
+| W7-0017 | W7 | fill | E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | pass | completed | 2026-11-14 | c7c59d2 |
+| W7-0018 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 166 | invalid | completed | 2026-11-14 | b48b811 |
+| W7-0019 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 224 | invalid | completed | 2026-11-14 | c363767 |
+| W7-0020 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 128 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | pass | completed | 2026-11-14 | 82823f3 |
+| W7-0021 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 58 | pass | completed | 2026-11-14 | ae88d94 |
+| W7-0022 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | pass | completed | 2026-11-14 | ce27595 |
+| W7-0023 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 192 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 46 | pass | completed | 2026-11-14 | 04f7c79 |
+| W7-0024 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 256 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | pass | completed | 2026-11-14 | fc3b9f0 |
+| W7-0025 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 256 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 39 | pass | completed | 2026-11-14 | 497807b |
+| W7-0026 | W7 | scenario | E3 P2/P3 修正（hybrid）：B=1，每请求 decode 归因 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 32 | pass | completed | 2026-11-14 | 54a3c7f |
+| W7-0027 | W7 | scenario | E3 P2/P3 修正（pure）：B=1，每请求 decode 归因 | Qwen/Qwen3-0.6B | paged | tok_s 43.4 | pass | completed | 2026-11-14 | 3f4cd9a |
+| W7-0028 | W7 | scenario | E3 P2/P3 修正（hybrid）：B=8，N=24，每请求 decode 归因 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 168 | pass | completed | 2026-11-14 | f55c119 |
+| W7-0029 | W7 | scenario | E3 P2/P3 修正（pure）：B=8，N=24，每请求 decode 归因 | Qwen/Qwen3-0.6B | paged | tok_s 226 | pass | completed | 2026-11-14 | f975590 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

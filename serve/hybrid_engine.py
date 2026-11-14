@@ -43,7 +43,7 @@ write), reads only those rows, narrows K/V and the additive bias to the live wid
 (``max(valid) + 1`` -- masked columns are identical to a full-width read) and advances only
 the selected rows. Using ``KvSlab.advance()`` there would move seats outside this batch.
 The narrowed read is a copy for a non-prefix seat set; the seat arm is baseline-only
-(docs/w7-plan.md §2.7), so that is reported, not optimised away.
+(docs/hybrid_attention.md §4 / D9), so that is reported, not optimised away.
 
 Atomicity
 ---------
@@ -145,7 +145,7 @@ class _SlabRows:
     * ``pos`` is the selected rows' positions for per-row RoPE, and ``advance`` moves only
       those rows (device cursors + ``KvSlab``'s Python mirrors).
 
-    The seat set is baseline-only (docs/w7-plan.md §2.7): a non-prefix seat set costs one
+    The seat set is baseline-only (docs/hybrid_attention.md §4 / D9): a non-prefix seat set costs one
     gather per layer for ``get``. Prefix sets (``seats == 0..B-1``) are read as views.
     """
 

@@ -2,7 +2,7 @@
 
 The formal serving path is bf16 on the 4090, so the numerical gate is **not** the W6
 fp32/CPU golden: it is the same checkpoint in the same dtype on the same device
-(D9-7, ``docs/w7-plan.md`` §2.4). This file compares, for ``s01`` and ``m02``:
+(D9-7, ``docs/decisions.md``). This file compares, for ``s01`` and ``m02``:
 
 * **Qwen3.5-0.8B**: our ``load_qwen35_model(..., dtype=bfloat16, device="cuda")``
   against the HF *text decoder* loaded from the same snapshot via

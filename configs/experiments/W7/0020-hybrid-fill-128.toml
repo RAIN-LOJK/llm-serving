@@ -1,5 +1,5 @@
 # W7-0020 · E1/E2 容量（hybrid fill）：synthetic 128 / B=64 / 64 槽
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0004-hybrid-fill-128.toml
 #
 # 交叉点扫描：ctx=128，与 W7-0021 同 trace；用于 128/192/256 的内存交叉点实测。

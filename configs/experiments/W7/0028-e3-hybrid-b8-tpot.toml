@@ -1,5 +1,5 @@
 # W7-0028 · E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0028-e3-hybrid-b8-tpot.toml
 #
 # 修正 W7-0012 未执行的口径：`requests = 8` 会被 3 个 context 分掉，实际峰值只有 ~3；

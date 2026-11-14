@@ -1,5 +1,5 @@
 # W7-0005 · E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0005-pure-fill-512.toml
 #
 # 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；

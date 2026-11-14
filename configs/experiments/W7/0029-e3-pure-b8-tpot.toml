@@ -1,9 +1,9 @@
 # W7-0029 · E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块
-# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# W7 口径见 ROADMAP.md §5 W7 与 docs/hybrid_attention.md §4；D9 见 docs/decisions.md。
 # 运行：python -m bench.run --config configs/experiments/W7/0029-e3-pure-b8-tpot.toml
 #
 # W7-0013 已跑但实测 peak_concurrency=4（8 条被 3 个 context 分掉），不能当 B=8；
-# 本 run 用 N=24（每 context 8 条）重跑，并 supersedes W7-0013。8k+128 预留 520 块/请求；
+# 本 run 用 N=24（每 context 8 条）重跑，并 supersedes W7-0019。8k+128 预留 520 块/请求；
 # 8×520=4160 块，故沿用 4200，避免准入节流污染 TPOT/P2/P3。延迟/机制探针，不按 1640 判。
 #
 # TPOT 修正：使用每请求 decode_event 累加（P-60）；本 run supersedes 旧归因。

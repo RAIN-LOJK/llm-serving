@@ -197,7 +197,7 @@ def build_index(root: str | Path = "results") -> Path:
 
     columns = ["run", "stage", "type", "title", "model", "engine", "key_metric", "verdict", "status", "date", "commit", "path"]
     with (root / "index.csv").open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer = csv.DictWriter(handle, fieldnames=columns, lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
 
