@@ -1,4 +1,4 @@
-"""W5 Step 4: the loader's Qwen3.5 naming contract and its guards.
+"""W5 Step 4 / W6 Step 4: the loader's Qwen3.5 naming contract and its guards.
 
 Three layers of coverage, cheapest first:
 
@@ -10,12 +10,15 @@ Three layers of coverage, cheapest first:
    are covered: W5's full attention (``self_attn.*``, layer 3) and W6's linear attention
    (``linear_attn.*``, layer 0).
 3. **The local 0.8B snapshot** (marked ``hf``, skipped without it) — real layer shapes
-   for both kinds, and the whole-model load still fails with the W6 ``linear_attn.*`` gap
-   and no partial ``load_state_dict`` (Step 4 changes that).
+   for both kinds, the hybrid whole-model load (``load_qwen35_model``) with its state
+   byte accounting, and ``load_checkpoint``'s explicit refusal of the hybrid config
+   (P-54: no ``linear_attn.*`` gap wall, no partial load).
 
 ``load_layer_weights`` returns keys *relative to the block* (``self_attn.q_proj.weight``
 or ``linear_attn.in_proj_qkv.weight``), so a block can do
-``block.load_state_dict(load_layer_weights(...), strict=True)``.
+``block.load_state_dict(load_layer_weights(...), strict=True)``. Whole-model loading has
+one entry point per model shape: ``load_qwen35_model`` for the hybrid 0.8B,
+``load_checkpoint`` for the all-full-attention 0.6B.
 """
 
 from __future__ import annotations
@@ -30,9 +33,13 @@ from model.loading import (
     config_from_hf,
     load_checkpoint,
     load_layer_weights,
+    load_qwen35_model,
     map_hf_key,
 )
 from model.minillm import MiniLLM
+from model.qwen35 import Qwen35FullAttentionBlock
+from model.qwen35_gdn import Qwen35GDNBlock
+from model.qwen35_model import Qwen35State
 
 MODEL = "Qwen/Qwen3.5-0.8B"
 QWEN3_MODEL = "Qwen/Qwen3-0.6B"
@@ -241,8 +248,6 @@ def test_linear_attention_layer_returns_block_relative_weights(tmp_path):
     """W6 replaces W5's refusal: layer 0 now loads the gated-delta-net key set."""
     from transformers import AutoConfig
 
-    from model.qwen35_gdn import Qwen35GDNBlock
-
     _write_tiny_linear_snapshot(tmp_path)
     weights = load_layer_weights(tmp_path, 0, dtype=torch.float16)
 
@@ -410,8 +415,13 @@ def test_real_linear_layer_weights_have_qwen35_shapes():
 
 
 @pytest.mark.hf
-@pytest.mark.slow
-def test_qwen35_full_checkpoint_reports_the_w6_gap_without_partial_load(monkeypatch):
+def test_qwen35_hybrid_checkpoint_is_rejected_by_load_checkpoint(monkeypatch):
+    """P-54: ``load_checkpoint`` is the all-full path and refuses a hybrid config.
+
+    Before Step 4 this read the whole checkpoint and then raised the ``linear_attn.*``
+    gap wall. Now the config names the right entry point first, before ``MiniLLM`` is
+    built; the spy proves no weight is copied into a half-built model.
+    """
     snapshot = _snapshot_or_skip()
 
     loads: list[str] = []
@@ -423,12 +433,46 @@ def test_qwen35_full_checkpoint_reports_the_w6_gap_without_partial_load(monkeypa
 
     monkeypatch.setattr(MiniLLM, "load_state_dict", spy)
 
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(ValueError) as excinfo:
         load_checkpoint(snapshot)
 
     message = str(excinfo.value)
-    assert "linear_attn" in message
-    assert "W6" in message
-    # The snapshot omits lm_head because it is tied; that must not be blamed on model/.
-    assert "lm_head" not in message
-    assert loads == []  # the mismatch must raise before any weight is copied in
+    assert "load_qwen35_model" in message
+    assert "linear_attention" in message
+    assert loads == []  # refused before any weight is copied
+
+
+@pytest.mark.hf
+@pytest.mark.slow
+def test_load_qwen35_model_from_real_checkpoint():
+    """The hybrid 0.8B checkpoint loads, runs a 7-token prefill, and sizes its state.
+
+    This is the whole-model acceptance for Step 4 (P-54): 24 layers on the real
+    ``LLLF x 6`` schedule, a finite ``(1, 1, 248320)`` logits row from
+    ``logits_to_keep=1``, and the exact §5.6 state bytes for a 7-token fp32 request.
+    """
+    snapshot = _snapshot_or_skip()
+    model = load_qwen35_model(snapshot)
+
+    assert len(model.layers) == 24
+    assert sum(isinstance(layer, Qwen35GDNBlock) for layer in model.layers) == 18
+    assert sum(
+        isinstance(layer, Qwen35FullAttentionBlock) for layer in model.layers
+    ) == 6
+    # ``to()`` must not have split the shared embedding/lm_head Parameter.
+    assert model.lm_head.weight is model.token_embedding.weight
+
+    state = Qwen35State(model.config)
+    ids = torch.tensor([[1, 2, 3, 4, 5, 6, 7]])
+    logits, loss = model(ids, state, logits_to_keep=1)
+
+    assert loss is None
+    assert logits.shape == (1, 1, 248320)
+    assert torch.isfinite(logits).all()
+    assert state.position == 7
+
+    # conv: 6144 channels * (k - 1 = 3) * 4 B; recurrent: 16 * 128 * 128 * 4 B fp32.
+    assert state.linear_state_bytes() == 18 * (6144 * 3 * 4 + 16 * 128 * 128 * 4)
+    # K/V: 2 kv heads * 2 (K,V) * 256 head_dim * 7 tokens * 4 B, on 6 full layers.
+    assert state.kv_bytes() == 6 * (2 * 2 * 256 * 7 * 4)
+    assert state.nbytes() == state.linear_state_bytes() + state.kv_bytes()

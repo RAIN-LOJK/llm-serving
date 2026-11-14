@@ -16,7 +16,8 @@ things differ from the Qwen3-0.6B path and each changes the numbers:
   head dimensions rotate; the tail passes through.
 
 ``Qwen35RMSNormGated`` is the linear-attention norm (``weight`` ones, norm before gate,
-``silu(gate)`` in fp32). W5 only implements and unit-tests it -- W6 assembles it.
+``silu(gate)`` in fp32). W5 only implements and unit-tests it; W6 Step 4 assembles it with
+the GDN blocks into the 24-layer hybrid model in ``model/qwen35_model.py``.
 
 Scope (W5 plan §1): single-layer inference. A growing ``KVcache`` is supported because
 W6's decode needs it. Chunked prefill (``past_len > 0`` with ``T > 1``), explicit

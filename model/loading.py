@@ -15,16 +15,22 @@ under ``model.language_model.``; Qwen3 uses ``model.``)::
     lm_head.weight                               -> lm_head.weight (tied to the embedding)
 
 ``mtp.*`` and the visual tower are out of scope (docs/decisions.md D2): ``map_hf_key``
-returns None for them so a whole-model load reports the one real gap (W6's
-``linear_attn.*``) instead of a wall of MTP/vision keys.
+returns None for them so a whole-model load reports only what ``model/`` genuinely lacks
+instead of a wall of MTP/vision keys.
 
-``load_layer_weights`` is the W5/W6 single-layer entry point: it reads one layer and
-returns keys relative to the block (``self_attn.q_proj.weight`` or
-``linear_attn.in_proj_qkv.weight``), so a block can load it with ``strict=True``. Which
-kind it expects is decided by ``config.layer_types[layer_idx]``, not guessed from the
-keys. Whole-model loading of the hybrid 0.8B checkpoint stays a failure until Step 4 adds
-the hybrid entry point; ``load_checkpoint`` still builds the all-full-attention
-``MiniLLM`` only.
+There are three entry points, one per model shape:
+
+* ``load_checkpoint`` -- the **Qwen3-0.6B / all-full-attention** whole-model path; it
+  builds ``MiniLLM`` and rejects a hybrid config up front (P-54: no partial load, no
+  ``linear_attn.*`` gap wall).
+* ``load_qwen35_model`` -- the **hybrid Qwen3.5-0.8B** whole-model path; it builds
+  ``Qwen35Model`` (18 gated-delta-net + 6 full-attention layers) and rejects an
+  all-full-attention config, which belongs to ``load_checkpoint``.
+* ``load_layer_weights`` -- the **single-layer** W5/W6 path: it reads one layer and
+  returns keys relative to the block (``self_attn.q_proj.weight`` or
+  ``linear_attn.in_proj_qkv.weight``), so a block can load it with ``strict=True``.
+  Which kind it expects is decided by ``config.layer_types[layer_idx]``, not guessed
+  from the keys.
 
 If a key does not map, the error lists exactly which parameters ``model/`` still has to grow.
 """
@@ -39,6 +45,7 @@ import torch
 
 from model.config import MiniLLMConfig
 from model.minillm import MiniLLM
+from model.qwen35_model import Qwen35Model
 
 
 def cached_snapshot(repo: str, revision: str | None = None) -> Path | None:
@@ -178,9 +185,9 @@ def _describe_mismatch(own: dict, incoming: dict) -> str | None:
         ]
     if any(kind.startswith("layers.*.linear_attn.") for kind in extra):
         lines.append(
-            "  W6 to-do: layers.*.linear_attn.* (gated delta-net) has no module in "
-            "model/ yet; W5 loads one full-attention layer at a time with "
-            "load_layer_weights()."
+            "  layers.*.linear_attn.* (gated delta-net) belongs to the hybrid Qwen3.5 "
+            "path: load it with load_qwen35_model(); load_checkpoint() builds the "
+            "all-full-attention MiniLLM."
         )
     return "\n".join(lines)
 
@@ -382,10 +389,11 @@ def load_layer_weights(
     table is complete enough that a missing or misshaped key fails here instead of
     producing a partially-filled layer.
 
-    Whole-model loading is a different function: ``load_checkpoint`` still builds the
-    all-full-attention ``MiniLLM`` and rejects the 0.8B hybrid. The hybrid whole-model
-    entry point (``Qwen35Model``) arrives in W6 Step 4; this function and its per-layer
-    dispatch are what Step 3's single-layer golden test uses in the meantime.
+    Whole-model loading is a different function, and which one depends on the model:
+    :func:`load_qwen35_model` builds the hybrid ``Qwen35Model`` for the 0.8B
+    ``LLLF x 6`` checkpoint, while :func:`load_checkpoint` builds the all-full-attention
+    ``MiniLLM`` for Qwen3-0.6B and rejects hybrid configs. This function and its
+    per-layer dispatch are what the single-layer golden tests use.
 
     Tensors come back on CPU; the caller owns the device move.
     """
@@ -438,12 +446,28 @@ def load_checkpoint(
     Deliberately does not go through ``AutoModelForCausalLM``: the measured path must be the
     hand-written decoder end to end, and a silent partial load is exactly the failure mode
     that costs days.
+
+    ``MiniLLM`` is the **all-full-attention** decoder, i.e. the Qwen3-0.6B shape. A hybrid
+    Qwen3.5 checkpoint (any ``linear_attention`` layer) is rejected here, before the model
+    is built or a weight is read: the old behaviour was a ``linear_attn.*`` gap wall after
+    a whole checkpoint read, and a partial load would be worse (P-54). Use
+    :func:`load_qwen35_model` for Qwen3.5-0.8B.
     """
     from transformers import AutoConfig
 
     model_path = Path(model_path)
     hf = AutoConfig.from_pretrained(model_path, local_files_only=True)
-    model = MiniLLM(config_from_hf(hf))
+    config = config_from_hf(hf)
+    linear_layers = sum(
+        1 for kind in config.layer_types if kind == _LINEAR_ATTENTION
+    )
+    if linear_layers:
+        raise ValueError(
+            f"hybrid checkpoint ({linear_layers} linear_attention layers): "
+            "load_checkpoint builds the all-full-attention MiniLLM; use "
+            "load_qwen35_model() for Qwen3.5-0.8B"
+        )
+    model = MiniLLM(config)
 
     mapped = {}
     for key, value in read_checkpoint(model_path, dtype).items():
@@ -451,10 +475,10 @@ def load_checkpoint(
         if local is not None:
             mapped[local] = value
 
-    # A tied checkpoint may omit ``lm_head.weight`` (Qwen3.5-0.8B does; Qwen3-0.6B ships
-    # it). That is not a gap in model/: fill it from the embedding, which is what HF's
-    # ``tie_weights`` does, so the mismatch report stays about parameters model/ genuinely
-    # lacks instead of blaming a tied weight.
+    # A tied checkpoint may omit ``lm_head.weight`` (Qwen3 ships it, but the field is
+    # allowed either way). That is not a gap in model/: fill it from the embedding, which
+    # is what HF's ``tie_weights`` does, so the mismatch report stays about parameters
+    # model/ genuinely lacks instead of blaming a tied weight.
     if (
         "lm_head.weight" not in mapped
         and model.config.tie_word_embeddings
@@ -468,3 +492,75 @@ def load_checkpoint(
     model.load_state_dict(mapped, strict=True)
 
     return model.to(device=device, dtype=dtype).eval()
+
+
+def load_qwen35_model(
+    snapshot: str | Path,
+    dtype: torch.dtype = torch.float32,
+    device: str = "cpu",
+) -> Qwen35Model:
+    """Build a ``Qwen35Model`` from a hybrid Qwen3.5 snapshot directory.
+
+    The whole-model entry point for Qwen3.5-0.8B: 24 layers on ``LLLF x 6`` (18
+    ``linear_attention`` + 6 ``full_attention``). ``load_checkpoint`` is the
+    all-full-attention (Qwen3-0.6B) path and refuses a hybrid config; here an
+    all-full-attention config is refused for the same reason in reverse. Single layers
+    still go through :func:`load_layer_weights`.
+
+    Every tensor is read once (``read_checkpoint``), mapped through ``map_hf_key`` -- which
+    drops ``mtp.*`` and the vision tower (D2) -- and checked against the model's
+    ``state_dict`` with the same grouped ``_describe_mismatch`` report before
+    ``strict=True``. A tied checkpoint omits ``lm_head.weight``; it is filled from
+    ``token_embedding.weight`` so the report does not blame a weight the checkpoint is
+    not supposed to ship (P-54).
+
+    The dtype/device move happens after the load. ``nn.Module.to`` *may* re-create each
+    module's Parameters instead of copying in place (that is what it does under
+    ``torch.__future__.set_overwrite_module_params_on_conversion(True)``, and what some
+    backends do for cross-device moves). Because the shared embedding/lm_head Parameter is
+    registered under **two** modules, each module would then keep its own new copy, so the
+    tie is restored unconditionally after the move -- a copy of ``1024 x 248320`` fp32 is
+    ~1 GB.
+    """
+    from transformers import AutoConfig
+
+    snapshot = Path(snapshot)
+    hf = AutoConfig.from_pretrained(snapshot, local_files_only=True)
+    config = config_from_hf(hf)
+
+    linear_layers = sum(
+        1 for kind in config.layer_types if kind == _LINEAR_ATTENTION
+    )
+    if not linear_layers:
+        raise ValueError(
+            f"{snapshot} has no 'linear_attention' layer (all-full-attention config): "
+            "load_qwen35_model builds the hybrid Qwen3.5 model; use load_checkpoint() "
+            "for the all-full-attention MiniLLM path"
+        )
+
+    model = Qwen35Model(config)
+
+    mapped: dict[str, torch.Tensor] = {}
+    for key, value in read_checkpoint(snapshot, dtype).items():
+        local = map_hf_key(key)
+        if local is not None:
+            mapped[local] = value
+
+    if (
+        "lm_head.weight" not in mapped
+        and config.tie_word_embeddings
+        and "token_embedding.weight" in mapped
+    ):
+        mapped["lm_head.weight"] = mapped["token_embedding.weight"]
+
+    problem = _describe_mismatch(model.state_dict(), mapped)
+    if problem:
+        raise RuntimeError(problem)
+    model.load_state_dict(mapped, strict=True)
+
+    model = model.to(device=device, dtype=dtype).eval()
+    # Re-tie after the move: if ``to()`` re-created Parameters, each module would now
+    # hold its own copy and the next forward would read stale weights (see docstring).
+    # Unconditional and cheap -- on the in-place ``set_data`` path it is a no-op.
+    model.lm_head.weight = model.token_embedding.weight
+    return model
