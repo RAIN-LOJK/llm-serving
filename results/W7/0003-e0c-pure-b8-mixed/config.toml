@@ -1,0 +1,55 @@
+# W7-0003 · E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0003-e0c-pure-b8-mixed.toml
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行；
+# 本目录只准备配置，不代表任何数字已经测到。
+
+schema = 1
+
+[exp]
+id = "W7-0003"
+stage = "W7"
+type = "scenario"
+slug = "e0c-pure-b8-mixed"
+title = "E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new"
+hypothesis = ["the_same_scheduler_keeps_the_pure_06b_path_intact"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3-0.6B"
+revision = "c1899de289a04d12100db370d81485cdf75e47ca"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "prompts"
+prompts = "bench/prompts.json"
+prompt_ids = ["s01", "s05", "m01", "m04", "m08", "l01", "l03", "l05"]
+max_new_tokens = 128
+arrival = "closed"
+requests = 8
+budgets = [128]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "continuous"
+device = "cuda"
+max_batch = 8
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E0c 是调度器协议回归；64/64 golden 由 G0/测试覆盖，不在这里重跑 golden。
+mode = "record_only"
+criteria = []
