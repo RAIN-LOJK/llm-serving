@@ -53,5 +53,6 @@
 | W7-0001 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 31.9 | unreviewed | completed | 2026-11-14 | 1a3e902 |
 | W7-0002 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 219 | unreviewed | completed | 2026-11-14 | 22b31fa |
 | W7-0003 | W7 | scenario | E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new | Qwen/Qwen3-0.6B | continuous | tok_s 340 | unreviewed | completed | 2026-11-14 | c8cc70b |
+| W7-0005 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 23 | unreviewed | completed | 2026-11-14 | 43eb9e7 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

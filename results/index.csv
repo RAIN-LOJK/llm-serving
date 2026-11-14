@@ -47,3 +47,4 @@ W45-0012,W45,scenario,E2 decode 内核（paged，C1 修复后）：Triton block-
 W7-0001,W7,scenario,E0b 正确性（hybrid）：8 条 mixed prompts / B=1 / 128 new,Qwen/Qwen3.5-0.8B,hybrid,tok_s 31.9,unreviewed,completed,2026-11-14,1a3e902,results/W7/0001-e0b-hybrid-b1-mixed
 W7-0002,W7,scenario,E0b 正确性（hybrid）：8 条 mixed prompts / B=8 / 128 new,Qwen/Qwen3.5-0.8B,hybrid,tok_s 219,unreviewed,completed,2026-11-14,22b31fa,results/W7/0002-e0b-hybrid-b8-mixed
 W7-0003,W7,scenario,E0c 调度器回归（pure 0.6B）：同 8 条 mixed prompts / B=8 / 128 new,Qwen/Qwen3-0.6B,continuous,tok_s 340,unreviewed,completed,2026-11-14,c8cc70b,results/W7/0003-e0c-pure-b8-mixed
+W7-0005,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 23,unreviewed,completed,2026-11-14,43eb9e7,results/W7/0005-pure-fill-512
