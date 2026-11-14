@@ -68,5 +68,6 @@
 | W7-0017 | W7 | fill | E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | unreviewed | completed | 2026-11-14 | c7c59d2 |
 | W7-0018 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 166 | unreviewed | completed | 2026-11-14 | b48b811 |
 | W7-0019 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 224 | unreviewed | completed | 2026-11-14 | c363767 |
+| W7-0021 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 58 | unreviewed | completed | 2026-11-14 | ae88d94 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
