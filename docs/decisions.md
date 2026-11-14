@@ -475,16 +475,21 @@
 
 ## D8 · W6 Gated DeltaNet：三算子、q/k 归一化契约与状态接口
 
-- **日期**：2026-11-14（proposed）；收口时改 accepted
-- **状态**：proposed
+- **日期**：2026-11-14（proposed → accepted）
+- **状态**：accepted
 - **背景**：W5 只完成 6 层全注意力；0.8B 的 18 层 `linear_attn`（gated delta-net）没有实现，
   整模型加载明确报 gap。W6 要补齐 5 类算子中最后 3 类（短卷积、decode 循环、chunked prefill），
   装配 24 层 3:1 混合模型，并让分块 prefill 与逐步 decode 自洽、全模型 64/64 贪心对齐 HF。
-- **证据**：`docs/w6-plan.md` §1/§6；G0 预演（2026-11-14，随机 fp32、H=2、K=V=32、C=64）：
-  HF chunk vs recurrent 输出 `5.6e-9…1.0e-7`、final state `0…8.3e-7`；
-  fla recurrent vs HF recurrent `4.5e-8…6.0e-8`。未归一化 k 的同一对拍在 scale=0.5 差
-  `8.9e-4`、scale=1.0 差 `6.1e19`、scale=2.0 NaN。正式门禁见 `[W6.gdn]`（当前 `target`）。
-- **判据**：`configs/thresholds.toml [W6.gdn]`；A1–A6 见 `docs/w6-plan.md` §0。
+- **证据**：`tests/golden/qwen35-0-8b/0002`（`spec=w6-gdn-v1`，7.16 MB，2026-11-14 用户生成并提交）。
+  算子：0.8B 生产几何（T=240、H=16、K=V=128）下 chunk vs HF chunk 输出与终态均 `0.0`
+  （bit-identical），recurrent vs HF recurrent `1.5e-8`，fla naive `≈4.5e-8`，
+  chunk vs recurrent `2.6e-7`。单层：L0/L2 × s01/m02 的 56 行 stage 表全过；投影/卷积
+  `0.0`，GDN/norm `≤3.6e-7`，`final_state ≤5.96e-7`，`final_conv_state 0.0`。全模型：
+  24 层逐层 hidden 最差 `2.861e-6`，末位 logits `1.061e-5/1.121e-5`，贪心 **64/64**
+  （s01/m02），prefill-vs-decode `3.040e-5`。预注册 `[W6.gdn]` 数值未改；快速门禁
+  874 passed，W5 2 passed，W1 4 passed。
+- **判据**：`configs/thresholds.toml [W6.gdn]`（calibrated 2026-11-14）；A1–A6 见
+  `ROADMAP.md` §5 W6。
 - **决定**：
   1. **新模块**：`model/qwen35_gdn.py` 承载 `causal_conv_prefill/decode`、
      `gated_delta_recurrent`、`gated_delta_chunked`、`Qwen35GDN`、`Qwen35GDNBlock`；
@@ -512,7 +517,7 @@
      证据 = golden + pytest，不新开 `results/W6`。
   7. **fixture**：一个 `tests/golden/qwen35-0-8b/0002`（`spec=w6-gdn-v1`），prompt
      `s01`(36 tok)+`m02`(240 tok)，含 L0/L2 单层 stage 与全模型 logits/greedy/layer hidden；
-     由用户生成并提交，测试只读。
+     由用户在干净树生成并提交（fixture commit `80c9d4f`；`meta.source.commit=024d58a`，`dirty=false`），测试只读。
   8. **W5 遗留**：`D-W5-2`（W5 只做单层加载、整模型留 W6）在 W6 由
      `load_qwen35_model` 完成；`D-W5-1` 的"新模块"口径继续有效。
 - **后果**：
@@ -524,8 +529,8 @@
      `Qwen35State`，不再自己分配状态。
   4. 没有性能结论；`ROADMAP §12` 的 W6 证据是 golden + pytest，不是 run id。
 - **复盘点**：
-  - `[W6.gdn]` 收口时从 `target` 改 `calibrated`，数值不动；若需改，必须走本决策修订并
-    在正式 golden 之前；
+  - `[W6.gdn]` 已于 2026-11-14 从 `target` 改 `calibrated`，数值未动；若需改，必须走本决策
+    修订并在下一次正式 golden 之前；
   - A4 的 64/64 是硬线；near-tie 翻转只改变归因，不改变判定；
   - W7 接 packed/varlen 时复核 `conv_state=3` vs 4、q/k l2norm 只做一次、状态字节数。
 

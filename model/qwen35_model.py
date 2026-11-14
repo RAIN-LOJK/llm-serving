@@ -289,7 +289,7 @@ class Qwen35State:
     # ------------------------------------------------------------------- bytes
 
     def linear_state_bytes(self) -> int:
-        """Conv + recurrent bytes over the linear-attention layers (W6 plan §5.6)."""
+        """Conv + recurrent bytes over the linear-attention layers (W6 state bytes, D8)."""
         total = 0
         for idx, kind in enumerate(self.config.layer_types):
             if kind != _LINEAR_ATTENTION:

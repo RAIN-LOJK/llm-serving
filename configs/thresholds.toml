@@ -79,11 +79,13 @@ max_concurrency_speedup_min = 1.50
 fragmentation_max = 0.05
 
 [W6.gdn]
-# W6 (docs/w6-plan.md §6.3): Gated DeltaNet operators + layer + full model. Pre-registered
-# before the 0002 fixture existed (2026-11-14); status stays "target" until closeout.
-# The values are not fitted: the G0 dry run put chunk-vs-recurrent at ~1e-7, i.e. about
-# 100x headroom on outputs and 12x on the final state. Do not relax after measuring.
-status = "target"
+# W6 (docs/decisions.md D8; ROADMAP §5 W6): Gated DeltaNet operators + layer + full model.
+# Pre-registered before the 0002 fixture existed (2026-11-14), then calibrated on the
+# committed fixture without changing a value: the G0 dry run put chunk-vs-recurrent at
+# ~1e-7 (about 100x headroom on outputs, 12x on the final state), and the formal fixture
+# came in at 0.0 for projections/conv and <=6e-7 for the final state. Do not relax.
+status = "calibrated"
+calibrated = "2026-11-14"
 basis_golden = "tests/golden/qwen35-0-8b/0002"
 # recurrent/chunked vs both independent references (HF torch fallback + fla naive).
 operator_atol = 1e-5

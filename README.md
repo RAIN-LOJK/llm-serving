@@ -43,8 +43,9 @@
 
 ## 范围与边界
 
-当前版本覆盖 W0–W4.5：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode。
-W5 的全注意力层（Qwen3.5）已完成；W6–W7 的 GDN / 双状态管理尚未实现；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
+当前版本覆盖 W0–W6：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode；
+Qwen3.5 的全注意力层、短卷积 + Gated DeltaNet（分块 prefill / 逐步 decode）与 24 层混合模型
+均已对齐 HF。W7 的双状态管理尚未实现；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
 
 W4.5 收口后，生产调度器只有 packed group，paged decode 只有 CUDA Triton block-table kernel；
 CPU/MPS 上 paged 直接报错，seat 才是 CPU/MPS 路径。

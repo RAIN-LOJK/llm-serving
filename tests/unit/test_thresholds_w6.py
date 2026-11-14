@@ -1,6 +1,6 @@
 """W6 pre-registration: the GDN thresholds are frozen before the fixture exists.
 
-The plan (``docs/w6-plan.md`` §6.3) registers these numbers *before* the first real
+``docs/decisions.md`` D8 registers these numbers *before* the first real
 measurement. This file is the guard against a later "fit the line to the result" edit:
 if a value changes, the diff has to explain why in D8 and in ``ROADMAP.md`` §13.
 

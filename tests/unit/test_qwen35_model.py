@@ -10,7 +10,7 @@ where a plausible mistake stays invisible in every layer test:
   ``logits_to_keep`` slicing *before* that projection (P-13);
 * chunked prefill vs stepwise decode over the whole stack (E4 / A2), including the
   1-token-prompt-then-decode case that a ``T == 1`` dispatch would get wrong (P-56);
-* the state's lifecycle and exact byte accounting (W6 plan §5.6), which is W7's input;
+* the state's lifecycle and exact byte accounting (W6 state bytes, D8), which is W7's input;
 * ``cull`` shrinking rows without rewinding the cursor;
 * every unsupported entry point raising: batch > 1, ``attention_mask``, a plain
   ``KVcache``, cross-call chunked prefill, non-positive ``logits_to_keep``;
@@ -198,7 +198,7 @@ def test_state_lifecycle_and_byte_accounting():
             assert state.conv_state(idx) is None
             assert state.recurrent_state(idx) is None
 
-    # W6 plan §5.6, exact integers: conv 24*3*4 B + recurrent 2*4*4*4 B per linear layer;
+    # W6 state bytes (D8), exact integers: conv 24*3*4 B + recurrent 2*4*4*4 B per linear layer;
     # K+V 2*2*8*7*4 B per full layer.
     assert state.linear_state_bytes() == 18 * (24 * 3 * 4 + 2 * 4 * 4 * 4)
     assert state.kv_bytes() == 6 * (2 * 2 * 8 * SEQ_LEN * 4)

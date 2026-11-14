@@ -3,7 +3,7 @@
 ``Qwen35GDN`` was aligned one stage at a time in ``test_align_qwen35_gdn.py``; that says
 nothing about the *assembly* -- the ``LLLF`` schedule, the shared ``Qwen35State``, the
 zero-centered final norm, the tied ``lm_head`` and the cached decode path. This test closes
-that gap against ``tests/golden/qwen35-0-8b/0002`` (docs/w6-plan.md §6.1, §7.2), using the
+that gap against ``tests/golden/qwen35-0-8b/0002`` (D8, `[W6.gdn]`), using the
 full-model arrays ``scripts/make_golden_qwen35_w6.py`` captures in the same prefill as the
 layer stages:
 

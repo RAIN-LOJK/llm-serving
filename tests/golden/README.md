@@ -1,6 +1,6 @@
 # golden fixtures
 
-W1 的数值对拍基准放在这里，由 `scripts/make_golden.py` 生成，测试只读。
+W1/W5/W6 的数值对拍基准放在这里，由对应脚本生成，测试只读。
 
 ## 格式
 
@@ -44,6 +44,37 @@ upcast 到 fp32 无损，所以参考值与 GPU、驱动无关，换机器也能
 `configs/thresholds.toml` 的注释里。
 
 重新生成只在 prompt 集或模型 revision 变了时发生，并且要新开 `--golden-id`（目录不可覆盖）。
+
+## 0002 · Qwen3.5-0.8B · W6 GDN + 全模型
+
+`Qwen/Qwen3.5-0.8B@2fc0636`（超短线是 `2fc06364715b967f1860aea9cf38778875588b17`），
+**float32 / CPU / eager**，`spec = w6-gdn-v1`，7.16 MB。由
+`scripts/make_golden_qwen35_w6.py` 在干净树生成（`meta.source.dirty=false`，
+`source.commit=024d58a`），用户 review 后提交；测试只读。
+
+| 字段 | 内容 |
+|---|---|
+| prompts | `s01`（36 token）、`m02`（240 token；3 个 chunk 边界 + 48-token 尾巴） |
+| `layers` | L0/L2（linear_attention） |
+| 单层 stage | `layer_in`（全 T）、`input_layernorm`、`in_proj_qkv/z/b/a`、`conv_out`（post-SiLU，派生）、`q_pre`/`k_pre`（raw，l2norm 前）、`beta`/`g`、`core_attn_out`、`norm_out`、`layer_out`；`final_state`/`final_conv_state` 仅 m02 |
+| 全模型 | `logits_last`、64 步 `greedy_ids` + `greedy_margins`、24 层 × 3 位置 `layer_hidden` |
+| 状态口径 | `final_conv_state` 取 HF cache 的 `[..., -3:]`（P-49）；`final_state` fp32 |
+
+为什么 `conv_out` 是派生的：HF 在 conv 之后没有模块边界，直接用 `in_proj_qkv` +
+`conv1d.weight` 重算 `F.conv1d(..., padding=k-1)[:, :, :T]` 再 `F.silu`，与生产
+`causal_conv_prefill` 逐元素一致；它**不是** `conv_state`（后者是 pre-SiLU 输入列）。
+
+全模型上界：逐层 hidden `1e-2`、末位 logits `0.05`、贪心 64/64；正式实测远低于上界
+（hidden 2.861e-6、logits 1.061e-5/1.121e-5、贪心 64/64）。
+
+入口：`tests/integration/test_align_qwen35_gdn.py`（单层 stage）与
+`tests/integration/test_align_qwen35_model.py`（全模型）；两者都要求
+`MINILLM_RUN_HF=1`，草稿可用 `MINILLM_W6_GOLDEN=/tmp/w6-golden-dry` 指向。
+
+重新生成只在 revision/prompt/契约变化时发生，并且要新开 `0003`；目录不可覆盖。
+`git_state` 必须在创建 `out_dir` 之前采样（P-57），否则新目录本身会让
+`dirty=true`。`final_state`/`final_conv_state` 在 `.numpy()` 前必须 `.clone()`
+（P-59：HF cache 在 greedy decode 时会原地更新）。
 
 ## 验收
 

@@ -21,7 +21,7 @@ are the raw q/k at the rule entry, before the in-kernel l2norm and the q scale. 
 conventions are what make the stage table diagnostic instead of decorative.
 
 Tolerances are read from ``configs/thresholds.toml [W6.gdn]`` (pre-registered in
-docs/w6-plan.md §6.3); relative stages use ``max|Δ| / max|ref|`` over the rows the golden
+docs/decisions.md D8 and `[W6.gdn]`); relative stages use ``max|Δ| / max|ref|`` over the rows the golden
 stored, the two states use absolute atol. The golden path can point at a Step-3 draft:
 
     MINILLM_RUN_HF=1 MINILLM_W6_GOLDEN=/tmp/w6-golden-dry \\

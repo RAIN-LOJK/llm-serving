@@ -2,7 +2,7 @@
 """Generate the W6 Gated DeltaNet single-layer golden fixture from Qwen3.5-0.8B.
 
 W6 aligns the hand-written ``Qwen35GDNBlock`` against HF *stage by stage*, the same way
-W5 aligned the full-attention block (docs/w6-plan.md §6). This script runs the HF text
+W5 aligned the full-attention block (docs/decisions.md D8). This script runs the HF text
 decoder once per prompt on CPU in float32 with eager attention and hooks every stage of
 the two linear-attention layers ``L0`` and ``L2``:
 
@@ -53,7 +53,7 @@ to ``(B, T, H, K)``, *before* the in-kernel l2norm and before the ``K**-0.5`` q 
 cannot have run yet). ``beta`` is already sigmoid-ed and ``g`` is already log-space
 ``<= 0``: both are captured after HF's projection, never re-derived.
 
-One prefill per prompt feeds **both** W6 deliverables (docs/w6-plan.md §6.1): the layer
+One prefill per prompt feeds **both** W6 deliverables (docs/decisions.md D8): the layer
 stage table above *and* the full-model gate in
 ``tests/integration/test_align_qwen35_model.py``. The same forward therefore also captures
 
@@ -452,7 +452,7 @@ def main() -> int:
         )
 
     # Not "exists but empty": an empty directory is already untracked and would make the
-    # formal fixture's meta dirty (docs/w6-plan.md §6.2, P-57).
+    # formal fixture's meta dirty (D8 decision 7, P-57).
     out_dir = Path(args.out)
     if out_dir.exists():
         raise SystemExit(

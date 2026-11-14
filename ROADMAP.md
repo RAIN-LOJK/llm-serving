@@ -69,7 +69,7 @@
 > ② `serve/` 层（调度、块管理、指标）与架构无关，先在简单载体上做出来，后面只是"多接一种状态"；
 > ③ W0 会先用 HF 粗测混合架构的显存/延迟曲线——**数据说值得投入，再投入**（这正是你 `protocol.md` 里 D1 的做法）。
 
-> **W4.5 的载体边界**：只用 A（Qwen3-0.6B）做 packed prefill + block-table decode；B（Qwen3.5-0.8B）的 packed prefill 在 W6 接同一接口，不在 W4.5 重复造。
+> **W4.5 的载体边界**：只用 A（Qwen3-0.6B）做 packed prefill + block-table decode；B（Qwen3.5-0.8B）的 packed prefill 留到 W7 接同一接口（W6 已裁定只做单序列数值门，见 D8），不在 W4.5 重复造。
 
 ### 1.4 移植工作分解（W5–W7 的依据）
 
@@ -97,6 +97,7 @@
 | 实验工程纪律（自包含目录、config 快照、git 状态、人工结论） | `docs/experiments.md`；训练实现已归档，不复用 |
 | run 契约 + runner + 生成索引 | `bench/run.py`、`scripts/exp_index.py` |
 | 12+ 条已踩过的坑 | `PITFALLS.md` |
+| Qwen3.5 混合层：6 全注意力 + 18 GDN + 24 层模型 | `model/qwen35.py`、`qwen35_gdn.py`、`qwen35_model.py`；`tests/golden/qwen35-0-8b/0002` |
 
 | 缺（本项目要补） | 阶段 |
 |---|---|
@@ -105,7 +106,7 @@
 | 请求级调度器（连续批） | W3 |
 | 分页 KV（只覆盖全注意力层） | W4 |
 | packed prefill + block-table decode（注意力路径 v2） | W4.5 |
-| 混合架构（5 类算子） | W5–W6 |
+| 混合架构的 packed/varlen GDN 接线 | W7 |
 | **双状态管理**（KV 块 + 循环状态池） | W7 |
 | 跨代对照测量 | W7–W8 |
 
@@ -289,7 +290,7 @@
   - **W4 的 C1/C2 不变**（同 bs16、800 块、28 并发、0.55%）；**W4 的 E3 必跑**；W3 的 C1 降为**可选 E4b**（static vs continuous 的 Poisson 回归，只报不判）。
   - C3：golden 64/64 + paged vs seat 容差；C4：paged decode ≤ seat（目标 ≤1.0×，接受 <1.15×）；E3：≥ seat。
   - 生产路径不回退 gather；paged 只有 CUDA Triton 一条路径，CPU/MPS 上 `open_paged_pool`/`PagedKV` 直接报错（用 seat 臂），不再 silent gather。**serial prefill 控制臂已删除**（收口后 step 1）：生产 `Scheduler` 只有 packed group 一条路径，历史 serial 配置（`W45-0002/0003/0006`）不可运行但保留作历史；W3/W4 配置复跑会从 serial 默认变成 packed，不能与历史 run 直接配对。**gather decode 控制臂已删除**（收口后 step 2，见 v25）：`PagedPool.gather`、`lpad`、零块、mask-bias、`gather_*` 记账与 `decode="gather"` 生产分支全部移除，oracle 在 `tests/reference/paged.py`；历史 `W45-0003` 不可运行，写 `decode="triton"` 的配置仍作 legacy no-op 通过校验。
-- **不做**：chunked prefill、prefix cache、CUDA graph、抢占/swap、FA2 paged decode/bs256；hybrid GDN 的 packed prefill 留 W6（W4.5 只冻结接口）。
+- **不做**：chunked prefill、prefix cache、CUDA graph、抢占/swap、FA2 paged decode/bs256；hybrid GDN 的 packed prefill 留 W7（W4.5 只冻结接口；W6 只做单序列数值门）。
 - **正式结果（2026-11-06，clean tree）**：
   - E0 `W45-0001` golden **64/64**；E1 `W45-0002/0003` **9 vs 28 = 3.111×**，`kv_total 1601.97 ≤ 1640`；C2 frag **0.55%**。
   - E2 `W45-0005` pre-fix **1.203× fail** → `W45-0012` post-fix **1.040× pass（接受线）**，但仍高于 1.0 目标；E2 8/8 token 全等。
@@ -313,7 +314,7 @@
   = 1/16 是 2 的幂，SDPA 与 eager 的缩放顺序不引入舍入差）。因果性同形状替换 token 后
   `<t` 的输出 `torch.equal`；增量 decode（`KVcache`）与整段 prefill 一致（fp32 atol 1e-5）；
   快速门禁 **708 passed**；0.6B `test_align_qwen3` 64/64 不变。`[W5.layer]` 预注册值未改。
-  **未做**：packed prefill / `KvSlab` / `PagedKV` 接入（W6/W7）。
+  **未做**：packed prefill / `KvSlab` / `PagedKV` 接入（W7；W6 只做 GDN 数值门）。
 
 ### W6 · 混合层实现（二）：Gated DeltaNet
 
@@ -321,9 +322,22 @@
 - **验收**：分块 prefill 与逐步 decode **逐 token 一致**；全模型贪心 64 token 与 HF 对齐
 - **风险**：分块形式的 WY 表示是最难的一段。**止损**：若 W6 末只有 decode 形式可用，
   就接受"prefill 走逐步循环"的慢速实现（报告里注明性能代价），不硬啃
+- **实测（2026-11-14）**：`tests/golden/qwen35-0-8b/0002`（`spec=w6-gdn-v1`，7.16 MB）。
+  单层：L0/L2 × s01/m02 的 56 行 stage 表全过——`input_layernorm` / `in_proj_*` /
+  `conv_out` / `q_pre` / `k_pre` / `beta` / `g` 逐项 `max|Δ|=0`，`core_attn_out` /
+  `norm_out` ≤3.6e-7，`layer_out` ≤3.0e-7，`final_state` ≤6.0e-7，
+  `final_conv_state=0`；因果性 `torch.equal`。算子：0.8B 几何下 chunk vs HF chunk 的
+  输出与终态均 **0.0**（bit-identical），recurrent vs HF `1.5e-8`，fla naive `≈4.5e-8`，
+  chunk vs recurrent `2.6e-7`。全模型：24 层（18 GDN + 6 full）加载成功，逐层 hidden
+  最差 `2.861e-6`，末位 logits `1.061e-5` / `1.121e-5`，贪心 **64/64**（s01/m02），
+  prefill-vs-decode `3.040e-5`；每请求线性状态 19.27 MiB fp32、KV 24 KiB/token。
+  快速门禁 **874 passed**；W5 的 9 个 stage 仍全 0、0.6B 64/64 不变。`[W6.gdn]`
+  预注册值未改，`status=calibrated`。**未做**：packed/varlen GDN prefill、`StatePool`、
+  `KvSlab`/`PagedKV` 接线（W7）；**没有 `results/W6` run**。
 
 ### W7 · 双状态管理与跨代对照
 
+- **第一件事**：GDN 的 packed/varlen prefill 接线 + `StatePool`（W6 已冻结单序列状态接口；见 D8）
 - `StatePool`：线性层状态（每请求常数大小）与 KV 块（分页）统一句柄与生命周期（唯一先例见 §14）
 - 重跑 W3/W4 的机制，得到"混合架构下机制收益如何变化"
 - **验收**：
@@ -387,7 +401,7 @@
 
 ## 9. 简历映射（数字留空，实测后填）
 
-> **状态（2026-11-08）**：W0–W4.5 已完成；W5–W7 未开始。下面带 `<实测>` 的条目是简历模板，不是已完成事实；投递时只写 W0–W4.5 的数字，W5–W7 留在“计划/进行中”。
+> **状态（2026-11-14）**：W0–W6 已完成；W7–W8 未开始。下面带 `<实测>` 的条目是简历模板，不是已完成事实；投递时只写 W0–W6 的数字，W7–W8 留在“计划/进行中”。
 
 > **统一 serving 引擎：跨两代注意力架构的单卡推理实现** 2026.10 — 2027.01
 > - 基于手写 PyTorch 解码器实现单卡 serving：packed prefill + 连续批处理、分页 KV cache、双状态管理；
@@ -473,7 +487,7 @@ python scripts/exp_index.py --check
 | W4 | 分页 KV | ✅ | C1 **3.111×**、C2 0.55%、C3 全等；C4 **1.671×** 负结果（按预注册不报吞吐）；post-fix `0009` **1.074×** 为 record-only addendum；`W4-0001…0006/0008/0009`（0007 over-budget，0008 pre-fix/superseded） |
 | W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
 | W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
-| W6 | 混合层（二）：Gated DeltaNet | 🟡 | 进行中（2026-11-14 立项；证据待 `0002`） |
+| W6 | 混合层（二）：Gated DeltaNet | ✅ | `tests/golden/qwen35-0-8b/0002`；`test_qwen35_gdn*`、`test_qwen35_model`、`test_qwen35_loading`、`test_align_qwen35_gdn/model`；快速门禁 874 |
 | W7 | 双状态管理 + 跨代对照 | ⬜ | — |
 | W8 | 报告与判据矩阵 | ⬜ | — |
 | W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
@@ -514,7 +528,8 @@ python scripts/exp_index.py --check
 | 2026-11-08 | v26 | **投递打包**：README 改为「单卡 LLM Serving：机制收益边界实测」，加入架构图与 W3/W4/W4.5 结果图，W4 负结果折叠；§9 标注 W5–W7 未完成；删除 `archive/` 与 `docs/w4-plan.md`，`background.md` 移出版本控制；MIT LICENSE；GitHub 只读镜像 `RAIN-LOJK/llm-serving`（不推 legacy tag）。 |
 | 2026-11-09 | v27 | **W5 立项**：D2 → **accepted**（不接视觉/MTP，W5–W7 只测 text decoder；W9 需另立 ADR）。W5 执行计划写入 `docs/w5-plan.md`（临时文件，收口删除，生命周期见文件头）。范围锁定为「6 层全注意力 + partial/M-RoPE + 单层 HF 对拍」，证据与 W1 同型（golden + 集成测试，不新开 results run）；整模型加载与 GDN 留 W6，`StatePool` 留 W7。设计口径：新写 `model/qwen35.py` 不改 0.6B 路径；W5 只做单层加载；文本 M-RoPE 按 1D 64 维实现（本地实测与 HF 逐元素相等）。顺带记录两处参考文档偏差，Step 5 修：0.8B 是 4 个独立投影（非 Qwen3-Next 的 `qkvz/ba` 合并），5.20.2 的 rotary 不读 `mrope_interleaved`。 |
 | 2026-11-09 | v28 | **W5 完成**：`model/qwen35.py`（`(1+w)` 与 gated 两种 norm、输出门控、partial-RoPE 的 6 层全注意力 + block）、`load_layer_weights` 单层加载、golden `tests/golden/qwen35-0-8b/0001`。L3/L23 × s01/m01 的 9 个 stage 逐项 `max|Δ|=0`（CPU fp32；head_dim 256 的 scale=1/16 为 2 的幂，SDPA/eager 缩放顺序无舍入差）；因果性 `torch.equal`；decode==prefill atol 1e-5；快速门禁 708 passed；0.6B 64/64 不变。`[W5.layer]` 预注册值未改（全 0）。未做 packed/slab/paged（W6/W7）。plan 待提交后删除。 |
-| 2026-11-14 | v29 | **W6 立项**：`docs/w6-plan.md` 转 `active`；范围冻结为单序列数值门（packed/varlen GDN prefill 留 W7，一个 fixture `0002`，prompt `s01`+`m02`，8–10 天窗口 11-16→11-27）。D8 proposed（3 算子 + q/k l2norm 契约 + `Qwen35State` + W6/W7 边界）；`[W6.gdn]` 预注册阈值先 `target`。`tests/conftest.py` 补第 4 个 kernel pin（`torch_recurrent_gated_delta_rule`，P-48）；开工前快速门禁 712 passed、W5 HF 门禁 2 passed。不改写 v28 的 708（W5 收口记录，与 712 非同一时点）。 |
+| 2026-11-14 | v29 | **W6 立项**：W6 执行计划（临时文件，收口已删除）转 `active`；范围冻结为单序列数值门（packed/varlen GDN prefill 留 W7，一个 fixture `0002`，prompt `s01`+`m02`，8–10 天窗口 11-16→11-27）。D8 proposed（3 算子 + q/k l2norm 契约 + `Qwen35State` + W6/W7 边界）；`[W6.gdn]` 预注册阈值先 `target`。`tests/conftest.py` 补第 4 个 kernel pin（`torch_recurrent_gated_delta_rule`，P-48）；开工前快速门禁 712 passed、W5 HF 门禁 2 passed。不改写 v28 的 708（W5 收口记录，与 712 非同一时点）。 |
+| 2026-11-14 | v30 | **W6 完成**：`model/qwen35_gdn.py`（短卷积 + decode 循环 + chunked WY/UT + `Qwen35GDN`/`Qwen35GDNBlock`）、`model/qwen35_model.py`（`Qwen35State` + 24 层 `LLLF` 模型 + tied lm_head）、`load_qwen35_model`；golden `tests/golden/qwen35-0-8b/0002`（`w6-gdn-v1`，7.16 MB）。单层 56 行 stage 表：投影/卷积 0、GDN/norm ≤3.6e-7、final_state ≤6e-7、final_conv 0；全模型逐层 hidden 最差 2.861e-6、logits 1.061e-5/1.121e-5、贪心 **64/64**（s01/m02）、prefill-vs-decode 3.040e-5。D8 accepted；`[W6.gdn]` calibrated（数值未改）；P-48…P-59；快速门禁 874 passed；W5 9-stage 0、0.6B 64/64 不变。**未做** packed/varlen GDN、StatePool（W7）；无 `results/W6`。W6 临时计划已删除。 |
 
 ---
 
@@ -538,7 +553,7 @@ python scripts/exp_index.py --check
 | W4.5 | FA2 `flash_attn_varlen_func` | `github.com/Dao-AILab/flash-attention` | prefill 的 varlen 接口（无 `block_table` 时不受 256 约束）、GQA、`causal=True` | `flash_attn_with_kvcache(block_table=...)`（page_block_size 必须 256 的倍数，会废掉 W4 的 bs16 容量结论） |
 | W5 | `transformers/models/qwen3_next/modular_qwen3_next.py` | `site-packages/transformers/models/qwen3_next/` | 全注意力层装配、输出门控（`chunk(q_proj(x),2)` + `sigmoid(gate)`）、`Qwen3NextRMSNormGated`（norm before gate） | MoE / 多卡分支 |
 | W5 | `transformers/models/qwen3_5/modular_qwen3_5.py` | `site-packages/transformers/models/qwen3_5/` | 0.8B 的覆盖：`Qwen3_5GatedDeltaNet`、partial-RoPE（`dim=int(head_dim*partial_rotary_factor)` ⇒ inv_freq 只按 64 维算）、`rope_parameters` 读取、mrope_section | 视觉塔 |
-| W6 | `qwen3_5/modeling_qwen3_5.py`: `torch_chunk_gated_delta_rule`(L287) / `torch_recurrent_gated_delta_rule`(L424) | 同上 | **「分块 == 循环」两个端点的纯 torch 实现**；`chunk_size=64` 默认；`conv_state` 长度 = kernel−1 | 其 Triton/CUDA 分支 |
+| W6 | `qwen3_5/modeling_qwen3_5.py`: `torch_chunk_gated_delta_rule`(L287) / `torch_recurrent_gated_delta_rule`(L424) | 同上 | **「分块 == 循环」两个端点的纯 torch 实现**；`chunk_size=64` 默认；`conv_state` 长度 = kernel−1（HF 5.20.2 cache 实际存 kernel=4，W6 取最小充分 3，见 P-49） | 其 Triton/CUDA 分支 |
 | W6 | fla `fla/ops/gated_delta_rule/naive.py` | `site-packages/fla/`（0.5.2） | **第二套独立实现**，与上一行互拍；状态布局 `[K,V]`、g 在 log-space、beta 已 sigmoid | `chunk.py` / `fused_recurrent.py`（Triton kernel） |
 | W7 | LightLLM `common/state_cache_manager.py` + `qwen3next_mem_manager.py` | 同上 | 唯一把「KV 块池 + 线性常数状态池」放进同一 manager 的开源实现：常数状态池的句柄与生命周期 | 其调度器与 kernel |
 | W7 | vLLM V1 `v1/core/kv_cache_coordinator.py` | `github.com/vllm-project/vllm` | 多 cache type 的协调抽象（概念） | 整个 V1 引擎（分布式 / CUDA graph / 后端全家桶） |
