@@ -1,0 +1,5 @@
+run_id: W7-0014
+status: completed
+device_class: measure-cuda
+rows: 5130 (errors: 0)
+summary: results/W7/0014-e4a-hybrid-continuous/summary.json

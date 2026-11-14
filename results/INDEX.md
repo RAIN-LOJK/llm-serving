@@ -62,6 +62,7 @@
 | W7-0010 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 29.4 | unreviewed | completed | 2026-11-14 | 580276a |
 | W7-0011 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块 | Qwen/Qwen3-0.6B | paged | tok_s 42.9 | unreviewed | completed | 2026-11-14 | 1b2c4de |
 | W7-0013 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 112 | invalid | completed | 2026-11-14 | 9c05ecc |
+| W7-0014 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous | Qwen/Qwen3.5-0.8B | hybrid | tok_s 112 | unreviewed | completed | 2026-11-14 | db11f05 |
 | W7-0015 | W7 | scenario | E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / static | Qwen/Qwen3.5-0.8B | hybrid | tok_s 74.6 | unreviewed | completed | 2026-11-14 | 7037a3d |
 | W7-0018 | W7 | scenario | E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 166 | unreviewed | completed | 2026-11-14 | b48b811 |
 | W7-0019 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块 | Qwen/Qwen3-0.6B | paged | tok_s 224 | unreviewed | completed | 2026-11-14 | c363767 |
