@@ -1,0 +1,5 @@
+run_id: W7-0001
+status: completed
+device_class: measure-cuda
+rows: 5125 (errors: 0)
+summary: results/W7/0001-e0b-hybrid-b1-mixed/summary.json

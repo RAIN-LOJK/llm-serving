@@ -50,5 +50,6 @@
 | W45-0010 | W45 | scenario | E4b（可选）static / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 157 | pass | completed | 2026-11-06 | 0141fce |
 | W45-0011 | W45 | scenario | E4b（可选）continuous / B=8 / mixed / packed prefill | Qwen/Qwen3-0.6B | continuous | tok_s 293 | pass | completed | 2026-11-06 | b97c45d |
 | W45-0012 | W45 | scenario | E2 decode 内核（paged，C1 修复后）：Triton block-table / 8 条最长 / B=8 / 832 块 | Qwen/Qwen3-0.6B | paged | tok_s 329 | pass | completed | 2026-11-06 | f333483 |
+| W7-0001 | W7 | scenario | E0b 正确性（hybrid）：8 条 mixed prompts / B=1 / 128 new | Qwen/Qwen3.5-0.8B | hybrid | tok_s 31.9 | unreviewed | completed | 2026-11-14 | 1a3e902 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
