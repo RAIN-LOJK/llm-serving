@@ -72,5 +72,6 @@
 | W7-0021 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 58 | unreviewed | completed | 2026-11-14 | ae88d94 |
 | W7-0022 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 64 | unreviewed | completed | 2026-11-14 | ce27595 |
 | W7-0023 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 192 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 46 | unreviewed | completed | 2026-11-14 | 04f7c79 |
+| W7-0025 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 256 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 39 | unreviewed | completed | 2026-11-14 | 497807b |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
