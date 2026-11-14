@@ -1,0 +1,66 @@
+# W7-0018 · E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new
+# W7 口径见 docs/w7-plan.md §5.1 run 矩阵 / §5.4 fill 旋钮 / §5.5 E3 / §5.6 E4 / §6 协议。
+# 运行：python -m bench.run --config configs/experiments/W7/0018-e3-hybrid-b8-n24.toml
+#
+# 修正 W7-0012 未执行的口径：`requests = 8` 会被 3 个 context 分掉，实际峰值只有 ~3；
+# 本 run 用 N=24（每个 context 8 条），保证 B=8 至少有一次 8 行并发。8k+128 的预留是
+# ceil(8320/16)=520 块/请求；8×520=4160 块，故沿用 4200，避免准入节流污染 TPOT/P2/P3。
+# 这是延迟/机制探针，不是 1640 容量对。
+#
+# 自包含：revision 已 pin；本文件不引用其它配置。正式 run 必须在干净树执行。
+
+schema = 1
+
+[exp]
+id = "W7-0018"
+stage = "W7"
+type = "scenario"
+slug = "e3-hybrid-b8-n24"
+title = "E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new"
+hypothesis = ["hybrid_attention_changes_tpot_growth_and_the_512_latency_ratio"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512, 2048, 8192]
+max_new_tokens = 128
+arrival = "closed"
+requests = 24
+budgets = [128]
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 8
+pool = "paged"
+linear_slots = 8
+kv_blocks = 4200
+block_size = 16
+max_prefill_tokens = 8192
+
+[baseline]
+run_id = "W7-0019"
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+# record_only：W7 阈值判定在 Step 5 用本 run 的 summary 求值（bench/thresholds.py），
+# 不在正式 run 内自证；这样 Step 5 的口径/配对复核不会被 runner 抢先下结论。
+# E3 与下一号同 batch 纯臂配对；TPOT(8k)/TPOT(512) 与 512 的 TTFT/TPOT 比值在 Step 5 求值。
+mode = "record_only"
+criteria = []

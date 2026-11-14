@@ -1,0 +1,5 @@
+run_id: W7-0018
+status: completed
+device_class: measure-cuda
+rows: 2055 (errors: 0)
+summary: results/W7/0018-e3-hybrid-b8-n24/summary.json
