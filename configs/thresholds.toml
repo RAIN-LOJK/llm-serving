@@ -4,7 +4,7 @@
 # resolved values in its manifest/summary.
 
 schema = 1
-updated = "2026-11-09"
+updated = "2026-11-14"
 note = "Targets and failure lines from ROADMAP §6/§8. Calibrate once after W1 and record basis_run."
 
 [W1.align]
@@ -77,6 +77,35 @@ status = "calibrated"
 basis_run = "W4-0003"
 max_concurrency_speedup_min = 1.50
 fragmentation_max = 0.05
+
+[W6.gdn]
+# W6 (docs/w6-plan.md §6.3): Gated DeltaNet operators + layer + full model. Pre-registered
+# before the 0002 fixture existed (2026-11-14); status stays "target" until closeout.
+# The values are not fitted: the G0 dry run put chunk-vs-recurrent at ~1e-7, i.e. about
+# 100x headroom on outputs and 12x on the final state. Do not relax after measuring.
+status = "target"
+basis_golden = "tests/golden/qwen35-0-8b/0002"
+# recurrent/chunked vs both independent references (HF torch fallback + fla naive).
+operator_atol = 1e-5
+operator_rtol = 1e-5
+# final recurrent state [B, H, K, V].
+state_atol = 1e-5
+# short conv: prefill-vs-stepwise state and output equivalence.
+conv_atol = 1e-6
+# same-shape token replacement must leave positions < t bit-identical on CPU fp32.
+causal_atol = 0.0
+# single-layer stage table vs HF golden, relative to max|ref|.
+proj_rel_max = 1e-5
+conv_rel_max = 1e-5
+norm_rel_max = 1e-5
+gdn_out_rel_max = 1e-5
+layer_out_rel_max = 1e-4
+# full model: per-layer hidden, last-position logits, greedy ids.
+layer_hidden_max_abs = 1e-2
+full_logits_max_abs = 0.05
+greedy_tokens_exact = 64
+# full-model prefill vs token-by-token decode through Qwen35State.
+decode_prefill_atol = 1e-4
 
 [W7.state]
 status = "target"
