@@ -4,5 +4,5 @@
   "reviewer": "rainhome",
   "reviewed_at": "2026-11-14",
   "decision_id": "D9",
-  "notes": "W7 closeout: 修正 TPOT 后 E3 有效；P2 true，P3 不可归因。"
+  "notes": "decode TPOT 有效（B=8, N=24）；service TPOT 见 W7-0019。P2 decode true、service 口径依赖；P3 不可归因。"
 }

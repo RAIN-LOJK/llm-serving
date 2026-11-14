@@ -53,15 +53,15 @@ W7-0006,W7,fill,E1/E2 容量（hybrid fill）：synthetic 2k / B=64,Qwen/Qwen3.5
 W7-0007,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 2k / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 6,pass,completed,2026-11-14,4fdcca4,results/W7/0007-pure-fill-2k
 W7-0008,W7,fill,E1/E2 容量（hybrid fill）：synthetic 8k / B=64,Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 14,pass,completed,2026-11-14,1b2c4de,results/W7/0008-hybrid-fill-8k
 W7-0009,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 8k / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 1,pass,completed,2026-11-14,5a61a92,results/W7/0009-pure-fill-8k
-W7-0010,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 29.4,invalid,completed,2026-11-14,580276a,results/W7/0010-e3-hybrid-b1
-W7-0011,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块",Qwen/Qwen3-0.6B,paged,tok_s 42.9,invalid,completed,2026-11-14,1b2c4de,results/W7/0011-e3-pure-b1
+W7-0010,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / B=1 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 29.4,pass,completed,2026-11-14,580276a,results/W7/0010-e3-hybrid-b1
+W7-0011,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块",Qwen/Qwen3-0.6B,paged,tok_s 42.9,pass,completed,2026-11-14,1b2c4de,results/W7/0011-e3-pure-b1
 W7-0013,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 112,invalid,completed,2026-11-14,9c05ecc,results/W7/0013-e3-pure-b8
 W7-0014,W7,scenario,E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / continuous,Qwen/Qwen3.5-0.8B,hybrid,tok_s 112,pass,completed,2026-11-14,db11f05,results/W7/0014-e4a-hybrid-continuous
 W7-0015,W7,scenario,E4a 机制迁移（hybrid）：synthetic mixed Poisson / B=8 / static,Qwen/Qwen3.5-0.8B,hybrid,tok_s 74.6,pass,completed,2026-11-14,7037a3d,results/W7/0015-e4a-hybrid-static
 W7-0016,W7,fill,"E4b 容量（hybrid paged）：synthetic mixed [512,2k] / fill / 3970 块",Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 48,pass,completed,2026-11-14,8aea209,results/W7/0016-e4b-hybrid-paged
 W7-0017,W7,fill,"E4b 容量（hybrid seat baseline）：synthetic mixed [512,2k] / fill / 37 行",Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 37,pass,completed,2026-11-14,c7c59d2,results/W7/0017-e4b-hybrid-seat
-W7-0018,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 166,invalid,completed,2026-11-14,b48b811,results/W7/0018-e3-hybrid-b8-n24
-W7-0019,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 224,invalid,completed,2026-11-14,c363767,results/W7/0019-e3-pure-b8-n24
+W7-0018,W7,scenario,"E3 交叉点/P2/P3（hybrid）：synthetic [512,2k,8k] / N=24 / B=8 / 128 new",Qwen/Qwen3.5-0.8B,hybrid,tok_s 166,pass,completed,2026-11-14,b48b811,results/W7/0018-e3-hybrid-b8-n24
+W7-0019,W7,scenario,"E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / N=24 / B=8 / 4200 块",Qwen/Qwen3-0.6B,paged,tok_s 224,pass,completed,2026-11-14,c363767,results/W7/0019-e3-pure-b8-n24
 W7-0020,W7,fill,E1/E2 容量（hybrid fill）：synthetic 128 / B=64 / 64 槽,Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 64,pass,completed,2026-11-14,82823f3,results/W7/0020-hybrid-fill-128
 W7-0021,W7,fill,E1/E2 容量（pure 0.6B fill）：synthetic 128 / B=64 / 936 块,Qwen/Qwen3-0.6B,paged,peak_concurrency 58,pass,completed,2026-11-14,ae88d94,results/W7/0021-pure-fill-128
 W7-0022,W7,fill,E1/E2 容量（hybrid fill）：synthetic 192 / B=64 / 64 槽,Qwen/Qwen3.5-0.8B,hybrid,peak_concurrency 64,pass,completed,2026-11-14,ce27595,results/W7/0022-hybrid-fill-192

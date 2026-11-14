@@ -120,9 +120,9 @@ class Request:
     prefill_group: int | None = None
     #: Per-request decode accounting. ``decode_ms`` is the sum of the ``decode_event_ms``
     #: of every step this request was active in; ``decode_steps`` is the number of such
-    #: steps. TPOT must divide this sum, not ``t_finish - t_first``: continuous batching
-    #: can run another request's prefill between two decode steps of this one, and that
-    #: prefill time is not this request's decode cost.
+    #: steps. This feeds the *decode* TPOT. The *service* TPOT is still the wall gap
+    #: ``t_finish - t_first`` and deliberately includes other requests' prefill waits:
+    #: they are part of the latency a user observes. Both numbers are kept in the row.
     decode_ms: float = 0.0
     decode_steps: int = 0
 

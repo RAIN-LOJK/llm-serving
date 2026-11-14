@@ -1346,6 +1346,10 @@ def _summary(
     metric_names = (
         "ttft_ms",
         "tpot_ms",
+        # Two W7 TPOT views: service (wall, includes other-request prefill) and decode
+        # (per-request decode-event sum). Both are kept; neither replaces the other.
+        "tpot_service_ms",
+        "tpot_decode_ms",
         "prefill_ms",
         "decode_ms",
         "e2e_ms",

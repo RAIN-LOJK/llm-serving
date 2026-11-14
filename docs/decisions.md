@@ -203,7 +203,7 @@
   | **两臂共用代码** | 同一个 `Scheduler` 类、同一个 `decode_batch`；差异只有 `policy` 一个字段（构造上保证同 kernel 同数值路径，P-23） |
   | **吞吐（双口径，两个都报）** | ① `tok_s = Σ out_tokens / makespan`，`makespan = t_last_finish − t_first_arrival`（**含收尾 drain**）；② `tok_s_active = Σ out_tokens / (t_last_finish − t_first_token_global)`（**活跃窗口**，去掉首批 prefill 之前的空转）。**C1 判据用 ①**；② 只作口径说明，避免「drain 段怎么算」的争议。同时报 `req_s`、`offered_rate`、`achieved_rate`、`queue_depth_max`（已到达、仍在排队的最大数；未到达的不算，见 step row 的 `pending`）、`queue_depth_at_last_arrival` |
   | **TTFT 分解** | `t_admitted` = 准入决定（分到席位）；`t_prefill_start` = **该请求自己的** prefill 真正开始（打点即在此）；`prefill_ms = t_first_token − t_prefill_start`；`queue_ms = t_prefill_start − t_arrival`。**`ttft = queue_ms + prefill_ms` 按构造恒等**（C2 要的就是这个），另记 `admit_wait_ms = t_prefill_start − t_admitted` 作诊断，**不进分解**。串行 prefill 期间别的请求在队列里等的时间算**排队**——这正是连续批要压缩的尾部 |
-  | **TPOT** | 该请求**实际参与 decode 的 step** 的 `decode_event_ms` 之和 / decode step 数；不含自己的 prefill/排队，也不含**其他请求**的 prefill。旧式 `(t_finish − t_first_token)/(out_tokens − 1)` 在 mixed-context continuous 下会把别人的 8k prefill 算进来，已由 `P-60` 修正 |
+  | **TPOT** | 两个并列口径，不能混用：**service** `(t_finish − t_first_token)/(out_tokens − 1)`，包含其他请求的 prefill（用户实际 inter-token latency）；**decode** `Σ decode_event_ms/decode_steps`，只含该请求实际参与的 decode step（架构归因）。`tpot_ms` 是阈值别名：有累加器时 decode，否则历史 service/wall；行内同时保留 `tpot_service_ms`/`tpot_decode_ms`/`tpot_basis` |
   | **budgets** | 每条请求的生成上限（`≤ max_new_tokens`），由 trace 按 seed 抽样；`budgets=[128]` 即协议默认（与 W2 同口径）；**一个 run 内只用一种分布**，记录进 manifest。缺省或空列表在 `validate_config` 里**先归一化成 `[max_new_tokens]` 再校验非空** |
   | **计时** | 墙钟用 `perf_counter`（含排队，本来就是墙钟）；单步 GPU 时间用 `torch.cuda.Event`；step row = `active / queued / admitted / retired / step_ms / prefill_ms / decode_event_ms / host_gap_ms`（`host_gap_ms = step_ms − decode_event_ms − prefill_ms`，即 **decode event 窗口之外的 host 开销**，不是 `cat`。CUDA event 覆盖整个 decode 时间线，host 饥饿造成的 GPU 空转落在 `decode_event_ms` **里面**，所以它**不是**「slab 读写之外的 host 开销」） |
   | **饱和判据（每臂各自判，不用共享常量）** | `queue_depth_at_last_arrival` = 最后一条请求到达时刻仍在排队（已到达、未开始 prefill）的请求数（即 `max(0, backlog − in_flight)`，再扣掉当时仍空着的席位；见 `bench/engines/continuous.py`）；`saturated ⇔ queue_depth_at_last_arrival > 0`：trace 已经发完、仍有请求在等容量 = 过载。**不能取 run 结束时最后一条 step row 的 `queued`**——run 结束必然排空，那样 `saturated` 按构造恒为 False，C1 每对都 `invalid`。**不看** `capacity_estimate_req_s` 是否达标——两臂 capacity 本来就不同，用同一个 capacity 会把弱臂按构造判成 `not_saturated`，C1 直接变 `invalid`。`capacity_estimate_req_s` 只在冒烟里量一次、只用于挑 λ 的初值，**不进判据**；若连续臂在 2× 估计值下队列仍会排空 → 该对记 `not_saturated`，λ 加倍**新开 run**（不挑点） |
@@ -551,11 +551,12 @@
   `[W7.state]`/`[W7.hybrid]` 已 calibrated（basis `W7-0008` / `W7-0028`）。关键证据（详见 `docs/hybrid_attention.md` §4 与 `results/W7/`）：
   G0 bf16 64/64；E0b 8/8 token hash 全等（`W7-0001/0002`）；E1 三点状态误差
   0.83%/0.48%/0.18%；容量 2.70×/6.17×/14.0×（`W7-0004…0009`）；P1 7.816×；
-  P2-memory 512 混合小 2.27×；P2-latency B=1/B=8 均材料差（TTFT 3.89×/8.78×，
-  TPOT 1.285×/1.283×）；P3 混合平坦但纯臂只有 +10.0%/+4.3%，判“不可归因”；
+  P2-memory 512 混合小 2.27×。P2-latency 分两口径：service B1 4.14×/1.39×、
+  B8 8.82×/0.49× → **口径依赖**；decode B1 1.285×、B8 1.283× → **true**。
+  P3 两口径都不可归因（decode 纯臂只有 +10.0%/+4.3%，service B8 的 0.29 是调度交互）。
   E4a 1.498×、E4b 48/37=1.297×（record-only）。
-  `W7-0013` 的 B=8 只到 4 行、`W7-0010/0011/0018/0019` 的 TPOT 归因错误（P-60），
-  均为 invalid；正式 E3 证据是 `W7-0026…0029`。
+  `W7-0013` 的 B=8 只到 4 行，invalid；`W7-0010/0011/0018/0019` 是 service TPOT
+  有效证据，`W7-0026…0029` 是 decode TPOT 有效证据。
   内存交叉点由 128/192/256/512 扫描 bracket 到 [128,192]，线性插值 190.8（`W7-0020…0025`）。
   W6 的 fp32 golden `0002` 只作 bf16 差异诊断；W4 C1 的 1640 MiB / 3.111× 是纯臂
   同口径的历史参照。

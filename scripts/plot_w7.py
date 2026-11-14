@@ -417,12 +417,12 @@ def _crossover_figure(
     right.set_ylabel("TPOT (ms/token, median)", fontsize=9.2, color=INK_2)
     right.set_ylim(0, max(tpot[key][ctx] for key in tpot for ctx in CONTEXTS) * 1.38)
     right.legend(frameon=False, fontsize=8.4, loc="upper left")
-    right.set_title("TPOT vs context (E3 scenario, budgets=[128])", fontsize=10.0, color=INK, loc="left")
+    right.set_title("decode TPOT vs context (E3, budgets=[128])", fontsize=10.0, color=INK, loc="left")
 
     _header(
         fig,
         "W7 crossover: per-sequence state and TPOT vs context",
-        "left: fill probes W7-0004…0009 + scan W7-0020…0025; right: E3 W7-0026/0027 + W7-0028/0029; ratios are pure / hybrid",
+        "left: fill probes W7-0004…0009 + scan W7-0020…0025; right: E3 decode TPOT W7-0026/0027 + W7-0028/0029; ratios are pure / hybrid",
         "source: results/W7/*/summary.json · capacity.state_used_mb|state_total_mb and groups[].tpot_ms · no value is hardcoded",
     )
     return fig

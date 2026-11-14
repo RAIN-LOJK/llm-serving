@@ -343,12 +343,12 @@
 - **验收**：
   - [x] 同一调度器下两种模型都能跑，输出正确：0.8B B=1/B=8 **8/8 token hash 全等**；G0 bf16 与 HF **64/64**
   - [x] 每序列状态占用与解析式误差 **0.83% / 0.48% / 0.18%**（512/2k/8k），<20%
-  - [x] P1–P3 有服务化复核：P1 **true**（7.816×）；P2-memory **false**（512 混合小 2.27×）；P2-latency **true**（B=1/B=8 TTFT 3.89×/8.78×，TPOT 1.285×/1.283×）；P3 **不可归因**（混合平坦，但纯臂只有 +10.0%/+4.3%，未达 1.15）
+  - [x] P1–P3 有服务化复核：P1 **true**（7.816×）；P2-memory **false**（512 混合小 2.27×）；P2-latency **service 口径依赖 / decode true**（service B1 4.14×/1.39×、B8 8.82×/0.49×；decode B1 1.285×、B8 1.283×）；P3 **两口径均不可归因**（混合平坦，但纯臂只有 +10.0%/+4.3%，未达 1.15）
   - [x] 交叉点：prefill **190.8 prompt token**（实测区间 [128,192]；预留口径 62.8）；容量比 **2.70/6.17/14.0×**（512/2k/8k，同 1640 MiB）
 - **实现**：`serve/state_pool.py`、`serve/hybrid_engine.py`、`bench/engines/hybrid.py`、packed GDN prefill、paged/seat 双池；同一 `Scheduler`，`MiniLLMEngine` 行为冻结。D9 已 accepted；`[W7.state]/[W7.hybrid]` 已 calibrated。
 - **E4（record-only）**：continuous/static **1.498×**（纯历史 1.863×）；paged/seat 容量 **48/37=1.297×**（纯历史 3.111×）。seat 仅 baseline，生产仍 paged。
-- **证据**：23 有效 run；E1/E2 `W7-0004…0009`；E3 TPOT 修正版 `W7-0026…0029`；E4a `W7-0014/0015`；E4b `W7-0016/0017`；交叉点 `W7-0020…0025`。旧 `W7-0010/0011/0018/0019`（wall TPOT）与 `W7-0013`（只到 4 行）为 invalid。
-- **测量修正**：请求级 TPOT 改为每请求 `decode_event_ms` 累加（P-60）；此前 wall-clock 会把其他请求的 8k prefill 算进短请求，产生 91 ms/512 token 的伪影。
+- **证据**：27 有效 run；E1/E2 `W7-0004…0009`；E3 service TPOT `W7-0010/0011/0018/0019`，decode TPOT `W7-0026…0029`；E4a `W7-0014/0015`；E4b `W7-0016/0017`；交叉点 `W7-0020…0025`。`W7-0013` 因只到 4 行 invalid；`W7-0012` 未运行。
+- **测量口径**：请求级 TPOT 同时保留 **service**（wall，含其他请求 prefill）与 **decode**（每请求 `decode_event_ms` 累加）；前者回答用户体验，后者回答架构成本，不能互相替代（P-60）。
 
 ### W8 · 报告与判据矩阵
 
@@ -493,7 +493,7 @@ python scripts/exp_index.py --check
 | W4.5 | 注意力路径 v2：packed prefill + block-table decode | ✅ | E0 **64/64**；E1 **3.111×**（9/28）；E2 pre-fix **1.203× fail** → post-fix **1.040× pass**（接受线；1.0 目标未达）；E3 p99 **3.760×**/p50 0.512×；E4 **2.053×**（330.53→678.59 tok/s，both saturated）；E4b **1.863×**（record-only）；D7 accepted；`W45-0001…0012` |
 | W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
 | W6 | 混合层（二）：Gated DeltaNet | ✅ | `tests/golden/qwen35-0-8b/0002`；`test_qwen35_gdn*`、`test_qwen35_model`、`test_qwen35_loading`、`test_align_qwen35_gdn/model`；快速门禁 874 |
-| W7 | 双状态管理 + 跨代对照 | ✅ | A1 8/8 token hash、G0 64/64；E1 误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×、P2-latency true、P3 不可归因；交叉点 190.8；E4a 1.498×、E4b 48/37=1.297×；`W7-0001…0029`（5 invalid） |
+| W7 | 双状态管理 + 跨代对照 | ✅ | A1 8/8 token hash、G0 64/64；E1 误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×、P2 service 口径依赖/decode true、P3 两口径不可归因；交叉点 190.8；E4a 1.498×、E4b 48/37=1.297×；`W7-0001…0029`（1 invalid；service/decode 双 TPOT） |
 | W8 | 报告与判据矩阵 | ⬜ | — |
 | W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
 
@@ -570,3 +570,4 @@ python scripts/exp_index.py --check
 - `olmo_hybrid/modeling_olmo_hybrid.py` 里的同名 `torch_*_gated_delta_rule` 与 `qwen3_5` 版**逐行相同**，不能当第三个独立对拍端点。
 - 0.8B 的 `config.json` 里**没有** `use_qk_l2norm_in_kernel`（走 `Qwen3NextGatedDeltaNet` 的类默认），`partial_rotary_factor` / `mrope_section` 也**不在顶层**（在 `rope_parameters` 内）——与 P-17 同类坑。
 | 2026-11-14 | v31 | **W7 完成**：双状态池 + 同一 Scheduler 的 0.8B hybrid 服务化；A1–A6 完成。E1 状态误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×；P2-memory false、P2-latency true；P3 不可归因（纯臂 +10.0%/+4.3%）；内存交叉点 190.8（[128,192]）；E4a 1.498×、E4b 48/37=1.297×。请求级 TPOT 修正为每请求 decode step 累加（P-60），旧 E3 四条与 0013 invalid；正式 E3 证据 `W7-0026…0029`。D9 accepted；`[W7.state]/[W7.hybrid]` calibrated；临时 plan 删除。 |
+| 2026-11-14 | v32 | **TPOT 双口径修正**：service TPOT（wall，含其他请求 prefill）与 decode TPOT（每请求 decode step 累加）并列保留；旧 `W7-0010/0011/0018/0019` 恢复为 service 证据，`W7-0026…0029` 为 decode 证据；`W7-0013` 仍 invalid。P2-latency 记为 service 口径依赖/decode true，P3 两口径均不可归因。W7 只比较状态/容量/延迟/机制，不评价模型质量。累计 27 有效 + 1 invalid。 |

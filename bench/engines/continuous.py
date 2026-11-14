@@ -404,19 +404,31 @@ def _request_row(
         else 0.0
     )
     out_tokens = len(request.out)
-    # TPOT is the request's own decode cost, not the wall-clock gap between its first
-    # and last token. Continuous batching can insert another request's prefill between
-    # two decode steps; that gap must not be charged to this request. The scheduler
-    # accumulates each active row's ``decode_event_ms``, so divide that sum by the
-    # number of decode steps. Historical rows (no accumulator) keep the old wall-clock
-    # fallback and are marked ``wall``.
+    # Two legitimate TPOTs, kept side by side:
+    #   service = (t_finish - t_first) / (out_tokens - 1)
+    #             includes other requests' prefill waits; this is the inter-token
+    #             latency the caller actually observes under continuous batching.
+    #   decode  = Σ(active decode_event_ms) / decode_steps
+    #             isolates this request's decode cost; excludes all prefill steps.
+    # ``tpot_ms`` stays the threshold/backward-compatible alias: decode when the
+    # scheduler accumulated it, otherwise the historical wall/service value.
     decode_ms_total = float(getattr(request, "decode_ms", 0.0) or 0.0)
     decode_steps = int(getattr(request, "decode_steps", 0) or 0)
-    if out_tokens > 1 and decode_steps > 0:
-        tpot_ms = decode_ms_total / decode_steps
+    service_ms = (
+        max(0.0, finish - first) * 1000.0 / (out_tokens - 1)
+        if out_tokens > 1
+        else None
+    )
+    decode_ms = (
+        decode_ms_total / decode_steps
+        if out_tokens > 1 and decode_steps > 0
+        else None
+    )
+    if decode_ms is not None:
+        tpot_ms = decode_ms
         tpot_basis = "decode_steps"
-    elif out_tokens > 1:
-        tpot_ms = max(0.0, finish - first) * 1000.0 / (out_tokens - 1)
+    elif service_ms is not None:
+        tpot_ms = service_ms
         tpot_basis = "wall"
     else:
         tpot_ms = None
@@ -443,6 +455,8 @@ def _request_row(
         "ttft_ms": (first - arrival) * 1000.0,
         "tpot_ms": tpot_ms,
         "tpot_basis": tpot_basis,
+        "tpot_service_ms": service_ms,
+        "tpot_decode_ms": decode_ms,
         "decode_ms_total": decode_ms_total,
         "decode_steps": decode_steps,
         "e2e_ms": (finish - arrival) * 1000.0,

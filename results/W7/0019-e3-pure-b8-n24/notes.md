@@ -11,8 +11,7 @@
 
 ## 观察
 
-- **invalid（P-60）**：旧 TPOT 用 `finish-first`，把其他请求的 prefill 算进本请求；仅保留为旧归因证据。
-- 由 `W7-0029` 替代；旧 summary 的 TPOT 不作判据。
+- **service TPOT 有效证据**：`tpot_ms` 是 wall inter-token latency，包含其他请求 prefill；不用于 decode 成本归因。
 - 关键数字（引用 summary.json）：
 - 与预测的偏差：
 

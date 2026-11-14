@@ -132,7 +132,9 @@ capacity_speedup_2k_min = 4.0
 capacity_speedup_8k_min = 6.0
 
 # P3 endpoints are 512 -> 8k (32k is recorded but not judged); the memory crossover is
-# in prompt tokens, and P2-latency is the hybrid/pure ratio at 512.
+# in prompt tokens, and P2-latency is the hybrid/pure ratio at 512. W7 reports both TPOT
+# views; this numeric line is applied to the decode TPOT (basis W7-0028). Service TPOT
+# is reported separately and is batch-dependent (B1 material, B8 inverted by prefill).
 memory_crossover_ctx_max = 256
 p2_latency_material_ratio = 1.10
 hybrid_tpot_growth_max = 1.10
