@@ -1,7 +1,7 @@
 # W7 计划 · 双状态管理与跨代对照
 
-> **状态**：**active**（2026-11-14 用户批准；**Step 0–3 已完成**，17 条正式配置已准备；
-> **用户已于 2026-11-14 明确指令开始正式实验，Step 4 执行中**）。
+> **状态**：**active**（2026-11-14 用户批准；**Step 0–3 已完成**；**Step 4 正式 run 已完成**，
+> 23 条有效 + 1 条 invalid 修正；Step 5 判定表已填草稿，**等待用户复核**）。
 > **权威**：阶段目标与判据以 [ROADMAP.md](../ROADMAP.md) §5 W7、§6 测量协议、§8 失败与裁剪为准；
 > 本文件只展开步骤、门禁、证据与生命周期。若本文件与 ROADMAP 冲突，以 ROADMAP 为准，
 > 并在 §12 记录修订。
@@ -583,18 +583,29 @@ close_pool() -> None
 | `W7-0015` | E4a | hybrid | scenario | 同上，static | 机制迁移 |
 | `W7-0016` | E4b | hybrid | fill | synthetic mixed，paged | 容量 |
 | `W7-0017` | E4b | hybrid | fill | 同上，seat | 容量（baseline） |
+| `W7-0018` | E3 修正 | hybrid | scenario | synthetic [512,2k,8k]，N=24，B=8 | B=8 实际并发 8；替代未跑的 0012 |
+| `W7-0019` | E3 修正 | pure 0.6B | scenario | 同上 | B=8 分母；`supersedes=W7-0013` |
+| `W7-0020/0022/0024` | 交叉点扫描 | hybrid | fill | synthetic 128/192/256 | 内存交叉点实测；64 槽 + 2048 块 |
+| `W7-0021/0023/0025` | 交叉点扫描 | pure 0.6B | fill | 同上 | 纯臂 936 块；与相邻 hybrid 同 trace |
 
-> 共 **17 个正式 run**：hybrid 11、pure 6。G0 是测试门禁，不占 run。
-> 0.6B 纯臂只保留 **6 个同工况对照**：E0c 1 个（同文本 prompt）、E1/E2 3 个 fill、E3 2 个 scenario；
-> E4a/E4b 的纯臂继续引用同机历史，不重跑。
+> 共 **23 个有效正式 run**：hybrid 14、pure 9。G0 是测试门禁，不占 run。
+>
+> **执行修正（2026-11-14）**：`W7-0012` 未运行；`W7-0013` 的 `requests=8` 被 3 个
+> context 分掉，实测 `peak_concurrency=4`，已标 `invalid`；B=8 改用 `W7-0018/0019`
+> （`requests=24`，每 context 8 条，`W7-0018/0019` 的 B=8 峰值均为 8）。因此
+> 另加 128/192/256 的交叉点扫描 `W7-0020…0025`（hybrid/pure 各 3 条）。
+> `results/W7/` 实际有 **24 个 run 目录**（23 有效 + 1 invalid），E3 的 B=8 证据引用
+> `W7-0018/0019`，不引用 `W7-0013`。
+> 0.6B 纯臂共 **9 个同工况对照**：E0c 1 个（同文本 prompt）、E1/E2 3 个 fill、E3 2 个 scenario、
+> 交叉点扫描 3 个；E4a/E4b 的纯臂继续引用同机历史，不重跑。
 > 配对规则：同一实验的实跑纯/混合臂必须同 workload、同 seed、同 `max_new_tokens`、
 > 同 `trace_sha256`；引用的历史纯臂标注 trace 差异，不按 `invalid` 处理。运行顺序不共享进程状态。
 > `W7-0004…0009` 的 `linear_slots/kv_blocks/max_batch/requests` 按 §5.4 预注册表；
 > 不在 run 之间改预算。
 >
-> **为什么保留 6 个 0.6B 纯臂**：它们不是重复 W3/W4，而是同 trace 的分母——
+> **为什么保留 9 个 0.6B 纯臂**：它们不是重复 W3/W4，而是同 trace 的分母——
 > E0c 1 个证明调度器协议没破坏纯路径；E1/E2 的 3 个 fill 提供 `capacity_hybrid/capacity_pure`
-> 与 P1 的每序列比；E3 的 2 个 scenario 提供 P2/P3 和吞吐交叉点的同调度器、同 bf16 对照。
+> 与 P1 的每序列比；E3 的 2 个 scenario 提供 P2/P3；3 个 128/192/256 扫描用于内存交叉点。
 > E4a/E4b 的纯臂已引用同机历史，不再重跑。
 
 ### 5.2 E0 · 正确性
@@ -650,6 +661,8 @@ uniform 2k/8k 下会被 `max_prefill_tokens`（默认 8192）卡成 3/1，测不
 
 > 例：512 混合 = 62×18.633 + 2480×0.1875 ≈ 1620 MiB；8k 纯 = 936×1.75 ≈ 1638 MiB。
 > 实测 `peak_concurrency` 与预测差 >1 时先查记账（W4 D6 的 ±1 口径），不调预算重跑同一 run。
+> 交叉点扫描 `W7-0020…0025` 的旋钮：hybrid `linear_slots=64, kv_blocks=2048`（1576.5 MiB），
+> pure `kv_blocks=936`（1638 MiB）；`requests=max_batch=64`，1/3、closed。
 > **不要沿用 W4 的 800 块**：800 块下 512 的纯/混合都只能到 20，比值 1.0×，那是配置卡住而不是机制。
 
 ### 5.5 E3 · 交叉点 / P2 / P3
@@ -969,3 +982,5 @@ tests、`results/W7/`、figures、`scripts/plot_w7.py`。
 | 2026-11-14 | v10 | **Step 2/3 实现完成**：packed group prefill（varlen 全注意力 + GDN segment）与 hybrid fill 跨步驻留接通；`bench/engines/hybrid.py` 可用，fill 读真实池账；17 条 `W7-0001…0017` 正式配置已准备并 dry-run 通过（**未跑正式 run，未创建 `results/W7`**）；`bench/thresholds.py` 增加 W7 evaluator（`p1_state_ratio_8k_min`、`capacity_speedup_512/2k/8k_min`、`hybrid_tpot_growth_max`、`pure_tpot_growth_min`、`p2_latency_material_ratio`、`memory_crossover_ctx_max`）与 `tests/unit/test_thresholds_w7_eval.py`；`scripts/plot_w7.py` 就绪。E3/E4a 的 B=8 臂取 `kv_blocks=4200`（8k 预留 520 块/请求，8×520=4160）避免准入节流污染 TPOT/P2/P3；E3 纯臂因此不按 1640 容量口径判，配置头已注明；E4b 改为同 1640 预算的 record-only 配对（0016 paged 48 slots/3970 blocks ≈1638.8 MiB；0017 seat 37 行 ≈1578.3 MiB），不再用会反转方向的 800 块/64 行。`_build_trace` 的 synthetic id 上限改为 `min(vocab_size, 151936)`，使 0.6B/0.8B 同 workload 的 `trace_sha256` 一致（prompt 路径不变；新增 `tests/unit/test_w7_synthetic_trace.py`）。状态保持 **active**。 |
 | 2026-11-14 | v11 | **可开跑前复核**：17 条正式配置的 `[measure]` 对齐 §6.1（scenario warmup=3/repeats=5；fill 1/3）；E4b 改为同 1640 MiB 预算的 record-only 配对（paged 48 slots/3970 blocks ≈1638.8 MiB；seat 37 行 ≈1578.3 MiB），E3 纯臂 4200 blocks 明确为延迟探针、不参与容量判据；§10.2 启动检查全部勾选。全量快速门禁 **1008 passed**；G0 bf16/CUDA 仍 **64/64**；0.8B packed fill 实测 512/2k/8k = 62/37/14，pure = 23/6/1，配对 `trace_sha256` 一致、`state_total ≤1640`。仍未启动正式 run。 |
 | 2026-11-14 | v12 | **Step 4 启动**：用户明确指令开始 W7 正式实验；提交 Step 0–3 实现与 17 条配置，在干净树上按 §5.1 顺序执行 `W7-0001…0017`。正式 run 结果、配对复核与 verdict 回填见后续修订。 |
+| 2026-11-14 | v13 | **Step 4 完成 / Step 5 草稿**：17 条有效 run + `W7-0013` invalid；E3 B=8 的 `requests=8` 口径错误经用户确认，`W7-0018/0019`（N=24）重跑并 `supersedes`；`[W7.hybrid]` 数值未改。实测：E0b 8/8 token hash 全等；E1 误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×；P2-memory 512 混合小 2.27×；P2-latency B=1 材料差、B=8 口径依赖；P3 纯臂 +9.8% → 不可归因；E4a 1.498×、E4b 48/37=1.297×。内存交叉点 190.8 为解析值（无 128/192/256 扫描）。D9 仍 proposed，待用户复核后收口。 |
+| 2026-11-14 | v14 | **交叉点实测补齐**：按 §5.5/§6.5 增跑 128/192/256（`W7-0020…0025`，hybrid/pure 各 3 条，同 trace、1/3、64 请求）。128 混合 20.13 > 纯 14.0；192 混合 20.88 < 纯 21.0；256 混合 21.63 < 纯 28.0；512 混合 24.63 < 纯 56.0 → 交叉区间 **[128,192]**，线性插值 **190.8** prompt token（预留口径 62.8），≤256。累计 23 有效 + 1 invalid；D9 仍 proposed。 |

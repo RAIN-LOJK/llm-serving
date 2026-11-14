@@ -404,7 +404,23 @@ def _request_row(
         else 0.0
     )
     out_tokens = len(request.out)
-    decode_s = max(0.0, finish - first)
+    # TPOT is the request's own decode cost, not the wall-clock gap between its first
+    # and last token. Continuous batching can insert another request's prefill between
+    # two decode steps; that gap must not be charged to this request. The scheduler
+    # accumulates each active row's ``decode_event_ms``, so divide that sum by the
+    # number of decode steps. Historical rows (no accumulator) keep the old wall-clock
+    # fallback and are marked ``wall``.
+    decode_ms_total = float(getattr(request, "decode_ms", 0.0) or 0.0)
+    decode_steps = int(getattr(request, "decode_steps", 0) or 0)
+    if out_tokens > 1 and decode_steps > 0:
+        tpot_ms = decode_ms_total / decode_steps
+        tpot_basis = "decode_steps"
+    elif out_tokens > 1:
+        tpot_ms = max(0.0, finish - first) * 1000.0 / (out_tokens - 1)
+        tpot_basis = "wall"
+    else:
+        tpot_ms = None
+        tpot_basis = "none"
     return {
         "row_kind": "request",
         "repeat": repeat,
@@ -425,7 +441,10 @@ def _request_row(
         "prefill_shared_ms": (first - prefill_start) * 1000.0,
         "prefill_group": getattr(request, "prefill_group", None),
         "ttft_ms": (first - arrival) * 1000.0,
-        "tpot_ms": (decode_s * 1000.0 / (out_tokens - 1)) if out_tokens > 1 else None,
+        "tpot_ms": tpot_ms,
+        "tpot_basis": tpot_basis,
+        "decode_ms_total": decode_ms_total,
+        "decode_steps": decode_steps,
         "e2e_ms": (finish - arrival) * 1000.0,
         # The pool's whole reservation, not this request's share: that is what
         # `memory_match_ratio` divides by (D5 / P-30). The share is `kv_own_mb`.

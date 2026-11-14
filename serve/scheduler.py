@@ -41,7 +41,9 @@ Timing
 ``t_first - t_prefill_start``: a shared forward is counted once, not once per
 request (an aborted group contributes the time it actually spent).
 ``decode_event_ms`` is ``engine.last_decode_event_ms`` when the engine provides a
-float, otherwise the decode wall clock. ``step_ms`` is measured from the last
+float, otherwise the decode wall clock. Every active request accumulates exactly that
+step's decode time, so its TPOT excludes *other* requests' prefill steps; ``finish -
+first`` would otherwise silently include them. ``step_ms`` is measured from the last
 wake-up, so time spent sleeping for a future arrival is not counted as compute.
 ``host_gap_ms = step_ms - decode_event_ms - prefill_ms`` is recorded as-is,
 including when it is negative.
@@ -116,6 +118,13 @@ class Request:
     #: group shares ``t_prefill_start`` and ``t_first``, which is what makes
     #: ``ttft == queue + pack_wait + prefill_shared`` an identity.
     prefill_group: int | None = None
+    #: Per-request decode accounting. ``decode_ms`` is the sum of the ``decode_event_ms``
+    #: of every step this request was active in; ``decode_steps`` is the number of such
+    #: steps. TPOT must divide this sum, not ``t_finish - t_first``: continuous batching
+    #: can run another request's prefill between two decode steps of this one, and that
+    #: prefill time is not this request's decode cost.
+    decode_ms: float = 0.0
+    decode_steps: int = 0
 
 
 def _row_argmax(logits: Any) -> list[int]:
@@ -664,9 +673,11 @@ class Scheduler:
             req.out.append(ids[req.seat])
 
         event_ms = getattr(self.engine, "last_decode_event_ms", None)
-        if isinstance(event_ms, (int, float)):
-            return float(event_ms)
-        return (t1 - t0) * 1000.0
+        step_ms = float(event_ms) if isinstance(event_ms, (int, float)) else (t1 - t0) * 1000.0
+        for req in self._active:
+            req.decode_ms += step_ms
+            req.decode_steps += 1
+        return step_ms
 
     # ------------------------------------------------------------ retirement
     def _terminate(self) -> None:

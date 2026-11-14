@@ -543,6 +543,29 @@ def test_policy_is_validated():
         Scheduler(engine, max_batch=0)
 
 
+def test_request_tpot_excludes_other_requests_prefill_steps():
+    """A prefill inserted between two decodes must not inflate the first request's TPOT.
+
+    Regression for the mixed-context E3 runs: the old request row used
+    ``t_finish - t_first`` and charged a 10 ms prefill of the second request to the
+    first request's decode time. The scheduler now accumulates only its own decode
+    steps.
+    """
+    clock = FakeClock()
+    engine = FakeEngine(clock, max_batch=2, prefill_s=0.010, decode_s=0.002)
+    sched = _scheduler(engine, max_batch=2)
+    sched.submit(_request(0, budget=5, arrival=0.0))
+    sched.submit(_request(1, budget=2, arrival=0.001))
+    sched.close()
+
+    result = _by_id(sched.run())
+    first = result[0]
+    assert first.decode_steps == 4
+    assert first.decode_ms == pytest.approx(8.0, abs=1e-9)
+    # The wall gap contains the second request's 10 ms prefill; the accumulator does not.
+    assert (first.t_finish - first.t_first) * 1000.0 > first.decode_ms + 5.0
+
+
 def test_decode_event_ms_prefers_engine_event():
     clock = FakeClock()
     engine = FakeEngine(clock, max_batch=2)

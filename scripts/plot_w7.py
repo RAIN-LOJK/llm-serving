@@ -7,7 +7,8 @@ Inputs (read-only; every plotted number comes from these files):
 * ``results/W7/0006-hybrid-fill-2k``  + ``0007-pure-fill-2k``
 * ``results/W7/0008-hybrid-fill-8k``  + ``0009-pure-fill-8k``
 * ``results/W7/0010-e3-hybrid-b1`` / ``0011-e3-pure-b1``
-* ``results/W7/0012-e3-hybrid-b8`` / ``0013-e3-pure-b8``
+* ``results/W7/0018-e3-hybrid-b8-n24`` / ``0019-e3-pure-b8-n24``
+* ``results/W7/0020…0025`` -- 128/192/256 crossover scan (hybrid/pure pairs)
 
 Outputs (``figures/`` by default):
 
@@ -70,8 +71,13 @@ CAPACITY_RUNS = {
 E3_RUNS = {
     (1, "hybrid"): "W7-0010",
     (1, "pure"): "W7-0011",
-    (8, "hybrid"): "W7-0012",
-    (8, "pure"): "W7-0013",
+    (8, "hybrid"): "W7-0018",
+    (8, "pure"): "W7-0019",
+}
+SCAN_RUNS = {
+    128: ("W7-0020", "W7-0021"),
+    192: ("W7-0022", "W7-0023"),
+    256: ("W7-0024", "W7-0025"),
 }
 
 
@@ -290,6 +296,7 @@ def _capacity_figure(capacity: dict[int, dict[str, dict[str, float]]]):
 
 def _crossover_figure(
     capacity: dict[int, dict[str, dict[str, float]]],
+    scan: dict[int, dict[str, dict[str, float]]],
     tpot: dict[tuple[int, str], dict[int, float]],
 ):
     fig, (left, right) = plt.subplots(1, 2, figsize=(13.2, 5.9), dpi=150)
@@ -298,12 +305,15 @@ def _crossover_figure(
         _style_axis(ax)
 
     # -- left: per-sequence state (used when the arm recorded it, else reserved) ----
+    state = dict(capacity)
+    state.update(scan)
+    state_contexts = sorted(state)
     for arm, color, marker, label in (
         ("hybrid", BLUE, "o", "hybrid 0.8B"),
         ("pure", ORANGE, "s", "pure 0.6B"),
     ):
-        xs = list(CONTEXTS)
-        per_seq = [capacity[ctx][arm]["state"] / capacity[ctx][arm]["peak"] for ctx in CONTEXTS]
+        xs = list(state_contexts)
+        per_seq = [state[ctx][arm]["state"] / state[ctx][arm]["peak"] for ctx in state_contexts]
         left.plot(
             xs,
             per_seq,
@@ -324,9 +334,9 @@ def _crossover_figure(
                 fontsize=8.2,
                 color=color,
             )
-    for ctx in CONTEXTS:
-        hybrid = capacity[ctx]["hybrid"]["state"] / capacity[ctx]["hybrid"]["peak"]
-        pure = capacity[ctx]["pure"]["state"] / capacity[ctx]["pure"]["peak"]
+    for ctx in (512, 2048, 8192):
+        hybrid = state[ctx]["hybrid"]["state"] / state[ctx]["hybrid"]["peak"]
+        pure = state[ctx]["pure"]["state"] / state[ctx]["pure"]["peak"]
         left.annotate(
             f"{pure / hybrid:.2f}×",
             (ctx, max(hybrid, pure)),
@@ -336,16 +346,42 @@ def _crossover_figure(
             fontsize=8.0,
             color=INK_2,
         )
+    # Crossover is read off the plotted points, never hardcoded: find the adjacent
+    # scan contexts where pure/hybrid flips sign and linearly interpolate.
+    crossover = None
+    for left_ctx, right_ctx in zip(state_contexts, state_contexts[1:]):
+        diff_left = (
+            state[left_ctx]["pure"]["state"] / state[left_ctx]["pure"]["peak"]
+            - state[left_ctx]["hybrid"]["state"] / state[left_ctx]["hybrid"]["peak"]
+        )
+        diff_right = (
+            state[right_ctx]["pure"]["state"] / state[right_ctx]["pure"]["peak"]
+            - state[right_ctx]["hybrid"]["state"] / state[right_ctx]["hybrid"]["peak"]
+        )
+        if diff_left * diff_right < 0:
+            crossover = left_ctx + (right_ctx - left_ctx) * diff_left / (diff_left - diff_right)
+            break
+    if crossover is not None:
+        left.axvline(crossover, color=GREEN, linewidth=1.1, linestyle=":", zorder=1)
+        left.annotate(
+            f"crossover ≈ {crossover:.0f}",
+            (crossover, left.get_ylim()[1] * 0.60),
+            textcoords="offset points",
+            xytext=(5, 0),
+            ha="left",
+            fontsize=8.0,
+            color=GREEN,
+        )
     left.set_xscale("log", base=2)
     left.set_yscale("log")
-    left.set_xticks(list(CONTEXTS), [str(ctx) for ctx in CONTEXTS])
+    left.set_xticks(list(state_contexts), [str(ctx) for ctx in state_contexts])
     left.minorticks_off()
     left.set_xlabel("prompt context (tokens)", fontsize=9.2, color=INK_2)
     left.set_ylabel("state per active sequence (MiB)", fontsize=9.2, color=INK_2)
     left.set_ylim(
         top=max(
-            capacity[ctx][arm]["state"] / capacity[ctx][arm]["peak"]
-            for ctx in CONTEXTS
+            state[ctx][arm]["state"] / state[ctx][arm]["peak"]
+            for ctx in state_contexts
             for arm in ("hybrid", "pure")
         )
         * 2.4
@@ -386,7 +422,7 @@ def _crossover_figure(
     _header(
         fig,
         "W7 crossover: per-sequence state and TPOT vs context",
-        "left: fill probes W7-0004…0009; right: E3 W7-0010…0013; ratios on the left are pure / hybrid",
+        "left: fill probes W7-0004…0009 + scan W7-0020…0025; right: E3 W7-0010/0011 + W7-0018/0019; ratios are pure / hybrid",
         "source: results/W7/*/summary.json · capacity.state_used_mb|state_total_mb and groups[].tpot_ms · no value is hardcoded",
     )
     return fig
@@ -463,6 +499,15 @@ def main(argv: list[str] | None = None) -> int:
             "pure": _capacity(pure_summary, pure_id),
         }
 
+    scan: dict[int, dict[str, dict[str, float]]] = {}
+    for context, (hybrid_id, pure_id) in SCAN_RUNS.items():
+        for arm, run_id in (("hybrid", hybrid_id), ("pure", pure_id)):
+            path, summary = _require(index, run_id, results)
+            recorded = _single_context(summary, run_id)
+            if recorded != context:
+                fail(f"{run_id} ({path}): context is {recorded}, expected {context}")
+            scan.setdefault(context, {})[arm] = _capacity(summary, run_id)
+
     tpot: dict[tuple[int, str], dict[int, float]] = {}
     for key, run_id in E3_RUNS.items():
         path, summary = _require(index, run_id, results)
@@ -482,6 +527,7 @@ def main(argv: list[str] | None = None) -> int:
         print(
             f"check ok: capacity {len(CAPACITY_RUNS) * 2} fill summaries at "
             f"{', '.join(str(ctx) for ctx in CONTEXTS)}; "
+            f"scan {len(SCAN_RUNS) * 2} summaries at 128/192/256; "
             f"E3 {len(E3_RUNS)} summaries at B=1/B=8"
         )
         for context in CONTEXTS:
@@ -494,6 +540,13 @@ def main(argv: list[str] | None = None) -> int:
                 f"({pure['basis']} state {pure['state'] / pure['peak']:.1f} MiB/seq), "
                 f"capacity ratio {hybrid['peak'] / pure['peak']:.2f}x"
             )
+        for context in sorted(scan):
+            hybrid = scan[context]["hybrid"]
+            pure = scan[context]["pure"]
+            print(
+                f"  {context:>5}: hybrid {hybrid['state'] / hybrid['peak']:.2f} MiB/seq, "
+                f"pure {pure['state'] / pure['peak']:.2f} MiB/seq"
+            )
         for key in ((1, "hybrid"), (1, "pure"), (8, "hybrid"), (8, "pure")):
             print(
                 f"  TPOT {key[1]:<6} B={key[0]}: "
@@ -502,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     capacity_png = _render(_capacity_figure(capacity), "minillm/scripts/plot_w7.py")
-    crossover_png = _render(_crossover_figure(capacity, tpot), "minillm/scripts/plot_w7.py")
+    crossover_png = _render(_crossover_figure(capacity, scan, tpot), "minillm/scripts/plot_w7.py")
     written = _write_all(
         out_dir,
         [(CAPACITY_NAME, capacity_png), (CROSSOVER_NAME, crossover_png)],
