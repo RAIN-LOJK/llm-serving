@@ -1,0 +1,5 @@
+run_id: W7-0009
+status: completed
+device_class: measure-cuda
+rows: 201 (errors: 0)
+summary: results/W7/0009-pure-fill-8k/summary.json
