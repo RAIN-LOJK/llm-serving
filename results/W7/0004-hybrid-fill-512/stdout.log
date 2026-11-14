@@ -1,0 +1,5 @@
+run_id: W7-0004
+status: completed
+device_class: measure-cuda
+rows: 210 (errors: 0)
+summary: results/W7/0004-hybrid-fill-512/summary.json
