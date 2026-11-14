@@ -57,6 +57,8 @@
 | W7-0005 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 512 / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 23 | unreviewed | completed | 2026-11-14 | 43eb9e7 |
 | W7-0006 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 2k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 37 | unreviewed | completed | 2026-11-14 | 90f379d |
 | W7-0007 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 2k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 6 | unreviewed | completed | 2026-11-14 | 4fdcca4 |
+| W7-0008 | W7 | fill | E1/E2 容量（hybrid fill）：synthetic 8k / B=64 | Qwen/Qwen3.5-0.8B | hybrid | peak_concurrency 14 | unreviewed | completed | 2026-11-14 | 1b2c4de |
 | W7-0009 | W7 | fill | E1/E2 容量（pure 0.6B fill）：synthetic 8k / B=64 / 936 块 | Qwen/Qwen3-0.6B | paged | peak_concurrency 1 | unreviewed | completed | 2026-11-14 | 5a61a92 |
+| W7-0011 | W7 | scenario | E3 交叉点/P2/P3（pure 0.6B）：synthetic [512,2k,8k] / B=1 / 936 块 | Qwen/Qwen3-0.6B | paged | tok_s 42.9 | unreviewed | completed | 2026-11-14 | 1b2c4de |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_
