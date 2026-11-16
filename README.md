@@ -1,6 +1,6 @@
 # 单卡 LLM Serving：机制收益边界实测
 
-在单张 RTX 4090 上实现一个可运行的 serving 引擎，用同一套调度器测连续批处理、分页 KV、packed prefill 与 block-table decode 的收益边界。载体是 `Qwen/Qwen3-0.6B`；每个数字都来自 `results/` 里一次干净树上的 run，绑定 run id、设备与判据。
+在单张 RTX 4090 上实现一个可运行的 serving 引擎，用同一套调度器测连续批处理、分页 KV、packed prefill、block-table decode 与混合注意力双状态管理的收益边界。载体是 `Qwen/Qwen3-0.6B`（全注意力骨架）与 `Qwen/Qwen3.5-0.8B`（3:1 混合）；每个数字都来自 `results/` 里一次干净树上的 run，或 `tests/golden/` 下经评审的数值夹具，绑定 run id / fixture、设备与判据。
 
 > **什么规模、什么上下文下，连续批处理 / 分页 KV / 混合注意力状态管理才回本？**
 
@@ -13,15 +13,16 @@
 - 环境与设备口径：[docs/environments.md](docs/environments.md)
 - 全部 run：[results/INDEX.md](results/INDEX.md)
 
-## 实测结果（RTX 4090 · Qwen3-0.6B · bf16）
+## 实测结果（RTX 4090 · Qwen3-0.6B / Qwen3.5-0.8B · bf16）
 
 | 机制 | 对照 | 结果 | 判据 |
 |---|---|---|---|
 | W3 连续批 | static vs continuous，B=8 mixed | 154.94 → 311.43 tok/s（**2.01×**） | pass |
 | W4 分页 KV | seat vs paged，同 1640 MiB | 9 → 28 并发（**3.111×**），internal frag 0.55% | C1–C3 pass；C4 **1.671×** 负结果，按预注册不报吞吐 |
 | W4.5 路径 v2 | serial vs packed / seat vs paged | TTFT p99 **3.760×**；decode **1.040×**（接受线 <1.15，1.0 目标未达）；E4 **2.053×**（both saturated，record-only） | D7 accepted |
+| W7 双状态管理 | 混合 0.8B vs 纯 0.6B，同一 `Scheduler` | 每序列状态误差 0.83/0.48/0.18%（512/2k/8k）；同 1640 MiB 容量比 **2.70/6.17/14.0×**；P1 **7.816×**，交叉点 190.8 prompt token | A1 8/8 token hash、G0 64/64；P2/P3 见下 |
 
-正确性门禁：W1 贪心 64/64（logits `max|Δ|` 2.0e-5）；W4 paged/seat 40/40 token 全等；W4.5 E0 64/64、E2 8/8 token hash 全等。
+正确性门禁：W1 贪心 64/64（logits `max|Δ|` 2.0e-5）；W4 paged/seat 40/40 token 全等；W4.5 E0 64/64、E2 8/8 token hash 全等；W5 单层 9 个 stage `max|Δ|=0`；W6 分块 prefill 与逐步 decode 自洽（`3.040e-5`）、贪心 64/64；W7 0.8B B=1/B=8 **8/8** token hash、G0 bf16 与 HF **64/64**。
 
 ### 为什么批处理有效
 
@@ -41,11 +42,22 @@
 ![W4.5 prefill](figures/fig_w4_5_prefill.png)
 <sub>W4.5 E3 · TTFT p99 207.4 → 55.1 ms（3.760×），p50 105.1 → 53.9 ms（0.512×）；static B=8 mixed。`W45-0006/0007`。</sub>
 
+### 混合注意力：KV 只剩 1/4 的层
+
+![W7 容量](figures/fig_w7_capacity.png)
+<sub>W7 · 同 1640 MiB 总预算：混合 0.8B / 纯 0.6B 的容量比 **2.70/6.17/14.0×**（ctx 512/2k/8k）；混合内部 paged/seat 为 48/37 = **1.297×**（纯注意力的历史值是 3.111×）——分页只能捞 6/24 层的 KV。`W7-0016/0017`。</sub>
+
+![W7 交叉点](figures/fig_w7_crossover.png)
+<sub>W7 · 每序列状态随上下文：prefill 口径交叉点 **190.8 prompt token**（实测区间 [128,192]），8k 处每序列显存 **7.816×**（P1）。`W7-0020…0025`。</sub>
+
+负结果：E4a 连续批收益从纯注意力的 1.863× 降到 **1.498×**；P2-memory **不成立**（512 下混合已更省，2.27×）；P2-latency 依赖口径（service 与 decode 两臂方向不一致）；P3 两口径均**不可归因**。
+
 ## 范围与边界
 
-当前版本覆盖 W0–W6：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode；
-Qwen3.5 的全注意力层、短卷积 + Gated DeltaNet（分块 prefill / 逐步 decode）与 24 层混合模型
-均已对齐 HF。W7 的双状态管理尚未实现；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
+当前版本覆盖 W0–W7：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode；
+Qwen3.5 的全注意力层、短卷积 + Gated DeltaNet（分块 prefill / 逐步 decode）与 24 层混合模型均已对齐 HF。
+W7 把两代架构放进了同一个 `Scheduler`：分页 KV 覆盖 6/24 全注意力层，常数大小的 `StatePool` 覆盖 18 层线性状态。
+W8（报告与判据矩阵）未开始；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
 
 W4.5 收口后，生产调度器只有 packed group，paged decode 只有 CUDA Triton block-table kernel；
 CPU/MPS 上 paged 直接报错，seat 才是 CPU/MPS 路径。
@@ -89,12 +101,14 @@ W4 的容量结论（3.111×）成立，但 decode 代价超过预注册的 1.5�
 ## 目录
 
 ```text
-model/         手写算子：RoPE / GQA / KVcache / SwiGLU / RMSNorm / TransformerBlock
+model/         手写算子：RoPE / GQA / KVcache / SwiGLU / RMSNorm / TransformerBlock；
+               以及 Qwen3.5 混合层（全注意力 / GDN / 短卷积 / partial-M-RoPE）
 llm_utils/     过渡层：sampling + 批量 generate（S2 后由 serve/engine.py 接管）
-serve/         engine / scheduler / block_manager；state_pool(W7) 待实现
-bench/         run / metrics / loadgen（含 poisson_trace）/ prompts.json
+serve/         engine / scheduler / block_manager / state_pool（+ hybrid_engine）
+bench/         run / metrics / loadgen（含 poisson_trace）/ prompts.json；
+               engines/：dummy·hf·minillm·continuous·fill·paged·hybrid
 configs/       实验配置（experiments/）与集中阈值（thresholds.toml）
-scripts/       env_snapshot / exp_index / probe_* / make_golden / align_hf / plot_*
+scripts/       env_snapshot / exp_index / probe_* / make_golden / align_* / plot_* / sim_paged_capacity
 tests/         pytest：unit + integration + golden
 results/       run 目录（W*/NNNN-slug/）+ 自动生成的 INDEX.md
 figures/       报告图与架构示意图
@@ -104,4 +118,4 @@ reports/       最终报告与判据矩阵
 
 ## License
 
-MIT，见 [LICENSE](LICENSE)。仓库不包含模型权重；Qwen3-0.6B 的使用遵循上游许可证。
+MIT，见 [LICENSE](LICENSE)。仓库不包含模型权重；Qwen3-0.6B 与 Qwen3.5-0.8B 的使用遵循各自上游许可证。
