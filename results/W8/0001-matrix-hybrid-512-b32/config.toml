@@ -1,0 +1,53 @@
+# W8-0001 · 判据矩阵（hybrid 0.8B）：ctx 512 / B=32
+# 口径见 docs/decisions.md D10 与 docs/w8-plan.md；正式 run 必须在干净树执行。
+# 32 条请求 = 32 个席位，128 new tokens；块数 = 32 × ceil((512+128)/16) = 1280，留 1400。
+# B=32 行用满池，不按 1640 MiB 判（summary 的 over_budget 只记录）。
+
+schema = 1
+
+[exp]
+id = "W8-0001"
+stage = "W8"
+type = "scenario"
+slug = "matrix-hybrid-512-b32"
+title = "判据矩阵（hybrid 0.8B）：ctx 512 / B=32"
+hypothesis = ["hybrid_state_capacity_makes_b32_feasible_at_512"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [512]
+max_new_tokens = 128
+arrival = "closed"
+requests = 32
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 32
+pool = "paged"
+linear_slots = 32
+kv_blocks = 1400
+block_size = 16
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []
