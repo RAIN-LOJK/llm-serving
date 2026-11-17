@@ -654,15 +654,17 @@
      `decode TPOT` p50（每请求 `decode_event` 累加，P-60）、`TTFT` p50 + `queue_share`、
      每序列状态 MiB、同预算容量；**判据列只在有对照臂时给**，否则标 `record-only`。
   3. **N/A 规则**：结构性不可行必须给解析式或实测上界，禁止留空。
-     pure 8k×32 = N/A，上界 **B=20**（`W8-0006`）；pure 8k 的 decode 列 = N/A
+     pure 8k×32 = N/A，上界 **B=20**（`W8-0008`）；pure 8k 的 decode 列 = N/A
      （EOS 早退，`out_tokens=2`），只报 prefill 与状态。
+     **short 行**：pure 用 **ctx=511**（P-31；512 第 3 个 token 即 EOS），hybrid 保持 512，
+     1 token 差异在报告注里标。
   4. **B=32 行不按 1640 MiB 判**：这些是延迟/吞吐探针，用满池（1400/4400/16700/10500），
      summary 的 `over_budget`/`over_by_mb` 必须与池大小一起报；容量结论仍来自 W7 的
      fill run（1640 MiB 口径），两者不混。
   5. **统计口径**：5 次重复取中位数+p95；**不报 p99**（n 不够）。“目标值 / 实测值”
      分列；service TPOT 与 decode TPOT 并列保留、互不替代；不跨设备 / dtype / 引擎
      regime 配对。
-  6. **canonical 清单**：矩阵只用 `W7-0026…0029` + `W8-0001…0006`；W3/W4/W45 的旧路径
+  6. **canonical 清单**：矩阵只用 `W7-0026…0029` + `W8-0001…0008`；W3/W4/W45 的旧路径
      数字只作历史或标 `Regime A`，不与现路径配对（`W8-0004` supersedes `W3-0019`）。
   7. **out of scope**：量化（int8/int4）、goodput/SLO 曲线、CUDA graph、按需分配、
      chunked prefill、prefix cache、4B、`x*` 求解（W10）。
@@ -673,6 +675,11 @@
   3. 矩阵表由 `scripts/w8_matrix.py` 生成并断言 `device_class` / 协议键 / `verdict != invalid`；
      手写数字不入表。
   4. W9a 后 decode 数字降级为 Regime A；W10 以附录重锚，不改 W8 正文。
+  5. **池重开**：`open_paged_pool` 每次 `run_trace` 都重开池；旧实现先建新池再替换，
+     峰值是两个池，池 >11 GiB 时第二个 pass 必 OOM（W8 的 pure 8k 就是这么失败的，
+     不是容量）。已改为先 `close_pool()` 再建（`serve/engine.py`），并加 CUDA 回归
+     测试 `tests/integration/test_paged_reopen.py`（峰值断言，红→绿）。历史 paged run
+     的 `peak_mem` 含这次双池瞬时，只作上限。
 - **复盘点**：N/A 是否有解析式或实测依据；B=32 是否同时报池大小与 `over_budget`；
   是否出现跨 regime/设备配对；8k pure 的 EOS 是否被写成模型结论（不是）。
 
