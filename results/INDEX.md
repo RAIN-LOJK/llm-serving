@@ -80,5 +80,6 @@
 | W7-0029 | W7 | scenario | E3 P2/P3 修正（pure）：B=8，N=24，每请求 decode 归因 | Qwen/Qwen3-0.6B | paged | tok_s 226 | pass | completed | 2026-11-14 | f975590 |
 | W8-0001 | W8 | scenario | 判据矩阵（hybrid 0.8B）：ctx 512 / B=32 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 620 | unreviewed | completed | 2026-11-17 | 39b67d5 |
 | W8-0002 | W8 | scenario | 判据矩阵（hybrid 0.8B）：ctx 2048 / B=32 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 385 | unreviewed | completed | 2026-11-17 | 442acbf |
+| W8-0003 | W8 | scenario | 判据矩阵（hybrid 0.8B）：ctx 8192 / B=32 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 172 | unreviewed | completed | 2026-11-17 | 54c1e88 |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

@@ -1,0 +1,53 @@
+# W8-0003 · 判据矩阵（hybrid 0.8B）：ctx 8192 / B=32
+# 口径见 docs/decisions.md D10 与 docs/w8-plan.md；正式 run 必须在干净树执行。
+# 块数 = 32 × ceil((8192+128)/16) = 16640，留 16700（KV 池 ≈6.1 GiB）。
+# 预检（/tmp，W8-9004）：同几何 64 new 达 peak_concurrency=32、step 54.8 ms、峰值 6.4 GiB。
+
+schema = 1
+
+[exp]
+id = "W8-0003"
+stage = "W8"
+type = "scenario"
+slug = "matrix-hybrid-8k-b32"
+title = "判据矩阵（hybrid 0.8B）：ctx 8192 / B=32"
+hypothesis = ["hybrid_8k_b32_is_memory_feasible_while_pure_is_not"]
+seed = 0
+
+[[models]]
+name = "Qwen/Qwen3.5-0.8B"
+revision = "2fc06364715b967f1860aea9cf38778875588b17"
+dtype = "bfloat16"
+trust_remote_code = false
+
+[workload]
+kind = "synthetic"
+context_lengths = [8192]
+max_new_tokens = 128
+arrival = "closed"
+requests = 32
+batch_sizes = [1]
+shuffle = false
+
+[scheduler]
+policy = "continuous"
+
+[engine]
+impl = "hybrid"
+device = "cuda"
+max_batch = 32
+pool = "paged"
+linear_slots = 32
+kv_blocks = 16700
+block_size = 16
+max_prefill_tokens = 8192
+
+[measure]
+warmup = 3
+repeats = 5
+timer = "auto"
+memory = ["torch_peak", "driver"]
+
+[accept]
+mode = "record_only"
+criteria = []

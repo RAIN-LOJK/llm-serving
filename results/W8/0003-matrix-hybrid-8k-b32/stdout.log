@@ -1,0 +1,5 @@
+run_id: W8-0003
+status: completed
+device_class: measure-cuda
+rows: 955 (errors: 0)
+summary: results/W8/0003-matrix-hybrid-8k-b32/summary.json
