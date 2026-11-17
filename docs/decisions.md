@@ -633,6 +633,51 @@
 
 ---
 
+## D10 · W8 报告口径：18 格矩阵、N/A 规则与统计
+
+- **日期**：2026-11-17（预检）；**状态**：proposed（W8 收口转 accepted）
+- **背景**：W8 没有新机制，唯一要冻的是「报告怎么读数」——矩阵的轴、缺格怎么记、
+  哪些数字能配对。不冻就会在写报告时按好看的格子挑口径。本决策先于正式 run 提交，
+  作为预注册；预检在 `/tmp`（不进索引，不作证据）。
+- **证据（预检 W8-9001…9004，仅用于定 run 表）**：
+  - hybrid 8k×32、64 new：`peak_concurrency=32`、`step_ms 54.8`、pass 20.8 s，
+    峰值 6.26 GiB alloc / 6.38 reserved（driver 6.85）；
+  - pure 8k B=16 / B=20：峰值 15.5 / 19.1 GiB（driver 16.1 / 19.8），B=20 余 ~4.3 GiB；
+  - pure 8k B=32：KV 池 32×897.75 MiB = **28.1 GiB > 24.5 GiB**，结构性不可行；
+  - pure 8k 随机 prompt 第 2 个 token 即 EOS（`out_tokens=2`，与 P-31 同类），
+    hybrid 8k 无此问题（64/64）。
+- **决定**：
+  1. **矩阵定义**：2 臂（pure 0.6B / hybrid 0.8B）× 3 ctx（512/2k/8k）× 3 B（1/8/32）
+     = 18 格；模型档只有 0.6B/0.8B（4B 从未加载权重，out of scope）；batch =
+     `[engine].max_batch`；每格只报实测。
+  2. **每格列**：`tok_s`（5 次中位数+p95）、`prefill_shared_ms` p50/p95（去排队）、
+     `decode TPOT` p50（每请求 `decode_event` 累加，P-60）、`TTFT` p50 + `queue_share`、
+     每序列状态 MiB、同预算容量；**判据列只在有对照臂时给**，否则标 `record-only`。
+  3. **N/A 规则**：结构性不可行必须给解析式或实测上界，禁止留空。
+     pure 8k×32 = N/A，上界 **B=20**（`W8-0006`）；pure 8k 的 decode 列 = N/A
+     （EOS 早退，`out_tokens=2`），只报 prefill 与状态。
+  4. **B=32 行不按 1640 MiB 判**：这些是延迟/吞吐探针，用满池（1400/4400/16700/10500），
+     summary 的 `over_budget`/`over_by_mb` 必须与池大小一起报；容量结论仍来自 W7 的
+     fill run（1640 MiB 口径），两者不混。
+  5. **统计口径**：5 次重复取中位数+p95；**不报 p99**（n 不够）。“目标值 / 实测值”
+     分列；service TPOT 与 decode TPOT 并列保留、互不替代；不跨设备 / dtype / 引擎
+     regime 配对。
+  6. **canonical 清单**：矩阵只用 `W7-0026…0029` + `W8-0001…0006`；W3/W4/W45 的旧路径
+     数字只作历史或标 `Regime A`，不与现路径配对（`W8-0004` supersedes `W3-0019`）。
+  7. **out of scope**：量化（int8/int4）、goodput/SLO 曲线、CUDA graph、按需分配、
+     chunked prefill、prefix cache、4B、`x*` 求解（W10）。
+- **后果**：
+  1. 报告 §1 复述本口径；§3/§5 引用矩阵；§4 负结果引用既有 run，不新造数字。
+  2. 18 格中 3 格带 N/A（pure 8k 的 B=1/B=8 decode、pure 8k×32），报告不得留空或
+     用别的 ctx 的格子顶替。
+  3. 矩阵表由 `scripts/w8_matrix.py` 生成并断言 `device_class` / 协议键 / `verdict != invalid`；
+     手写数字不入表。
+  4. W9a 后 decode 数字降级为 Regime A；W10 以附录重锚，不改 W8 正文。
+- **复盘点**：N/A 是否有解析式或实测依据；B=32 是否同时报池大小与 `over_budget`；
+  是否出现跨 regime/设备配对；8k pure 的 EOS 是否被写成模型结论（不是）。
+
+---
+
 ## 模板
 
 ```markdown
