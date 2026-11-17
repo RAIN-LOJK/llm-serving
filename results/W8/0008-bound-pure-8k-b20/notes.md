@@ -1,6 +1,6 @@
 # W8-0008 · 边界探针（pure 0.6B）：ctx 8192 / B=20（8k×B=32 不可行）
 
-- 状态：`unreviewed`（agent 起草；`reviewer` 留空，等用户确认）
+- 状态：`pass`（reviewer: rainhome，2026-11-17；D10）
 - 证据：`summary.json` / `metrics.jsonl`；口径：`docs/decisions.md` D10、`docs/w8-plan.md`
 - 配置：`config.toml`；类型：`scenario`；base commit：`9fcd669`
 

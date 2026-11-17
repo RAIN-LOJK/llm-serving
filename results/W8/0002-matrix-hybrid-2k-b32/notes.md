@@ -1,6 +1,6 @@
 # W8-0002 · 判据矩阵（hybrid 0.8B）：ctx 2048 / B=32
 
-- 状态：`unreviewed`（agent 起草；`reviewer` 留空，等用户确认）
+- 状态：`pass`（reviewer: rainhome，2026-11-17；D10）
 - 证据：`summary.json` / `metrics.jsonl`；口径：`docs/decisions.md` D10、`docs/w8-plan.md`
 - 配置：`config.toml`；类型：`scenario`；base commit：`442acbf`
 
