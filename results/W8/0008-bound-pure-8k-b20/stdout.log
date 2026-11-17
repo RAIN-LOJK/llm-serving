@@ -1,0 +1,5 @@
+run_id: W8-0008
+status: completed
+device_class: measure-cuda
+rows: 205 (errors: 0)
+summary: results/W8/0008-bound-pure-8k-b20/summary.json
