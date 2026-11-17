@@ -16,11 +16,14 @@
 - 负结果与正结果同等篇幅；“什么时候不划算”必须写。
 - 图表从 `summary.json` 生成，不手工改数；图源脚本放 `reports/` 或 `bench/`。
 
-文件（待 W8 创建）：
+文件：
 
 ```text
 reports/
-├── final.md
-├── figures/
-└── reproduce.md
+├── final.md       # 六节正文（W8）
+├── reproduce.md   # 一条命令一档
+└── matrix.md      # 18 格矩阵（scripts/w8_matrix.py 生成，勿手改）
 ```
+
+图在仓库根的 `figures/`（与其他阶段一致）：`fig_w8_matrix.png` 由
+`python scripts/w8_matrix.py` 从已提交的 `summary.json` 重新生成。

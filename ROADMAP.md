@@ -350,11 +350,20 @@
 - **证据**：27 有效 run；E1/E2 `W7-0004…0009`；E3 service TPOT `W7-0010/0011/0018/0019`，decode TPOT `W7-0026…0029`；E4a `W7-0014/0015`；E4b `W7-0016/0017`；交叉点 `W7-0020…0025`。`W7-0013` 因只到 4 行 invalid；`W7-0012` 未运行。
 - **测量口径**：请求级 TPOT 同时保留 **service**（wall，含其他请求 prefill）与 **decode**（每请求 `decode_event_ms` 累加）；前者回答用户体验，后者回答架构成本，不能互相替代（P-60）。
 
-### W8 · 报告与判据矩阵
+### W8 · 报告与判据矩阵（✅ 2026-11-17）
 
 - 矩阵：架构（纯注意力 / 混合）× 模型档 × 上下文（512/2k/8k）× batch（1/8/32）
 - 报告六节：口径 → 数值对拍 → 各机制收益边界 → **负结果专章** → 跨代对照 → 复现
-- **可选（仅余力）**：权重量化（int8/int4），指标同 v1 计划
+- **可选（仅余力）**：权重量化（int8/int4），指标同 v1 计划 → **本轮不做**，记入 D10 out of scope
+- **实测**：18 格由 `scripts/w8_matrix.py` 生成（`reports/matrix.md` + `figures/fig_w8_matrix.png`），
+  证据 `W8-0001…0008`。hybrid B=32 三格全部达到 `peak_concurrency=32`：512 / 2k / 8k 为
+  **620.3 / 384.6 / 172.1 tok/s**，TPOT 33.50 / 37.25 / 38.33 ms；pure 短行改 **511**（512 EOS，P-31），
+  B=32 为 511→1222.2、2k→977.7 tok/s，TPOT 24.28 / 24.85 ms。pure 8k×B=32 **结构性 N/A**
+  （KV 池 28.1 GiB > 24.5 GiB），实测上界 **B=20**（19.25 GiB，`W8-0008`）；pure 8k 的 decode
+  因 EOS 早退记 N/A。顺带修掉 `open_paged_pool` 重开时「旧池未释放、峰值翻倍」的缺陷
+  （`serve/engine.py`，回归 `tests/integration/test_paged_reopen.py`）。
+- **产出**：`reports/final.md`（六节）、`reports/reproduce.md`、`reports/matrix.md`、
+  `figures/fig_w8_matrix.png`、D10（proposed，待用户确认）。
 
 ---
 
@@ -494,7 +503,7 @@ python scripts/exp_index.py --check
 | W5 | 混合层（一）：全注意力层改造 | ✅ | `tests/golden/qwen35-0-8b/0001`；`test_qwen35_*`、`test_align_qwen35_layer` |
 | W6 | 混合层（二）：Gated DeltaNet | ✅ | `tests/golden/qwen35-0-8b/0002`；`test_qwen35_gdn*`、`test_qwen35_model`、`test_qwen35_loading`、`test_align_qwen35_gdn/model`；快速门禁 874 |
 | W7 | 双状态管理 + 跨代对照 | ✅ | A1 8/8 token hash、G0 64/64；E1 误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×、P2 service 口径依赖/decode true、P3 两口径不可归因；交叉点 190.8；E4a 1.498×、E4b 48/37=1.297×；`W7-0001…0029`（1 invalid；service/decode 双 TPOT） |
-| W8 | 报告与判据矩阵 | ⬜ | — |
+| W8 | 报告与判据矩阵 | ✅ | 18 格矩阵（`reports/matrix.md`、`figures/fig_w8_matrix.png`）；`W8-0001…0008`；hybrid 三格 B=32 达 32 并发；pure 8k×B=32 N/A（B=20 上界 19.25 GiB）；pool-reopen 修复 + 回归测试；`reports/final.md` / `reproduce.md`；D10 proposed |
 | W9–W11 | 打包：README / 30 秒 demo / 投递 | ⬜ | — |
 
 > `results/INDEX.md` 是全部 run 的索引；阶段结束时把证据 run id 回填到本表。
@@ -571,3 +580,4 @@ python scripts/exp_index.py --check
 - 0.8B 的 `config.json` 里**没有** `use_qk_l2norm_in_kernel`（走 `Qwen3NextGatedDeltaNet` 的类默认），`partial_rotary_factor` / `mrope_section` 也**不在顶层**（在 `rope_parameters` 内）——与 P-17 同类坑。
 | 2026-11-14 | v31 | **W7 完成**：双状态池 + 同一 Scheduler 的 0.8B hybrid 服务化；A1–A6 完成。E1 状态误差 0.83/0.48/0.18%；容量 2.70/6.17/14.0×；P1 7.816×；P2-memory false、P2-latency true；P3 不可归因（纯臂 +10.0%/+4.3%）；内存交叉点 190.8（[128,192]）；E4a 1.498×、E4b 48/37=1.297×。请求级 TPOT 修正为每请求 decode step 累加（P-60），旧 E3 四条与 0013 invalid；正式 E3 证据 `W7-0026…0029`。D9 accepted；`[W7.state]/[W7.hybrid]` calibrated；临时 plan 删除。 |
 | 2026-11-14 | v32 | **TPOT 双口径修正**：service TPOT（wall，含其他请求 prefill）与 decode TPOT（每请求 decode step 累加）并列保留；旧 `W7-0010/0011/0018/0019` 恢复为 service 证据，`W7-0026…0029` 为 decode 证据；`W7-0013` 仍 invalid。P2-latency 记为 service 口径依赖/decode true，P3 两口径均不可归因。W7 只比较状态/容量/延迟/机制，不评价模型质量。累计 27 有效 + 1 invalid。 |
+| 2026-11-17 | v33 | **W8 完成**：18 格判据矩阵（`W8-0001…0008`）与六节报告。hybrid 8k×B=32 实测可达（6.4 GiB、172.1 tok/s、TPOT 38.33 ms），pure 8k×B=32 结构性 N/A（28.1 GiB），上界 B=20（19.25 GiB）；pure 短行改 511（P-31），pure 8k decode 记 N/A（EOS）。顺带定位并修掉 `open_paged_pool` 重开时峰值翻倍的缺陷（历史 paged peak 含该瞬时，只作上限），回归 `test_paged_reopen.py`；预检曾误判为进程竞争，已在 D10 更正。量化不做（D10 out of scope）。`reports/final.md` / `matrix.md` / `reproduce.md`；D10 待用户确认。 |

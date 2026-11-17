@@ -21,6 +21,7 @@
 | W4 分页 KV | seat vs paged，同 1640 MiB | 9 → 28 并发（**3.111×**），internal frag 0.55% | C1–C3 pass；C4 **1.671×** 负结果，按预注册不报吞吐 |
 | W4.5 路径 v2 | serial vs packed / seat vs paged | TTFT p99 **3.760×**；decode **1.040×**（接受线 <1.15，1.0 目标未达）；E4 **2.053×**（both saturated，record-only） | D7 accepted |
 | W7 双状态管理 | 混合 0.8B vs 纯 0.6B，同一 `Scheduler` | 每序列状态误差 0.83/0.48/0.18%（512/2k/8k）；同 1640 MiB 容量比 **2.70/6.17/14.0×**；P1 **7.816×**，交叉点 190.8 prompt token | A1 8/8 token hash、G0 64/64；P2/P3 见下 |
+| W8 判据矩阵 | 2 臂 × 3 ctx × 3 B（18 格） | hybrid 8k×B=32 可达（6.4 GiB、172.1 tok/s、TPOT 38.33 ms）；pure 8k×B=32 结构性 N/A（28.1 GiB），上界 B=20 | 矩阵 `reports/matrix.md`；pure 8k decode 记 N/A（EOS） |
 
 正确性门禁：W1 贪心 64/64（logits `max|Δ|` 2.0e-5）；W4 paged/seat 40/40 token 全等；W4.5 E0 64/64、E2 8/8 token hash 全等；W5 单层 9 个 stage `max|Δ|=0`；W6 分块 prefill 与逐步 decode 自洽（`3.040e-5`）、贪心 64/64；W7 0.8B B=1/B=8 **8/8** token hash、G0 bf16 与 HF **64/64**。
 
@@ -50,14 +51,19 @@
 ![W7 交叉点](figures/fig_w7_crossover.png)
 <sub>W7 · 每序列状态随上下文：prefill 口径交叉点 **190.8 prompt token**（实测区间 [128,192]），8k 处每序列显存 **7.816×**（P1）。`W7-0020…0025`。</sub>
 
+### 18 格判据矩阵：什么时候能跑、什么时候不划算
+
+![W8 矩阵](figures/fig_w8_matrix.png)
+<sub>W8 · decode TPOT 随 ctx × batch：pure 在 22–25 ms 基本平；hybrid 从 B=1 的 ~29 ms 升到 B=32 的 33.5/37.3/38.3 ms（512/2k/8k）。pure 8k decode 因 EOS 记 N/A；pure 8k×B=32 需 28.1 GiB KV，结构性 N/A（上界 B=20）。`W8-0001…0008`。</sub>
+
 负结果：E4a 连续批收益从纯注意力的 1.863× 降到 **1.498×**；P2-memory **不成立**（512 下混合已更省，2.27×）；P2-latency 依赖口径（service 与 decode 两臂方向不一致）；P3 两口径均**不可归因**。
 
 ## 范围与边界
 
-当前版本覆盖 W0–W7：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode；
+当前版本覆盖 W0–W8：Qwen3-0.6B 上的连续批、分页 KV、packed prefill + block-table decode；
 Qwen3.5 的全注意力层、短卷积 + Gated DeltaNet（分块 prefill / 逐步 decode）与 24 层混合模型均已对齐 HF。
 W7 把两代架构放进了同一个 `Scheduler`：分页 KV 覆盖 6/24 全注意力层，常数大小的 `StatePool` 覆盖 18 层线性状态。
-W8（报告与判据矩阵）未开始；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
+W8 收口为 18 格判据矩阵与六节报告（`reports/final.md`）；进度与判据以 [ROADMAP.md](ROADMAP.md) §12 为准。
 
 W4.5 收口后，生产调度器只有 packed group，paged decode 只有 CUDA Triton block-table kernel；
 CPU/MPS 上 paged 直接报错，seat 才是 CPU/MPS 路径。
