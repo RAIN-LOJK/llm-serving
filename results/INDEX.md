@@ -83,5 +83,6 @@
 | W8-0003 | W8 | scenario | 判据矩阵（hybrid 0.8B）：ctx 8192 / B=32 | Qwen/Qwen3.5-0.8B | hybrid | tok_s 172 | unreviewed | completed | 2026-11-17 | 54c1e88 |
 | W8-0004 | W8 | scenario | 判据矩阵（pure 0.6B）：ctx 511 / B=1 | Qwen/Qwen3-0.6B | paged | tok_s 42.8 | unreviewed | completed | 2026-11-17 | ee54402 |
 | W8-0005 | W8 | scenario | 判据矩阵（pure 0.6B）：ctx 511 / B=8 | Qwen/Qwen3-0.6B | paged | tok_s 327 | unreviewed | completed | 2026-11-17 | b66950c |
+| W8-0006 | W8 | scenario | 判据矩阵（pure 0.6B）：ctx 511 / B=32 | Qwen/Qwen3-0.6B | paged | tok_s 1.22e+03 | unreviewed | completed | 2026-11-17 | eadc76a |
 
 _下一步与阶段进度见 [ROADMAP](../ROADMAP.md) §12。_

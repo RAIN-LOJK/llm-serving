@@ -1,0 +1,5 @@
+run_id: W8-0006
+status: completed
+device_class: measure-cuda
+rows: 805 (errors: 0)
+summary: results/W8/0006-matrix-pure-511-b32/summary.json

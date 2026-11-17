@@ -1,0 +1,583 @@
+{
+  "schema_version": 1,
+  "run_id": "W8-0006",
+  "generated_at": "2026-11-17T01:25:27+00:00",
+  "type": "scenario",
+  "device_class": "measure-cuda",
+  "n_rows": 805,
+  "n_errors": 0,
+  "overall": {
+    "ttft_ms": {
+      "n": 160,
+      "median": 147.94635213911533,
+      "p95": 206.4438983798027,
+      "min": 89.9305772036314,
+      "max": 206.4438983798027,
+      "mean": 147.85931035876274,
+      "cv": 0.3838980669331101
+    },
+    "tpot_ms": {
+      "n": 160,
+      "median": 24.277047187324584,
+      "p95": 24.434332479642134,
+      "min": 24.00594568628026,
+      "max": 24.434332479642134,
+      "mean": 24.277337777145267,
+      "cv": 0.0062082119757810505
+    },
+    "tpot_service_ms": {
+      "n": 160,
+      "median": 25.0809708698176,
+      "p95": 25.644115810319196,
+      "min": 24.49817062304245,
+      "max": 25.645195293848907,
+      "mean": 25.13256053647437,
+      "cv": 0.01513035821479193
+    },
+    "tpot_decode_ms": {
+      "n": 160,
+      "median": 24.277047187324584,
+      "p95": 24.434332479642134,
+      "min": 24.00594568628026,
+      "max": 24.434332479642134,
+      "mean": 24.277337777145267,
+      "cv": 0.0062082119757810505
+    },
+    "prefill_ms": {
+      "n": 160,
+      "median": 89.08331673592329,
+      "p95": 92.21277944743633,
+      "min": 87.16054446995258,
+      "max": 92.21277944743633,
+      "mean": 89.27246518433094,
+      "cv": 0.017570333452979602
+    },
+    "decode_ms": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "e2e_ms": {
+      "n": 160,
+      "median": 3344.8510337620974,
+      "p95": 3374.615363776684,
+      "min": 3293.499082326889,
+      "max": 3374.856987968087,
+      "mean": 3339.694498491008,
+      "cv": 0.006916546867709821
+    },
+    "peak_mem_mb": {
+      "n": 160,
+      "median": 3614.33251953125,
+      "p95": 3614.33251953125,
+      "min": 3614.33251953125,
+      "max": 3614.33251953125,
+      "mean": 3614.33251953125,
+      "cv": 0.0
+    },
+    "driver_mem_mb": {
+      "n": 160,
+      "median": 4323.125,
+      "p95": 4323.125,
+      "min": 4323.125,
+      "max": 4323.125,
+      "mean": 4323.125,
+      "cv": 0.0
+    },
+    "weights_mb": {
+      "n": 160,
+      "median": 1136.875,
+      "p95": 1136.875,
+      "min": 1136.875,
+      "max": 1136.875,
+      "mean": 1136.875,
+      "cv": 0.0
+    },
+    "kv_mb": {
+      "n": 160,
+      "median": 2275.0,
+      "p95": 2275.0,
+      "min": 2275.0,
+      "max": 2275.0,
+      "mean": 2275.0,
+      "cv": 0.0
+    },
+    "state_mb": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "conv_mb": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "cache_mb": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "cache_prefill_mb": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "mem_delta_mb": {
+      "n": 0,
+      "median": null,
+      "p95": null,
+      "min": null,
+      "max": null,
+      "mean": null,
+      "cv": null
+    },
+    "out_tokens": {
+      "n": 160,
+      "median": 128.0,
+      "p95": 128.0,
+      "min": 128.0,
+      "max": 128.0,
+      "mean": 128.0,
+      "cv": 0.0
+    }
+  },
+  "groups": [
+    {
+      "model": "Qwen/Qwen3-0.6B",
+      "context": 639,
+      "batch": 1,
+      "n": 160,
+      "n_errors": 0,
+      "ttft_ms": {
+        "n": 160,
+        "median": 147.94635213911533,
+        "p95": 206.4438983798027,
+        "min": 89.9305772036314,
+        "max": 206.4438983798027,
+        "mean": 147.85931035876274,
+        "cv": 0.3838980669331101
+      },
+      "tpot_ms": {
+        "n": 160,
+        "median": 24.277047187324584,
+        "p95": 24.434332479642134,
+        "min": 24.00594568628026,
+        "max": 24.434332479642134,
+        "mean": 24.277337777145267,
+        "cv": 0.0062082119757810505
+      },
+      "tpot_service_ms": {
+        "n": 160,
+        "median": 25.0809708698176,
+        "p95": 25.644115810319196,
+        "min": 24.49817062304245,
+        "max": 25.645195293848907,
+        "mean": 25.13256053647437,
+        "cv": 0.01513035821479193
+      },
+      "tpot_decode_ms": {
+        "n": 160,
+        "median": 24.277047187324584,
+        "p95": 24.434332479642134,
+        "min": 24.00594568628026,
+        "max": 24.434332479642134,
+        "mean": 24.277337777145267,
+        "cv": 0.0062082119757810505
+      },
+      "prefill_ms": {
+        "n": 160,
+        "median": 89.08331673592329,
+        "p95": 92.21277944743633,
+        "min": 87.16054446995258,
+        "max": 92.21277944743633,
+        "mean": 89.27246518433094,
+        "cv": 0.017570333452979602
+      },
+      "decode_ms": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "e2e_ms": {
+        "n": 160,
+        "median": 3344.8510337620974,
+        "p95": 3374.615363776684,
+        "min": 3293.499082326889,
+        "max": 3374.856987968087,
+        "mean": 3339.694498491008,
+        "cv": 0.006916546867709821
+      },
+      "peak_mem_mb": {
+        "n": 160,
+        "median": 3614.33251953125,
+        "p95": 3614.33251953125,
+        "min": 3614.33251953125,
+        "max": 3614.33251953125,
+        "mean": 3614.33251953125,
+        "cv": 0.0
+      },
+      "driver_mem_mb": {
+        "n": 160,
+        "median": 4323.125,
+        "p95": 4323.125,
+        "min": 4323.125,
+        "max": 4323.125,
+        "mean": 4323.125,
+        "cv": 0.0
+      },
+      "weights_mb": {
+        "n": 160,
+        "median": 1136.875,
+        "p95": 1136.875,
+        "min": 1136.875,
+        "max": 1136.875,
+        "mean": 1136.875,
+        "cv": 0.0
+      },
+      "kv_mb": {
+        "n": 160,
+        "median": 2275.0,
+        "p95": 2275.0,
+        "min": 2275.0,
+        "max": 2275.0,
+        "mean": 2275.0,
+        "cv": 0.0
+      },
+      "state_mb": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "conv_mb": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "cache_mb": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "cache_prefill_mb": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "mem_delta_mb": {
+        "n": 0,
+        "median": null,
+        "p95": null,
+        "min": null,
+        "max": null,
+        "mean": null,
+        "cv": null
+      },
+      "out_tokens": {
+        "n": 160,
+        "median": 128.0,
+        "p95": 128.0,
+        "min": 128.0,
+        "max": 128.0,
+        "mean": 128.0,
+        "cv": 0.0
+      }
+    }
+  ],
+  "stability": {
+    "ctx639": {
+      "n_prompts": 1,
+      "ttft_ms_cv_median": 0.3838980669331101,
+      "ttft_ms_cv_max": 0.3838980669331101,
+      "ttft_ms_n": 1,
+      "tpot_ms_cv_median": 0.0062082119757810505,
+      "tpot_ms_cv_max": 0.0062082119757810505,
+      "tpot_ms_n": 1,
+      "e2e_ms_cv_median": 0.006916546867709821,
+      "e2e_ms_cv_max": 0.006916546867709821,
+      "e2e_ms_n": 1
+    }
+  },
+  "by_prompt": [
+    {
+      "model": "Qwen/Qwen3-0.6B",
+      "prompt": "ctx511",
+      "bucket": null,
+      "n": 160,
+      "ttft_ms": {
+        "n": 160,
+        "median": 147.94635213911533,
+        "p95": 206.4438983798027,
+        "min": 89.9305772036314,
+        "max": 206.4438983798027,
+        "mean": 147.85931035876274,
+        "cv": 0.3838980669331101
+      },
+      "tpot_ms": {
+        "n": 160,
+        "median": 24.277047187324584,
+        "p95": 24.434332479642134,
+        "min": 24.00594568628026,
+        "max": 24.434332479642134,
+        "mean": 24.277337777145267,
+        "cv": 0.0062082119757810505
+      },
+      "out_tokens": {
+        "n": 160,
+        "median": 128.0,
+        "p95": 128.0,
+        "min": 128.0,
+        "max": 128.0,
+        "mean": 128.0,
+        "cv": 0.0
+      }
+    }
+  ],
+  "baseline": {
+    "run_id": null,
+    "found": false
+  },
+  "warnings": [
+    "ttft_ms CV=0.384 > 0.10 in bucket ctx639; rerun the whole config before citing",
+    "no paired baseline run_id; mechanism conclusions are incomplete"
+  ],
+  "acceptance": [
+    {
+      "name": "record_only",
+      "status": "recorded"
+    }
+  ],
+  "tokens": {
+    "ctx511": "3089d4ea11277d95e55d308f901b06bc2541973054b94a4c598f32bb69ee586e"
+  },
+  "key_metric": {
+    "name": "tok_s",
+    "value": 1222.2169415652404
+  },
+  "protocol": {
+    "warmup": 3,
+    "repeats": 5,
+    "timer": "auto",
+    "max_new_tokens": 128,
+    "prompt_sha256": null,
+    "dtype": "bfloat16",
+    "device_class": "measure-cuda",
+    "attn_prefill": "flash-attn-varlen",
+    "attn_decode": "paged-triton",
+    "prefill_mode": "packed",
+    "max_prefill_tokens": 8192,
+    "decode": "triton",
+    "trace_sha256": "99c43c6fa55032b97061f0de172ea94210e0c4f826b865641beaa7b3ef964b56",
+    "max_batch": 32,
+    "block_size": 16,
+    "kv_blocks": 1300,
+    "workload_sha256": "99c43c6fa55032b97061f0de172ea94210e0c4f826b865641beaa7b3ef964b56"
+  },
+  "throughput": {
+    "n_traces": 5,
+    "tok_s": {
+      "n": 5,
+      "median": 1222.2169415652404,
+      "p95": 1234.4130688182768,
+      "min": 1213.6810580723582,
+      "max": 1234.4130688182768,
+      "mean": 1221.7304573843014,
+      "cv": 0.005883527917293229
+    },
+    "tok_s_active": {
+      "n": 5,
+      "median": 1256.3916667762117,
+      "p95": 1269.8843505060527,
+      "min": 1246.907689188323,
+      "max": 1269.8843505060527,
+      "mean": 1255.863470647253,
+      "cv": 0.006330779186915648
+    },
+    "decode_only_tok_s": {
+      "n": 5,
+      "median": 1318.295603710294,
+      "p95": 1333.1845171468763,
+      "min": 1309.5073246037352,
+      "max": 1333.1845171468763,
+      "mean": 1318.281358262311,
+      "cv": 0.006357520275759028
+    },
+    "req_s": {
+      "n": 5,
+      "median": 9.54856985597844,
+      "p95": 9.643852100142787,
+      "min": 9.481883266190298,
+      "max": 9.643852100142787,
+      "mean": 9.544769198314855,
+      "cv": 0.005883527917293229
+    },
+    "makespan_s": {
+      "n": 5,
+      "median": 3.351287,
+      "p95": 3.374857,
+      "min": 3.318176,
+      "max": 3.374857,
+      "mean": 3.352737,
+      "cv": 0.005858965610894657
+    },
+    "offered_rate": null,
+    "achieved_rate": {
+      "n": 5,
+      "median": 9.54856985597844,
+      "p95": 9.643852100142787,
+      "min": 9.481883266190298,
+      "max": 9.643852100142787,
+      "mean": 9.544769198314855,
+      "cv": 0.005883527917293229
+    },
+    "saturated": false,
+    "queue_depth_at_last_arrival": {
+      "n": 5,
+      "median": 0.0,
+      "p95": 0.0,
+      "min": 0.0,
+      "max": 0.0,
+      "mean": 0.0,
+      "cv": 0.0
+    },
+    "peak_concurrency": 32.0,
+    "analytic_straggler_ratio": 1.0
+  },
+  "latency": {
+    "ttft_ms": {
+      "p50": 92.68557466566563,
+      "p95": 206.4438983798027,
+      "p99": 206.4438983798027
+    },
+    "queue_ms": {
+      "p50": 0.4643350839614868,
+      "p95": 117.70759895443916,
+      "p99": 117.87113547325134
+    },
+    "prefill_ms": {
+      "p50": 88.69857341051102,
+      "p95": 92.21277944743633,
+      "p99": 92.21277944743633
+    },
+    "pack_wait_ms": {
+      "p50": 0.1982804387807846,
+      "p95": 0.3151949495077133,
+      "p99": 0.33424049615859985
+    },
+    "prefill_shared_ms": {
+      "p50": 88.69857341051102,
+      "p95": 92.21277944743633,
+      "p99": 92.21277944743633
+    },
+    "queue_share_p99": 0.5709596476249413,
+    "decomposed": true
+  },
+  "steps": {
+    "by_active": [
+      {
+        "active": 0,
+        "n": 5,
+        "step_ms": 25.710881128907204,
+        "prefill_ms": 0.0,
+        "decode_event_ms": 24.01422691345215,
+        "host_gap_ms": 1.6966542154550552,
+        "prefill_groups": 0.0,
+        "pack_wait_ms": 0.0
+      },
+      {
+        "active": 16,
+        "n": 10,
+        "step_ms": 70.61707340180874,
+        "prefill_ms": 45.315664075315,
+        "decode_event_ms": 24.109773063659667,
+        "host_gap_ms": 1.1916362628340722,
+        "prefill_groups": 0.5,
+        "pack_wait_ms": 1.6437292098999023
+      },
+      {
+        "active": 32,
+        "n": 625,
+        "step_ms": 25.44605993926525,
+        "prefill_ms": 0.703308817744255,
+        "decode_event_ms": 24.279735397338868,
+        "host_gap_ms": 0.4630157241821289,
+        "prefill_groups": 0.008,
+        "pack_wait_ms": 0.021790221333503723
+      }
+    ]
+  },
+  "consistency": {
+    "decomposed_rate": 1.0,
+    "ttft_minus_queue_prefill_max_ms": 0.0,
+    "trace_sha256_consistent": true,
+    "n_trace_hashes": 1
+  },
+  "memory": {
+    "kv_mb": 2275.0,
+    "workspace_mb": 0.0,
+    "kv_total_mb": 2275.0,
+    "seat_unused_mb": null,
+    "frag_internal": 0.012976886371907526,
+    "reservation_slack": 0.004687499999999956,
+    "seat_row_slack": null,
+    "capacity_per_gib": 14.403516483516484,
+    "bytes_per_active_request": 74547200.0
+  },
+  "capacity": {
+    "block_size": 16,
+    "capacity_per_gib": 14.403516483516484,
+    "context_tokens": 511,
+    "frag_internal": 0.012976886371907526,
+    "kv_blocks": 1300,
+    "kv_mb": 2275.0,
+    "kv_total_mb": 2275.0,
+    "kv_used_mb": 2227.75,
+    "max_batch": 32,
+    "peak_concurrency": 32,
+    "reservation_slack": 0.004687499999999956,
+    "seat_unused_mb": null,
+    "state_total_mb": 2275.0,
+    "state_used_mb": 2227.75,
+    "workload_sha256": "99c43c6fa55032b97061f0de172ea94210e0c4f826b865641beaa7b3ef964b56",
+    "workspace_mb": 0.0
+  }
+}
