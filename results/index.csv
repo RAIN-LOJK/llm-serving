@@ -78,3 +78,4 @@ W8-0003,W8,scenario,判据矩阵（hybrid 0.8B）：ctx 8192 / B=32,Qwen/Qwen3.5
 W8-0004,W8,scenario,判据矩阵（pure 0.6B）：ctx 511 / B=1,Qwen/Qwen3-0.6B,paged,tok_s 42.8,unreviewed,completed,2026-11-17,ee54402,results/W8/0004-matrix-pure-511-b1
 W8-0005,W8,scenario,判据矩阵（pure 0.6B）：ctx 511 / B=8,Qwen/Qwen3-0.6B,paged,tok_s 327,unreviewed,completed,2026-11-17,b66950c,results/W8/0005-matrix-pure-511-b8
 W8-0006,W8,scenario,判据矩阵（pure 0.6B）：ctx 511 / B=32,Qwen/Qwen3-0.6B,paged,tok_s 1.22e+03,unreviewed,completed,2026-11-17,eadc76a,results/W8/0006-matrix-pure-511-b32
+W8-0007,W8,scenario,判据矩阵（pure 0.6B）：ctx 2048 / B=32,Qwen/Qwen3-0.6B,paged,tok_s 978,unreviewed,completed,2026-11-17,4ba82f8,results/W8/0007-matrix-pure-2k-b32
