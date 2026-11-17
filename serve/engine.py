@@ -831,6 +831,9 @@ class MiniLLMEngine:
                 "dense oracle lives in tests/reference/paged.py."
             )
         max_position = int(self.max_position if max_position is None else max_position)
+        if self._paged_pool is not None:
+            self.close_pool()
+
         self._paged_pool = PagedPool(
             self.model.config.n_layer,
             int(kv_blocks),
